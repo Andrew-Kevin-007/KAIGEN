@@ -647,11 +647,14 @@ fn retry_of_all_three_legs_is_one_ordered_chain() {
     ctx();
     let _ = k.retry_payout(accounts(2));
     let r = receipts_text();
-    let order = ["Transfer", "on_near_payout", "storage_deposit", "ft_transfer", "on_usdc_paid", "ft_balance_of", "on_usdc_balance"]
-        .map(|n| pos(&r, n));
+    // With a balance read pending nothing recorded in USDC is paid blind: the read settles all of it, so the
+    // chain is the NEAR transfer and its resolve, then the read and its callback.
+    let order = ["Transfer", "on_near_payout", "ft_balance_of", "on_usdc_balance"].map(|n| pos(&r, n));
     assert!(order.windows(2).all(|w| w[0] < w[1]), "{r}");
+    assert!(!r.contains("ft_transfer") && !r.contains("storage_deposit"), "{r}");
     let owed = k.owed(accounts(2));
-    assert_eq!((owed.near.0, owed.usdc.0, owed.usdc_unread), (0, 0, false));
+    // The NEAR is on its way; the unverified USDC stays held until the read settles it.
+    assert_eq!((owed.near.0, owed.usdc.0, owed.usdc_unread), (0, PAID, true));
 }
 
 #[test]
@@ -780,4 +783,210 @@ fn secp256k1_signature_over_keccak_is_rejected() {
     let mut bytes = sig.to_bytes().to_vec();
     bytes.push(rid.to_byte());
     let _ = k.claim("secp256k1-omen".into(), accounts(2), bytes.into());
+}
+
+// --- K8: two claims close together cannot be paid the same balance, and a failed transfer is no debt until verified ---
+//
+// `claim` reads the token balance and a LATER callback pays it, so two claims whose reads land before the first
+// transfer does both see the full balance. The contract reserves what it has scheduled (`usdc_in_flight`), and a
+// transfer that fails is held as an UNVERIFIED amount: the retry reads the balance again and pays what the token
+// really holds, so a phantom debt (tokens already paid to someone else) clears instead of hiding later top-ups.
+
+const TOP_UP: u128 = 750_000;
+
+fn receiver_is(text: &str, who: &AccountId) -> bool {
+    text.contains(&format!("\"receiver_id\":\"{who}\""))
+}
+
+#[test]
+fn two_payouts_close_together_cannot_both_be_paid_the_same_balance() {
+    let mut k = usdc_registry();
+    ctx_init();
+    k.on_usdc_balance(accounts(2), Ok(U128(PAID)));
+    k.on_usdc_balance(accounts(3), Ok(U128(PAID))); // read before the first transfer landed: the same balance
+    let r = receipts_text();
+    assert_eq!(r.matches("ft_transfer").count(), 1, "only one transfer may be scheduled: {r}");
+    assert!(receiver_is(&r, &accounts(2)) && !r.contains(&accounts(3).to_string()), "{r}");
+    assert_eq!(k.usdc_in_flight, PAID);
+}
+
+#[test]
+fn owed_and_in_flight_usdc_both_stay_out_of_reach_of_a_later_claim() {
+    let mut k = usdc_registry();
+    k.record_owed(&accounts(2), 0, 3_000_000);
+    ctx_init();
+    k.on_usdc_balance(accounts(3), Ok(U128(PAID))); // 2 000 000 is free, and goes in flight
+    k.on_usdc_balance(accounts(4), Ok(U128(PAID))); // nothing is free any more
+    let r = receipts_text();
+    assert_eq!(r.matches("ft_transfer").count(), 1, "{r}");
+    assert!(r.contains("\"amount\":\"2000000\"") && !r.contains(&accounts(4).to_string()), "{r}");
+    assert_eq!(k.usdc_in_flight, 2_000_000);
+}
+
+#[test]
+fn a_settled_payout_releases_its_reservation_whether_it_succeeded_or_not() {
+    let mut k = usdc_registry();
+    ctx_init();
+    k.on_usdc_balance(accounts(2), Ok(U128(PAID)));
+    assert_eq!(k.usdc_in_flight, PAID);
+    ctx_callback(PromiseResult::Successful(vec![]));
+    k.on_usdc_paid(accounts(2), U128(PAID));
+    assert_eq!(k.usdc_in_flight, 0, "paid");
+    ctx_init();
+    k.on_usdc_balance(accounts(3), Ok(U128(PAID)));
+    assert_eq!(k.usdc_in_flight, PAID);
+    ctx_callback(PromiseResult::Failed);
+    k.on_usdc_paid(accounts(3), U128(PAID));
+    assert_eq!(k.usdc_in_flight, 0, "failed: it is owed now, not in flight");
+}
+
+#[test]
+fn a_transfer_that_fails_is_held_as_unverified_debt() {
+    let mut k = usdc_registry();
+    ctx_callback(PromiseResult::Failed);
+    k.on_usdc_paid(accounts(2), U128(PAID));
+    let owed = k.owed(accounts(2));
+    assert_eq!(owed.usdc.0, PAID, "still protected from a later claimant's sweep");
+    assert!(owed.usdc_unread, "but not trusted: the retry must look at the token balance first");
+}
+
+#[test]
+fn retrying_an_unverified_amount_reads_the_balance_and_does_not_pay_it_blind() {
+    let mut k = usdc_registry();
+    ctx_callback(PromiseResult::Failed);
+    k.on_usdc_paid(accounts(2), U128(PAID));
+    ctx();
+    let _ = k.retry_payout(accounts(2));
+    let r = receipts_text();
+    assert!(r.contains("ft_balance_of") && r.contains("on_usdc_balance"), "{r}");
+    assert!(!r.contains("ft_transfer") && !r.contains("storage_deposit"), "nothing is sent before the read: {r}");
+    let owed = k.owed(accounts(2));
+    assert_eq!((owed.usdc.0, owed.usdc_unread), (PAID, true), "still held against sweeps until the read settles it");
+    // A second call before the read lands only repeats the read: it has no way to pay.
+    ctx();
+    let _ = k.retry_payout(accounts(2));
+    let again = receipts_text();
+    assert!(!again.contains("ft_transfer") && !again.contains("storage_deposit"), "{again}");
+}
+
+#[test]
+fn a_transfer_that_failed_for_a_real_reason_is_paid_after_the_re_read() {
+    let mut k = usdc_registry();
+    ctx_callback(PromiseResult::Failed);
+    k.on_usdc_paid(accounts(2), U128(PAID)); // say the token refused for a while: the USDC is still here
+    ctx();
+    let _ = k.retry_payout(accounts(2));
+    ctx_init();
+    k.on_usdc_balance(accounts(2), Ok(U128(PAID))); // the read confirms it
+    let r = receipts_text();
+    assert!(r.contains("\"amount\":\"5000000\"") && receiver_is(&r, &accounts(2)), "{r}");
+    let owed = k.owed(accounts(2));
+    assert_eq!((owed.usdc.0, owed.usdc_unread), (0, false), "the record is spent by the payout it triggered");
+    assert_eq!(k.usdc_in_flight, PAID);
+}
+
+#[test]
+fn a_phantom_debt_clears_at_the_re_read_and_hides_no_later_top_up() {
+    let mut k = usdc_registry();
+    ctx_init();
+    k.on_usdc_balance(accounts(2), Ok(U128(PAID)));
+    ctx_callback(PromiseResult::Successful(vec![]));
+    k.on_usdc_paid(accounts(2), U128(PAID)); // the first payout landed: the token holds nothing now
+    ctx_init();
+    k.on_usdc_balance(accounts(3), Ok(U128(PAID))); // a read taken before that transfer landed
+    ctx_callback(PromiseResult::Failed);
+    k.on_usdc_paid(accounts(3), U128(PAID)); // the token had nothing to send
+    assert_eq!(k.owed(accounts(3)).usdc.0, PAID, "recorded, as unverified");
+
+    ctx();
+    let _ = k.retry_payout(accounts(3));
+    ctx_init();
+    k.on_usdc_balance(accounts(3), Ok(U128(0))); // the token holds nothing
+    let o = k.owed(accounts(3));
+    assert_eq!((o.near.0, o.usdc.0, o.usdc_unread), (0, 0, false), "the phantom is gone");
+    assert!(logged("owed_reconciled"), "{:?}", get_logs());
+    assert!(get_created_receipts().is_empty());
+
+    ctx_init();
+    k.on_usdc_balance(accounts(4), Ok(U128(TOP_UP))); // a top-up arrives and the next claim takes all of it
+    let r = receipts_text();
+    assert!(r.contains(&format!("\"amount\":\"{TOP_UP}\"")) && receiver_is(&r, &accounts(4)), "{r}");
+}
+
+#[test]
+fn a_re_read_never_pays_more_than_the_token_holds_beyond_what_others_are_owed() {
+    let mut k = usdc_registry();
+    k.record_owed(&accounts(3), 0, 1_000_000); // a real, verified debt to someone else
+    ctx_callback(PromiseResult::Failed);
+    k.on_usdc_paid(accounts(2), U128(PAID)); // unverified: the token now holds 4 000 000 in total
+    ctx();
+    let _ = k.retry_payout(accounts(2));
+    ctx_init();
+    k.on_usdc_balance(accounts(2), Ok(U128(4_000_000)));
+    let r = receipts_text();
+    assert!(r.contains("\"amount\":\"3000000\""), "4 000 000 held minus 1 000 000 owed to the other claimant: {r}");
+    assert!(logged("owed_reconciled"), "the recorded 5 000 000 was more than there was: {:?}", get_logs());
+    assert_eq!(k.owed(accounts(3)).usdc.0, 1_000_000, "the other claimant's debt is untouched");
+}
+
+#[test]
+fn a_verified_retry_reserves_its_amount_while_it_is_in_flight() {
+    let mut k = usdc_registry();
+    k.record_owed(&accounts(2), 0, PAID); // recorded from a balance read, not from a failed transfer
+    ctx();
+    let _ = k.retry_payout(accounts(2));
+    assert_eq!(k.usdc_in_flight, PAID);
+    ctx_init();
+    k.on_usdc_balance(accounts(3), Ok(U128(PAID)));
+    assert!(get_created_receipts().is_empty(), "the amount being retried is not free for another claim");
+}
+
+#[test]
+fn the_balance_callback_still_fits_the_gas_it_is_given_with_every_record_in_play() {
+    // The callback now also takes the claimant's USDC record and sums the others', so it reads more state
+    // than it used to. Measured in the unit-test VM, which charges the real fees. `used_gas` counts the gas
+    // attached to the calls it schedules, so it is what `ON_USDC_BALANCE_GAS` has to cover.
+    let mut k = usdc_registry();
+    for n in 3..=5 {
+        k.record_owed(&accounts(n), 1, 1_000_000);
+    }
+    ctx_callback(PromiseResult::Failed);
+    k.on_usdc_paid(accounts(2), U128(PAID)); // an unverified record for the claimant, who is paid below
+    ctx_init();
+    k.on_usdc_balance(accounts(2), Ok(U128(PAID * 2)));
+    let used = env::used_gas();
+    assert!(get_created_receipts().iter().any(|r| format!("{:?}", r.actions).contains("FunctionCall")), "a transfer was scheduled");
+    println!("on_usdc_balance used {} Tgas of {}", used.as_gas() / 10u64.pow(12), ON_USDC_BALANCE_GAS.as_gas() / 10u64.pow(12));
+    assert!(used <= ON_USDC_BALANCE_GAS, "used {} gas, given {}", used.as_gas(), ON_USDC_BALANCE_GAS.as_gas());
+}
+
+#[test]
+fn a_second_claim_right_after_the_first_cannot_pay_out_the_same_near() {
+    // The runtime takes a transfer out of the contract's balance when it creates the receipt, so a second
+    // claim in the same or the next block sees only what is left. This pins that the NEAR leg relies on it.
+    let mut k = standard();
+    let sig = ed_sig(&k, "ed25519-omen", &accounts(2), &ed_key());
+    let _ = k.claim("ed25519-omen".into(), accounts(2), sig);
+    let pays = |who: AccountId| {
+        get_created_receipts().iter().filter(|x| x.receiver_id == who && format!("{:?}", x.actions).contains("Transfer")).count()
+    };
+    assert_eq!(pays(accounts(2)), 1, "the first claim pays");
+    assert_eq!(k.spendable_near(), 0, "and takes everything that could be spent");
+    let sig = ed_sig(&k, "small-curve-omen", &accounts(3), &EdKey::from_bytes(&[3u8; 32]));
+    let _ = k.claim("small-curve-omen".into(), accounts(3), sig);
+    assert_eq!(pays(accounts(3)), 0, "the second claim has nothing left to pay out");
+}
+
+#[test]
+fn zz_scratch_gas_probe() {
+    for (label, n_owed) in [("no records", 0usize), ("3 owed records", 3)] {
+        let mut k = usdc_registry();
+        for n in 3..3 + n_owed {
+            k.record_owed(&accounts(n), 1, 1_000_000);
+        }
+        ctx_init();
+        let before = env::used_gas().as_gas();
+        k.on_usdc_balance(accounts(2), Ok(U128(PAID * 2)));
+        println!("PROBE {label}: used {} Tgas (delta {:.2})", env::used_gas().as_gas() / 10u64.pow(12), (env::used_gas().as_gas() - before) as f64 / 1e12);
+    }
 }

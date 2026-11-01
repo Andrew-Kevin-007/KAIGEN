@@ -85,7 +85,9 @@ struct Omen {
 struct Owed {
     near: u128,
     usdc: u128,
-    /// The USDC balance read failed, so no amount is known: what is owed is the read, repeated.
+    /// The USDC amount is not to be trusted, so what is owed is a fresh balance read, repeated: set when the
+    /// read itself failed (no amount known), and when an `ft_transfer` failed (the amount may already have
+    /// gone to another claimant whose read raced this one). `usdc` is then only a hold against sweeps.
     usdc_unread: bool,
 }
 
@@ -129,7 +131,8 @@ pub struct BountyView {
 pub struct OwedView {
     pub near: U128,
     pub usdc: U128,
-    /// True while a failed USDC balance read is waiting for `retry_payout` to repeat it.
+    /// True while `retry_payout` has to read the USDC balance again before it pays any USDC: after a failed
+    /// balance read, or a failed USDC transfer (then `usdc` is held, and settled by that read).
     pub usdc_unread: bool,
 }
 
@@ -149,6 +152,10 @@ pub struct Kizashi {
     usdc: Option<AccountId>,
     /// Failed payouts by claimant. One entry per claimant, so at most one per claim: 8 at most.
     owed: IterableMap<AccountId, Owed>,
+    /// USDC committed to `ft_transfer`s that have been scheduled and have not reported back yet. The token
+    /// balance still includes it until the transfer lands, so a second claim that reads the balance in that
+    /// window must not pay it again: it takes the balance minus this, minus what is owed to others.
+    usdc_in_flight: u128,
 }
 
 #[near]
@@ -186,7 +193,7 @@ impl Kizashi {
             require!(prev.is_none(), "duplicate omen id");
             require!(!duplicate_key, "duplicate omen key");
         }
-        Self { omens: map, era: Era::Calm, usdc, owed: IterableMap::new(b"w") }
+        Self { omens: map, era: Era::Calm, usdc, owed: IterableMap::new(b"w"), usdc_in_flight: 0 }
     }
 
     /// Prove an omen is dead. Anyone may call; the signature is the only authority.
@@ -198,6 +205,13 @@ impl Kizashi {
     /// balance read lands. Later claims get only what was added since. Both legs report with a
     /// `payout_ok` or `payout_failed` event; a failed leg is held as owed and `retry_payout` pays it
     /// (a failed balance read is held as a read to repeat).
+    ///
+    /// Two claims close together cannot be paid the same money. NEAR: the runtime takes a transfer out of
+    /// the balance when it creates the receipt, so the next claim sees what is left. USDC: the balance is
+    /// only known in a later callback, so that callback reserves what it schedules (`usdc_in_flight`) and
+    /// the next one takes the balance minus that, minus what is owed to others. A transfer that fails
+    /// anyway (a read that was already stale) is held as an unverified amount that the retry re-reads, so it
+    /// cannot become a debt that nothing can pay or hide a later top-up.
     pub fn claim(&mut self, omen_id: String, claimant: AccountId, signature: Base64VecU8) -> Promise {
         let omen = self.omens.get(&omen_id).unwrap_or_else(|| env::panic_str("unknown omen"));
         require!(omen.death.is_none(), "omen already dead");
@@ -265,12 +279,26 @@ impl Kizashi {
             emit_payout_failed("usdc", &claimant, None, "ft_balance_of failed");
             return;
         };
-        // USDC already owed to an earlier claimant stays for them.
-        let amount = balance.0.saturating_sub(self.owed_total().usdc);
+        // This read settles whatever USDC this claimant had on record, so the record is spent here, whatever
+        // happens below: the balance includes those tokens if they are still held, and the claimant is paid
+        // from it. What the read may take is the balance minus what is held for OTHER claimants (their owed
+        // records) and minus what other payouts have already scheduled (`usdc_in_flight`): a second claim
+        // whose read landed before the first transfer did sees the same balance and must not pay it again.
+        let recorded = self.take_usdc_record(&claimant);
+        let held_back = self.owed_total().usdc.saturating_add(self.usdc_in_flight);
+        let amount = balance.0.saturating_sub(held_back);
+        if recorded > amount {
+            // A recorded amount the token no longer holds is no debt (it was paid to someone else, or lost to
+            // a stale read). It is dropped, and the drop is logged: nothing leaves the books silently.
+            emit(
+                "owed_reconciled",
+                serde_json::json!({ "asset": "usdc", "claimant": claimant, "recorded": U128(recorded), "held": U128(amount) }),
+            );
+        }
         if amount == 0 {
             return;
         }
-        match self.usdc_steps(&claimant, amount) {
+        match self.start_usdc_payout(&claimant, amount) {
             Some(steps) => drop(chain(steps)), // dropping a promise schedules it
             None => {
                 self.record_owed(&claimant, 0, amount);
@@ -281,33 +309,50 @@ impl Kizashi {
 
     #[private]
     pub fn on_usdc_paid(&mut self, claimant: AccountId, amount: U128) {
+        self.usdc_in_flight = self.usdc_in_flight.saturating_sub(amount.0);
         if previous_promise_succeeded() {
             emit_payout_ok("usdc", &claimant, amount.0);
         } else {
+            // The token refused the transfer. Either for a real reason (the tokens are still here), or because
+            // the balance this payout was computed from was already stale and someone else was paid them (then
+            // nothing is owed). Nothing here can tell which. So the amount is held, which keeps it from a later
+            // claimant's sweep, but marked unverified: `retry_payout` reads the balance again and pays what the
+            // token really holds.
             self.record_owed(&claimant, 0, amount.0);
+            self.record_unread(&claimant);
             emit_payout_failed("usdc", &claimant, Some(amount.0), "ft_transfer failed");
         }
     }
 
     /// Pay what a failed payout left owed. No key, no caller check: anyone may call it, and it only ever
-    /// pays `claimant` the amount recorded for them. The record is cleared before anything is sent, so
-    /// a second call cannot pay twice; a leg that fails again is put back by its resolve callback.
-    /// NEAR is paid only down to the storage reserve and margin, so a part may stay owed. A failed USDC
-    /// balance read is repeated last, and its callback pays the USDC the contract then holds beyond
-    /// what is owed to others.
+    /// pays `claimant` what is on record for them. A paid amount is cleared from the record before anything
+    /// is sent, so a second call cannot pay twice; a leg that fails again is put back by its resolve callback.
+    /// NEAR is paid only down to the storage reserve and margin, so a part may stay owed.
+    ///
+    /// USDC is paid as recorded only when a balance read put the amount on record (the contract had no spare
+    /// NEAR for the registration then). When `usdc_unread` is set, which a failed balance read or a failed
+    /// `ft_transfer` does, nothing recorded is trusted: the balance is read again, last, and its callback pays
+    /// the USDC the token really holds beyond what is owed to others. Until that callback lands the recorded
+    /// amount stays held against other claimants' sweeps, and a repeat call only repeats the read. A recorded
+    /// amount the token no longer holds (a payout that raced another one) is dropped there and logged as
+    /// `owed_reconciled`.
     pub fn retry_payout(&mut self, claimant: AccountId) -> Promise {
         let owed = self.owed.get(&claimant).cloned().unwrap_or_else(|| env::panic_str("nothing owed to this account"));
         let near = owed.near.min(self.payable_near());
         require!(near > 0 || owed.usdc > 0 || owed.usdc_unread, "owed NEAR has not returned to the contract yet");
         let read_usdc = self.usdc.clone().filter(|_| owed.usdc_unread);
-        let usdc_calls = (owed.usdc > 0).then(|| {
-            self.usdc_steps(&claimant, owed.usdc)
+        let usdc_calls = (owed.usdc > 0 && !owed.usdc_unread).then(|| {
+            self.start_usdc_payout(&claimant, owed.usdc)
                 .unwrap_or_else(|| env::panic_str("the contract needs spare NEAR to register the claimant with the token"))
         });
 
+        // A verified USDC amount has moved into `usdc_in_flight` above and leaves the record. An unverified
+        // one stays, as the hold that keeps another claimant from sweeping it, until the balance callback
+        // settles it. A second call before then repeats the read; it cannot pay, so it cannot pay twice.
+        let (held, still_unread) = if owed.usdc > 0 && owed.usdc_unread { (owed.usdc, true) } else { (0, false) };
         let left = owed.near - near;
-        if left > 0 {
-            self.owed.insert(claimant.clone(), Owed { near: left, usdc: 0, usdc_unread: false });
+        if left > 0 || held > 0 {
+            self.owed.insert(claimant.clone(), Owed { near: left, usdc: held, usdc_unread: still_unread });
         } else {
             self.owed.remove(&claimant);
         }
@@ -427,21 +472,42 @@ impl Kizashi {
         self.owed.insert(claimant.clone(), owed);
     }
 
+    /// Marks the claimant's USDC as "read the balance before paying": set by a failed balance read and by a
+    /// failed transfer. Anything recorded in `usdc` alongside it is held, not trusted.
     fn record_unread(&mut self, claimant: &AccountId) {
         let mut owed = self.owed.get(claimant).cloned().unwrap_or_default();
         owed.usdc_unread = true;
         self.owed.insert(claimant.clone(), owed);
     }
 
+    /// Spends the claimant's USDC record (the amount and the unread mark) and returns the amount. The NEAR
+    /// part of the record stays. Called by the balance callback, which pays from a fresh read instead.
+    fn take_usdc_record(&mut self, claimant: &AccountId) -> u128 {
+        let Some(mut owed) = self.owed.get(claimant).cloned() else { return 0 };
+        let recorded = owed.usdc;
+        owed.usdc = 0;
+        owed.usdc_unread = false;
+        if owed.near == 0 {
+            self.owed.remove(claimant);
+        } else {
+            self.owed.insert(claimant.clone(), owed);
+        }
+        recorded
+    }
+
     /// The three calls that pay `amount` USDC to `claimant`: register them with the token (a NEP-141
     /// token refuses an unregistered receiver), transfer, then resolve. Chain them in this order.
     /// None when the contract has no spare NEAR, beyond what it owes, to attach as the deposit.
-    fn usdc_steps(&self, claimant: &AccountId, amount: u128) -> Option<Vec<Promise>> {
+    ///
+    /// Reserves `amount` in `usdc_in_flight` until `on_usdc_paid` reports, so that no other payout is computed
+    /// from tokens this one is already sending. Only call it when the steps are going to be scheduled.
+    fn start_usdc_payout(&mut self, claimant: &AccountId, amount: u128) -> Option<Vec<Promise>> {
         let usdc = self.usdc.clone()?;
         let spare = env::account_balance().as_yoctonear().saturating_sub(storage_reserve()).saturating_sub(self.owed_total().near);
         if spare <= MIN_REGISTRATION_DEPOSIT.as_yoctonear() {
             return None; // the deposit plus the 1 yoctoNEAR of ft_transfer
         }
+        self.usdc_in_flight = self.usdc_in_flight.saturating_add(amount);
         Some(vec![
             ext_ft::ext(usdc.clone())
                 .with_attached_deposit(MIN_REGISTRATION_DEPOSIT)

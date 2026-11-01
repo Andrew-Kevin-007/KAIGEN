@@ -54,10 +54,13 @@ const LOCK_DOWN_GAS: Gas = Gas::from_tgas(150);
 /// What does not fit stays recorded for the next `trip`. Includes room for the writes that close the receipt.
 const FANOUT_STEP_GAS: Gas = Gas::from_tgas(40);
 /// A zero or tiny delay lets a daily key empty the vault through `request_withdraw` + `execute`
-/// before the admin can react, so `init` refuses it. Drill builds may use shorter delays. This is the
-/// production floor: the owner raises it here (for example 86_400 for 24 h) before building the
-/// production wasm. Keep it a multiple of 60, the refusal message counts minutes.
-const MIN_DELAY_SECS: u64 = 300;
+/// before the admin can react, so `init` refuses it. Drill builds may use shorter delays (they do not
+/// enforce this at all). This is the production floor, 24 h: a withdrawal a hijacked key queues must outlast
+/// a day, so an owner who looks once a day can still cancel it. It is a decision about every production
+/// vault (the `pending_limit` and `request_withdraw` budget bound how much can be queued, the delay bounds
+/// how fast), so lower it only on purpose. Keep it a multiple of 3600, the refusal message counts hours.
+#[cfg_attr(feature = "drill", allow(dead_code))] // only `init`'s production check reads it
+const MIN_DELAY_SECS: u64 = 86_400;
 
 /// Same wire format as Kizashi's `Era`.
 #[near(serializers = [borsh, json])]
@@ -112,7 +115,8 @@ pub struct QueuedView {
     pub id: U64,
     #[serde(flatten)]
     pub withdrawal: Withdrawal,
-    /// Earliest `execute` time (ns) under the current delay, which doubles at warning.
+    /// Earliest `execute` time (ns): the request time plus the delay. `execute` also needs the era to be
+    /// calm, so a request that unlocks while the era is warning or kaigen stays frozen (see `execute`).
     pub unlocks_at: U64,
 }
 
@@ -122,6 +126,9 @@ pub struct ConfigView {
     pub era: Era,
     pub daily_limit: U128,
     pub delay_secs: u64,
+    /// Always equal to `delay_secs`. The delay used to double at warning, but `execute` only runs while the
+    /// era is calm, so no request could ever have waited out a doubled delay and the doubling was removed.
+    /// The field stays so that existing readers of this view keep parsing it.
     pub effective_delay_secs: u64,
     pub max_strikes: u32,
     /// Most NEAR that may wait in the withdrawal queue at once, and be asked for in 24 h.
@@ -175,6 +182,9 @@ pub struct Mamori {
     /// Refusals per daily key. At `max_strikes` the key is burned.
     max_strikes: u32,
     strikes: LookupMap<PublicKey, Strikes>,
+    /// Daily keys the vault no longer serves (removed by the admin, or burned for repeated refusals) whose
+    /// deletion from the account the account has not confirmed. See `delete_revoked_key`.
+    revoked_keys: IterableSet<PublicKey>,
 }
 
 #[near]
@@ -186,7 +196,7 @@ impl Mamori {
         #[cfg(not(feature = "drill"))]
         require!(
             delay_secs >= MIN_DELAY_SECS,
-            format!("withdrawal delay must be at least {} minutes", MIN_DELAY_SECS / 60)
+            format!("withdrawal delay must be at least {} hours", MIN_DELAY_SECS / 3600)
         );
         Self {
             kizashi,
@@ -206,6 +216,7 @@ impl Mamori {
             allowlist_enforced: false,
             max_strikes: DEFAULT_MAX_STRIKES,
             strikes: LookupMap::new(b"s"),
+            revoked_keys: IterableSet::new(b"x"),
         }
     }
 
@@ -230,12 +241,16 @@ impl Mamori {
             .then(Self::ext(me).with_static_gas(SMALL_CALLBACK_GAS).on_key_added(public_key))
     }
 
+    /// Stops serving a daily key at once, cancels its queued requests and deletes it from the account. The
+    /// key stays in `revoked_keys()` until the account confirms the delete, so a delete that failed is not
+    /// forgotten: calling this again for such a key retries the delete, and kaigen's `lock_down` tries once more.
     pub fn remove_daily_key(&mut self, public_key: PublicKey) -> Promise {
         self.assert_admin();
-        require!(self.daily_keys.remove(&public_key), "unknown daily key");
-        emit("remove_daily_key", serde_json::json!({ "public_key": public_key }));
+        let served = self.daily_keys.remove(&public_key);
+        require!(served || self.revoked_keys.contains(&public_key), "unknown daily key");
+        emit("remove_daily_key", serde_json::json!({ "public_key": public_key, "retry": !served }));
         self.cancel_queued_by(&public_key, "key_removed");
-        Promise::new(env::current_account_id()).delete_key(public_key)
+        self.delete_revoked_key(&public_key)
     }
 
     /// Adds a classical key on `intents.near` for swaps and records it so `trip` can remove it.
@@ -317,6 +332,14 @@ impl Mamori {
     /// Two refusals are returned the same way but earn NO strike, because they say nothing about the key:
     /// a token with no 24 h limit (an honest first send of a new token must not burn a key) and a NEAR
     /// amount below the minimum send (dust). Neither moves anything; the key's gas allowance bounds them.
+    ///
+    /// What earns no strike, all of it on purpose, so nobody has to re-derive it: those two refusals; every
+    /// panic (a zero amount, an era that is not calm, a caller that is not a recorded daily key), because a
+    /// panic rolls its own strike back; and every refusal of `request_withdraw` (see there). Each still costs
+    /// the caller gas from the key's allowance, and the runtime deletes a function-call key whose allowance
+    /// is used up, so none of them is unbounded. Counting dust or an unlisted token would burn the honest key
+    /// that retries a new token before the admin lists it; counting `request_withdraw` refusals needs a new
+    /// return type for that method.
     pub fn send_small(&mut self, token: Option<AccountId>, amount: U128, to: AccountId) -> PromiseOrValue<SendOutcome> {
         self.assert_daily_key();
         require!(self.era == Era::Calm, "paused: era is not calm");
@@ -347,9 +370,20 @@ impl Mamori {
     /// value waiting in the queue at once and also the value asked for in any 24 h: executing or cancelling
     /// a request gives none of that budget back. A hijacked key can therefore put only that much at risk,
     /// and move at most that much a day, whatever the delay.
+    ///
+    /// Only while the era is calm, like `execute`: outside calm a request could never run, so accepting it
+    /// would only spend the request budget and a queue slot on something frozen. At kaigen the refusal says
+    /// "lockdown", at warning "paused".
+    ///
+    /// Refusals here are panics, not recorded outcomes, so they earn no strike (a panic rolls the strike back).
+    /// That covers an amount over the pending limit or the 24 h request budget, and a full queue. Turning
+    /// them into recorded refusals would change this method's return type (a public contract), and a full
+    /// queue or a spent budget is as likely an honest key as a hijacked one; what bounds a key that keeps
+    /// trying is the gas allowance of its access key, which each failed call spends.
     pub fn request_withdraw(&mut self, token: Option<AccountId>, amount: U128, to: AccountId) -> U64 {
         self.assert_daily_key();
         require!(self.era != Era::Kaigen, "lockdown");
+        require!(self.era == Era::Calm, "paused: era is not calm");
         require!(amount.0 > 0, "amount must be > 0");
         require!(self.queue.len() < MAX_QUEUE, "queue full");
         require!(self.fits_pending(&token, amount.0), "over the pending limit for this token");
@@ -369,7 +403,13 @@ impl Mamori {
 
     // ---- anyone ---------------------------------------------------------------------------
 
-    /// Sends a queued request after it unlocks, only while the era is calm.
+    /// Sends a queued request once the delay has passed AND the era is calm. Both are needed, always.
+    ///
+    /// What a warning does to a queued request: nothing leaves through it. It stays in the queue, frozen,
+    /// whether or not its delay has passed, and the admin can `cancel` it at any time (cancel is never paused).
+    /// The era only rises in production, so a request still queued when a warning arrives never executes;
+    /// at kaigen `lock_down` discards the queue and logs what it held. (A drill vault follows Kizashi back
+    /// down after its `reset`, and then its frozen requests can run once the era is calm and they are unlocked.)
     pub fn execute(&mut self, id: U64) -> Promise {
         require!(self.era == Era::Calm, "paused: era is not calm");
         let w = self.queue.get(&id.0).cloned().unwrap_or_else(|| env::panic_str("no such request"));
@@ -384,7 +424,8 @@ impl Mamori {
     }
 
     /// Reads `kizashi.era()`. At kaigen: removes recorded keys from `intents.near`, deletes every recorded
-    /// classical key and cancels the queue. At warning: pauses `send_small` and doubles the delay.
+    /// classical key and cancels the queue. At warning: pauses `send_small`, `request_withdraw` and `execute`
+    /// (keys and the queue stay, and the admin can still cancel a queued request).
     ///
     /// A full vault (8 + 8 keys) needs more than one trip at kaigen, because the cleanup costs more gas than
     /// one transaction carries (see `lock_down`). Repeat the trip until `intents_keys()` and `daily_keys()`
@@ -457,9 +498,22 @@ impl Mamori {
                 .delete_key(k.clone())
                 .then(Self::ext(me.clone()).with_static_gas(SMALL_CALLBACK_GAS).on_key_removed(k));
         }
-        let (daily_left, intents_left) = (self.daily_keys.len(), self.intents_keys.len());
-        if daily_left + intents_left > 0 {
-            emit("lockdown_partial", serde_json::json!({ "daily_keys_left": daily_left, "intents_keys_left": intents_left }));
+        // Last: keys the vault stopped serving earlier whose delete was never confirmed. Each gets one more try
+        // and is then let go (a failure is logged by its callback, not recorded again): such a key can sign
+        // nothing the contract accepts, and recording it again would keep lockdown from ever finishing.
+        let revoked: Vec<PublicKey> = self.revoked_keys.iter().cloned().collect();
+        for k in revoked.into_iter().take_while(|_| has_fanout_gas()) {
+            self.revoked_keys.remove(&k);
+            let _ = Promise::new(me.clone())
+                .delete_key(k.clone())
+                .then(Self::ext(me.clone()).with_static_gas(SMALL_CALLBACK_GAS).on_revoked_key_deleted(k));
+        }
+        let (daily_left, intents_left, revoked_left) = (self.daily_keys.len(), self.intents_keys.len(), self.revoked_keys.len());
+        if daily_left + intents_left + revoked_left > 0 {
+            emit(
+                "lockdown_partial",
+                serde_json::json!({ "daily_keys_left": daily_left, "intents_keys_left": intents_left, "revoked_keys_left": revoked_left }),
+            );
         }
     }
 
@@ -520,6 +574,21 @@ impl Mamori {
         }
     }
 
+    /// The account answered for the delete of a key the vault had stopped serving (removed or burned). Success
+    /// clears it from `revoked_keys`. A failure leaves it there, still not served, and logs it: the admin can
+    /// retry with `remove_daily_key`, and `lock_down` tries once more at kaigen. A delete most likely fails
+    /// because the account no longer holds the key (unverified: the runtime also drops a function-call key
+    /// whose gas allowance is used up). A retry then fails the same way, which is why `lock_down` tries each
+    /// leftover once and lets it go rather than recording it again.
+    #[private]
+    pub fn on_revoked_key_deleted(&mut self, public_key: PublicKey) {
+        if is_promise_success() {
+            self.revoked_keys.remove(&public_key);
+        } else {
+            emit("delete_key_failed", serde_json::json!({ "public_key": public_key, "revoked": true }));
+        }
+    }
+
     /// Same for a key on `intents.near`.
     #[private]
     pub fn on_intents_removed(&mut self, public_key: PublicKey) {
@@ -541,7 +610,7 @@ impl Mamori {
             era: self.era,
             daily_limit: self.daily_limit.into(),
             delay_secs: self.delay_secs,
-            effective_delay_secs: self.effective_delay_secs(),
+            effective_delay_secs: self.delay_secs,
             max_strikes: self.max_strikes,
             pending_limit: self.pending_limit_for(&None).into(),
             min_send: self.min_send.into(),
@@ -554,6 +623,11 @@ impl Mamori {
 
     pub fn intents_keys(&self) -> Vec<PublicKey> {
         self.intents_keys.iter().cloned().collect()
+    }
+
+    /// Daily keys the vault has stopped serving whose deletion from the account is not confirmed yet.
+    pub fn revoked_keys(&self) -> Vec<PublicKey> {
+        self.revoked_keys.iter().cloned().collect()
     }
 
     pub fn allowlist(&self) -> AllowlistView {
@@ -691,6 +765,20 @@ impl Mamori {
         }
     }
 
+    /// Records that `key` is owed a deletion and schedules it, with a callback that clears the record once the
+    /// account confirms. The caller has already stopped serving the key, so there is no window in which a key
+    /// the admin (or the strikes) revoked still works while the delete is in flight. The record is made before
+    /// the delete is scheduled and cleared only on success, so a delete that fails (or whose callback never
+    /// runs) leaves the key on record. Idempotent: a second delete for the same key, or one racing a
+    /// `lock_down` sweep, can only fail harmlessly and never re-records anything.
+    fn delete_revoked_key(&mut self, key: &PublicKey) -> Promise {
+        self.revoked_keys.insert(key.clone());
+        let me = env::current_account_id();
+        Promise::new(me.clone())
+            .delete_key(key.clone())
+            .then(Self::ext(me).with_static_gas(SMALL_CALLBACK_GAS).on_revoked_key_deleted(key.clone()))
+    }
+
     /// A refusal that is not the key's fault (see `send_small`): reported, but not counted.
     fn refuse_uncounted(&self, key: &PublicKey, reason: &str) -> SendOutcome {
         let strikes = self.strikes_of(key.clone());
@@ -714,9 +802,10 @@ impl Mamori {
             self.strikes.remove(key);
             self.daily_keys.remove(key);
             self.cancel_queued_by(key, "key_burned");
-            // Dropping the promise still schedules it. If the delete fails the key is already unrecorded,
-            // so the contract refuses it anyway.
-            let _ = Promise::new(env::current_account_id()).delete_key(key.clone());
+            // Dropping the promise still schedules it. The key is unrecorded first, so the contract refuses it
+            // at once whether or not the delete lands; `revoked_keys` keeps it on record until the account
+            // confirms the delete, so a failed one is retried at kaigen rather than forgotten.
+            let _ = self.delete_revoked_key(key);
             emit("key_burned", serde_json::json!({ "public_key": key, "reason": reason }));
         } else {
             self.strikes.insert(key.clone(), record);
@@ -724,16 +813,8 @@ impl Mamori {
         SendOutcome { sent: false, refused: Some(reason.to_string()), strikes: record.count, burned }
     }
 
-    fn effective_delay_secs(&self) -> u64 {
-        if self.era >= Era::Warning {
-            self.delay_secs.saturating_mul(2)
-        } else {
-            self.delay_secs
-        }
-    }
-
     fn unlocks_at(&self, w: &Withdrawal) -> u64 {
-        w.requested_at.0.saturating_add(self.effective_delay_secs().saturating_mul(1_000_000_000))
+        w.requested_at.0.saturating_add(self.delay_secs.saturating_mul(1_000_000_000))
     }
 }
 

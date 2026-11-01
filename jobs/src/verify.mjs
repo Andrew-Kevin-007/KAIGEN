@@ -22,6 +22,7 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { base58 } from "@scure/base";
 import { compare, productionOmens } from "../../scripts/omens.mjs";
 import { lockedDown } from "./firetest.mjs";
+import { describeOwed, listOwed } from "./keeper.mjs";
 
 export const codeHashOf = (bytes) => base58.encode(sha256(bytes));
 
@@ -216,6 +217,8 @@ const STORAGE_YOCTO_PER_BYTE = 10n ** 19n;
 const KEYS_BEFORE_LOCK = "kizashi access keys are readable (the lock deletes them)";
 const KEYS_AFTER_LOCK = "kizashi has no access keys";
 export const COMPLETE_CHECK = "all required checks ran";
+export const NOTHING_OWED_CHECK = "no claimant is owed a payout";
+export const DEPLOYER_KEY_CHECK = "deployer key is not left on the mamori reference";
 const REQUIRED_BASE = [
   "deployments file is mainnet",
   "rpc hosts are independent",
@@ -228,6 +231,8 @@ const REQUIRED_BASE = [
   "code hash: drill vault",
   "omens re-derive from their seeds",
   "kizashi balance covers the bounty",
+  NOTHING_OWED_CHECK,
+  DEPLOYER_KEY_CHECK,
   "fire tests are recent",
 ];
 export const requiredChecks = (stage) => [...REQUIRED_BASE, stage === "pre-lock" ? KEYS_BEFORE_LOCK : KEYS_AFTER_LOCK];
@@ -271,6 +276,28 @@ export const checkBounty = ({ rpc, dep }) =>
     const own = BigInt((await rpc.view(dep.kizashi, "bounty")).near);
     const ok = spendable >= want && own >= want;
     return result(name, ok, `${ok ? "" : "below the configured bounty: "}account spendable ${spendable}, bounty() says ${own}, configured ${want} yoctoNEAR`);
+  });
+
+/** K3: a payout still owed to a claimant of a broken omen blocks the release; the retry command is printed, never sent. */
+export const checkNothingOwed = ({ rpc, dep }) =>
+  guarded(NOTHING_OWED_CHECK, async () => {
+    const owed = await listOwed({ rpc, kizashi: dep.kizashi });
+    return result(NOTHING_OWED_CHECK, owed.length === 0, owed.length === 0 ? "every claimant of a broken omen has been paid" : owed.map(describeOwed).join(" | "));
+  });
+
+/** T3: the deployer's own full-access key must not be left on the Mamori reference, where it could redeploy the code vaults trust. */
+export const checkDeployerKeyOnReference = ({ rpc, dep }) =>
+  guarded(DEPLOYER_KEY_CHECK, async () => {
+    const deployer = dep.mainnet?.deployer;
+    if (typeof deployer !== "string" || deployer === "") return result(DEPLOYER_KEY_CHECK, false, "deployments.json has no mainnet.deployer to compare against");
+    const [mine, ref] = [await rpc.accessKeys(deployer), await rpc.accessKeys(dep.mamoriReference)];
+    if (mine === null) return result(DEPLOYER_KEY_CHECK, false, `${deployer} does not exist`);
+    if (ref === null) return result(DEPLOYER_KEY_CHECK, false, `${dep.mamoriReference} does not exist`);
+    if (mine.truncated || ref.truncated) return result(DEPLOYER_KEY_CHECK, false, "more keys than could be read");
+    const full = (k) => k.access_key?.permission === "FullAccess";
+    const own = new Set(mine.filter(full).map((k) => k.public_key));
+    const left = ref.filter((k) => full(k) && own.has(k.public_key)).map((k) => k.public_key);
+    return result(DEPLOYER_KEY_CHECK, left.length === 0, left.length ? `${deployer}'s full-access key ${left.join(", ")} is still on ${dep.mamoriReference}, so it could redeploy the code` : `none of ${deployer}'s full-access keys is on ${dep.mamoriReference}`);
   });
 
 /** Before the lock: the keys the lock will delete can be read, so the lock has something real to act on. */
@@ -354,6 +381,8 @@ export async function verifyRelease({ rpcs, hosts, archivals, dep, wasmDir, dril
     await checkOmens({ rpc: cross, dep }),
     preLock ? await checkKeysBeforeLock({ rpc: cross, dep }) : await checkNoAccessKeys({ rpc: cross, dep }),
     await checkBounty({ rpc: cross, dep }),
+    await checkNothingOwed({ rpc: cross, dep }),
+    await checkDeployerKeyOnReference({ rpc: cross, dep }),
     ...(await checkFireTests({ rpc: cross, archival: archive, dir: fireTestDir, dep })),
   );
   const missing = missingChecks(results, stage);

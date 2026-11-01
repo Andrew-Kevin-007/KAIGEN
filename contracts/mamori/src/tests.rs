@@ -52,11 +52,16 @@ fn as_callback(now: u64) {
     as_admin(now);
 }
 
+/// The delay most tests run with. It is below the production floor (`MIN_DELAY_SECS`, 24 h), which would make
+/// every test about the queue span days; the floor itself is covered by the `init_*` tests below.
+const TEST_DELAY: u64 = 3600;
+
 /// Vault with one daily key (key 1), a 1 NEAR / 24 h limit, a 1 h delay and the production default
-/// minimum send.
+/// minimum send. `init` is given the floor and the delay is then lowered, so this works in every build.
 fn setup_production() -> Mamori {
     as_admin(1_000 * SEC);
-    let mut m = Mamori::init(accounts(1), U128(NEAR), 3600);
+    let mut m = Mamori::init(accounts(1), U128(NEAR), MIN_DELAY_SECS);
+    m.delay_secs = TEST_DELAY;
     let _ = m.add_daily_key(key(1), None);
     m
 }
@@ -304,14 +309,17 @@ fn queue_is_bounded() {
 }
 
 #[test]
-fn warning_pauses_send_small_and_doubles_the_delay_and_blocks_execute() {
+fn warning_pauses_send_small_and_execute_and_the_delay_does_not_change() {
     let mut m = setup();
     as_daily(&key(1), 2_000 * SEC);
     let id = m.request_withdraw(None, U128(NEAR), accounts(2));
 
     as_callback(2_100 * SEC);
     assert_eq!(m.on_era(Ok(Era::Warning)), Era::Warning);
-    assert_eq!(m.config().effective_delay_secs, 7200);
+    // The delay used to double here, but `execute` is calm-only, so no request could ever have used the
+    // doubled delay. It is one delay in every era now.
+    let c = m.config();
+    assert_eq!((c.delay_secs, c.effective_delay_secs), (TEST_DELAY, TEST_DELAY));
     // Keys survive a warning.
     assert_eq!(m.daily_keys(), vec![key(1)]);
 
@@ -320,13 +328,59 @@ fn warning_pauses_send_small_and_doubles_the_delay_and_blocks_execute() {
         let _ = m.send_small(None, U128(1), accounts(2));
     })
     .contains("paused"));
-    // Still queueable, but the unlock now takes twice as long, and execute is blocked outside calm.
-    assert_eq!(m.queue()[0].unlocks_at.0, 2_000 * SEC + 7200 * SEC);
+    assert_eq!(m.queue()[0].unlocks_at.0, 2_000 * SEC + TEST_DELAY * SEC);
+    // Long past the unlock, `execute` is still blocked outside calm.
     as_anyone(2_000 * SEC + 8000 * SEC);
     assert!(panics_with(|| {
         let _ = m.execute(id);
     })
     .contains("paused"));
+}
+
+#[test]
+fn a_request_queued_before_a_warning_is_frozen_but_the_admin_can_still_cancel_it() {
+    let mut m = setup();
+    as_daily(&key(1), 2_000 * SEC);
+    let id = m.request_withdraw(None, U128(NEAR), accounts(2));
+    as_callback(2_100 * SEC);
+    m.on_era(Ok(Era::Warning));
+    // Past its unlock and still frozen: nothing leaves through a classical key while the era is not calm.
+    as_anyone(2_000 * SEC + 2 * DAY_NS);
+    assert!(panics_with(|| {
+        let _ = m.execute(id);
+    })
+    .contains("paused"));
+    assert_eq!(m.queue().len(), 1, "it waits, it is not discarded");
+    // The admin is not paused: a frozen request can be cleared out.
+    as_admin(2_000 * SEC + 2 * DAY_NS);
+    m.cancel(id);
+    assert!(m.queue().is_empty());
+}
+
+#[test]
+fn request_withdraw_is_paused_at_warning_so_nothing_queues_that_cannot_run() {
+    let mut m = setup();
+    as_callback(2_100 * SEC);
+    m.on_era(Ok(Era::Warning));
+    as_daily(&key(1), 2_200 * SEC);
+    assert!(panics_with(|| {
+        m.request_withdraw(None, U128(1), accounts(2));
+    })
+    .contains("paused: era is not calm"));
+    assert!(m.queue().is_empty());
+    assert!(m.requested.get(&None::<AccountId>).is_none(), "and the refusal used none of the request budget");
+}
+
+#[test]
+fn request_withdraw_at_kaigen_still_says_lockdown() {
+    let mut m = setup();
+    as_callback(2_100 * SEC);
+    m.on_era(Ok(Era::Kaigen)); // the fan-out has not run, so the key is still recorded
+    as_daily(&key(1), 2_200 * SEC);
+    assert!(panics_with(|| {
+        m.request_withdraw(None, U128(1), accounts(2));
+    })
+    .contains("lockdown"));
 }
 
 #[test]
@@ -398,6 +452,10 @@ fn removing_a_daily_key_deletes_it() {
     let _ = m.remove_daily_key(key(1));
     assert!(m.daily_keys().is_empty());
     assert!(receipts_text().contains("DeleteKey"));
+    // The account confirms the delete; only then is the key unknown to the vault altogether.
+    callback_after_success(1_101 * SEC);
+    m.on_revoked_key_deleted(key(1));
+    as_admin(1_102 * SEC);
     assert!(panics_with(|| {
         let _ = m.remove_daily_key(key(1));
     })
@@ -411,6 +469,143 @@ fn callback_after_failure(now: u64) {
     testing_env!(b.build(), near_sdk::test_vm_config(), near_sdk::RuntimeFeesConfig::test(), Default::default(), vec![near_sdk::PromiseResult::Failed]);
 }
 
+/// The next callback sees a successful promise result.
+fn callback_after_success(now: u64) {
+    let mut b = VMContextBuilder::new();
+    b.current_account_id(vault()).predecessor_account_id(vault()).block_timestamp(now);
+    testing_env!(b.build(), near_sdk::test_vm_config(), near_sdk::RuntimeFeesConfig::test(), Default::default(), vec![near_sdk::PromiseResult::Successful(vec![])]);
+}
+
+// ---- K3: a key the vault stops serving stays on record until the account confirms it is deleted ----------
+
+#[test]
+fn a_removed_key_stays_recorded_for_deletion_until_the_account_confirms_it() {
+    let mut m = setup();
+    as_admin(1_100 * SEC);
+    let _ = m.remove_daily_key(key(1));
+    let r = receipts_text();
+    assert!(r.contains("DeleteKey") && r.contains("on_revoked_key_deleted"), "{r}");
+    assert!(m.daily_keys().is_empty(), "no longer served, at once");
+    assert_eq!(m.revoked_keys(), vec![key(1)], "but owed a deletion");
+    callback_after_success(1_101 * SEC);
+    m.on_revoked_key_deleted(key(1));
+    assert!(m.revoked_keys().is_empty());
+    assert!(event("delete_key_failed").is_none());
+}
+
+#[test]
+fn a_deletion_that_failed_is_logged_stays_recorded_and_the_key_is_still_not_served() {
+    let mut m = setup();
+    as_admin(1_100 * SEC);
+    let _ = m.remove_daily_key(key(1));
+    callback_after_failure(1_101 * SEC);
+    m.on_revoked_key_deleted(key(1));
+    assert_eq!(m.revoked_keys(), vec![key(1)]);
+    assert_eq!(event("delete_key_failed").unwrap()["data"]["public_key"], serde_json::json!(key(1)));
+    // If the delete never lands the key is still on the account, but the contract refuses everything it signs.
+    as_daily(&key(1), 1_102 * SEC);
+    assert!(panics_with(|| {
+        let _ = m.send_small(None, U128(1), accounts(2));
+    })
+    .contains("not a recorded daily key"));
+    assert!(panics_with(|| {
+        m.request_withdraw(None, U128(1), accounts(2));
+    })
+    .contains("not a recorded daily key"));
+}
+
+#[test]
+fn the_admin_can_retry_a_deletion_that_did_not_land() {
+    let mut m = setup();
+    as_admin(1_100 * SEC);
+    let _ = m.remove_daily_key(key(1));
+    callback_after_failure(1_101 * SEC);
+    m.on_revoked_key_deleted(key(1));
+    as_admin(1_102 * SEC);
+    let _ = m.remove_daily_key(key(1)); // same call: the key is not served, but it is still owed a deletion
+    assert!(receipts_text().contains("DeleteKey"));
+    callback_after_success(1_103 * SEC);
+    m.on_revoked_key_deleted(key(1));
+    assert!(m.revoked_keys().is_empty());
+    as_admin(1_104 * SEC);
+    assert!(panics_with(|| {
+        let _ = m.remove_daily_key(key(1));
+    })
+    .contains("unknown daily key"));
+}
+
+#[test]
+fn a_burned_key_is_recorded_for_deletion_until_the_account_confirms_it() {
+    let mut m = setup();
+    attack(&mut m, 2_000 * SEC);
+    attack(&mut m, 2_001 * SEC);
+    assert!(attack(&mut m, 2_002 * SEC).burned);
+    let r = receipts_text();
+    assert!(r.contains("DeleteKey") && r.contains("on_revoked_key_deleted"), "{r}");
+    assert_eq!(m.revoked_keys(), vec![key(1)]);
+    callback_after_failure(2_003 * SEC);
+    m.on_revoked_key_deleted(key(1));
+    assert_eq!(m.revoked_keys(), vec![key(1)], "a failed delete is not forgotten");
+    // And the burned key is not served meanwhile, deleted or not.
+    as_daily(&key(1), 2_004 * SEC);
+    assert!(panics_with(|| {
+        let _ = m.send_small(None, U128(1), accounts(2));
+    })
+    .contains("not a recorded daily key"));
+    callback_after_success(2_005 * SEC);
+    m.on_revoked_key_deleted(key(1));
+    assert!(m.revoked_keys().is_empty());
+}
+
+#[test]
+fn lock_down_gives_a_key_whose_deletion_was_never_confirmed_one_more_try() {
+    let mut m = setup();
+    as_admin(1_100 * SEC);
+    let _ = m.remove_daily_key(key(1)); // its callback never came back
+    as_callback(2_000 * SEC);
+    m.on_era(Ok(Era::Kaigen));
+    lock_down_at(&mut m, 2_001 * SEC);
+    let r = receipts_text();
+    assert_eq!(r.matches("DeleteKey").count(), 1, "{r}");
+    assert!(m.revoked_keys().is_empty(), "one try at kaigen: it is not recorded again, or lockdown could never finish");
+    callback_after_failure(2_002 * SEC);
+    m.on_revoked_key_deleted(key(1));
+    assert!(event("delete_key_failed").is_some(), "the failure is still reported");
+    assert!(m.revoked_keys().is_empty());
+}
+
+#[test]
+fn a_partial_lock_down_says_how_many_unconfirmed_deletions_are_left() {
+    let mut m = setup();
+    as_admin(1_100 * SEC);
+    for n in 2..=MAX_DAILY_KEYS as u8 {
+        let _ = m.add_daily_key(key(n), None);
+    }
+    for n in 2..=MAX_DAILY_KEYS as u8 {
+        let _ = m.remove_daily_key(key(n)); // seven keys owed a deletion
+    }
+    for n in 11..11 + MAX_INTENTS_KEYS as u8 {
+        let _ = m.register_intents_key(key(n));
+    }
+    as_callback(2_000 * SEC);
+    m.on_era(Ok(Era::Kaigen));
+    as_callback_with_gas(2_001 * SEC, LOCK_DOWN_GAS);
+    m.lock_down();
+    let e = event("lockdown_partial").expect("a pass that cannot finish says so");
+    assert!(e["data"]["revoked_keys_left"].as_u64().unwrap() > 0, "{e}");
+    assert_eq!(e["data"]["revoked_keys_left"].as_u64().unwrap() as usize, m.revoked_keys().len());
+}
+
+// ---- the production delay floor ---------------------------------------------------------------
+
+#[test]
+fn the_production_delay_floor_is_a_day() {
+    // A withdrawal queued by a hijacked key must outlast a day, so an owner who checks once a day can cancel it.
+    // Lowering this is a decision about every production vault, not a tidy-up: change it on purpose.
+    assert!(MIN_DELAY_SECS >= 86_400);
+    assert_eq!(MIN_DELAY_SECS % 3600, 0, "the refusal message counts hours");
+}
+
 #[cfg(not(feature = "drill"))]
 #[test]
 fn init_refuses_a_withdrawal_delay_that_defeats_the_cap() {
@@ -418,12 +613,16 @@ fn init_refuses_a_withdrawal_delay_that_defeats_the_cap() {
     assert!(panics_with(|| {
         Mamori::init(accounts(1), U128(NEAR), 0);
     })
-    .contains("at least 5 minutes"));
+    .contains("at least 24 hours"));
     assert!(panics_with(|| {
-        Mamori::init(accounts(1), U128(NEAR), 299);
+        Mamori::init(accounts(1), U128(NEAR), 300);
     })
-    .contains("at least 5 minutes"));
-    let _ = Mamori::init(accounts(1), U128(NEAR), 300);
+    .contains("at least 24 hours"));
+    assert!(panics_with(|| {
+        Mamori::init(accounts(1), U128(NEAR), 86_399);
+    })
+    .contains("at least 24 hours"));
+    let _ = Mamori::init(accounts(1), U128(NEAR), 86_400);
 }
 
 #[test]
@@ -1036,7 +1235,7 @@ fn an_unlisted_token_is_refused_with_a_clear_reason_and_no_strike() {
 #[test]
 fn near_with_a_zero_limit_is_refused_the_same_way() {
     as_admin(1_000 * SEC);
-    let mut m = Mamori::init(accounts(1), U128(0), 3600);
+    let mut m = Mamori::init(accounts(1), U128(0), MIN_DELAY_SECS);
     let _ = m.add_daily_key(key(1), None);
     as_daily(&key(1), 2_000 * SEC);
     let o = refused(m.send_small(None, U128(NEAR), accounts(2)));
@@ -1226,7 +1425,7 @@ fn init_enforces_the_named_delay_floor_and_its_message_follows_it() {
     let msg = panics_with(|| {
         Mamori::init(accounts(1), U128(NEAR), MIN_DELAY_SECS - 1);
     });
-    assert!(msg.contains(&format!("at least {} minutes", MIN_DELAY_SECS / 60)), "{msg}");
+    assert!(msg.contains(&format!("at least {} hours", MIN_DELAY_SECS / 3600)), "{msg}");
     let _ = Mamori::init(accounts(1), U128(NEAR), MIN_DELAY_SECS);
 }
 
@@ -1236,12 +1435,12 @@ fn init_enforces_the_named_delay_floor_and_its_message_follows_it() {
 /// throwaway, so the layout may still change: when it does, rebuild this string from the failure message.
 /// From the first mainnet deploy on, a change here means every deployed vault fails to read its state (and
 /// `trip` with it): write a `migrate` that reads the old layout first, and only then update this string.
-const FRESH_STATE_HEX: &str = "03000000626f62000000a1edccce1bc2d3000000000000100e000000000000000000000002000000647602000000646d0000000002000000697602000000696d010000006c010000007001000000720000a0dec5adc935360000000000000001000000770000000002000000717602000000716d00000000000000000000000002000000617602000000616d00030000000100000073";
+const FRESH_STATE_HEX: &str = "03000000626f62000000a1edccce1bc2d30000000000008051010000000000000000000002000000647602000000646d0000000002000000697602000000696d010000006c010000007001000000720000a0dec5adc935360000000000000001000000770000000002000000717602000000716d00000000000000000000000002000000617602000000616d000300000001000000730000000002000000787602000000786d";
 
 #[test]
 fn the_state_layout_is_pinned_so_a_change_cannot_brick_a_deployed_vault_unnoticed() {
     as_admin(1_000 * SEC);
-    let m = Mamori::init(accounts(1), U128(NEAR), 3600);
+    let m = Mamori::init(accounts(1), U128(NEAR), 86_400);
     let hex: String = near_sdk::borsh::to_vec(&m).unwrap().iter().map(|b| format!("{b:02x}")).collect();
     assert_eq!(hex, FRESH_STATE_HEX, "the state layout changed: see the note above FRESH_STATE_HEX");
 }
