@@ -155,6 +155,9 @@ pub struct Kizashi {
     /// USDC committed to `ft_transfer`s that have been scheduled and have not reported back yet. The token
     /// balance still includes it until the transfer lands, so a second claim that reads the balance in that
     /// window must not pay it again: it takes the balance minus this, minus what is owed to others.
+    /// Every scheduled transfer has a resolve callback (`RESOLVE_GAS`) that releases its share, whether the
+    /// transfer worked or not; a callback that could not run would leave its share held, hiding that much
+    /// USDC from later claims (the failed transfer would not have been recorded as owed either).
     usdc_in_flight: u128,
 }
 

@@ -68,7 +68,7 @@ Track: **`security`** (AI Security & Defense). Fallback: **`open`** (Open Innova
 3. A larger send goes to a queue with a delay. The admin can cancel it during the delay. The queue and the rolling request budget are both capped by the pending limit.
 4. A refusal is a strike against the calling key. At the strike limit the vault deletes that key from the account.
 5. An omen is a public key on a curve. Whoever breaks it signs the claim message `KAIGEN/v1/claim\n<kizashi account>\n<omen id>\n<claimant>`. Kizashi verifies the signature, marks the omen dead, and raises the era.
-6. Anyone can call `trip` on a vault. At `Warning` the vault pauses `send_small` and doubles the delay. At `Kaigen` it deletes its recorded classical daily and intents keys and cancels its queue.
+6. Anyone can call `trip` on a vault. At `Warning` the vault pauses `send_small` and `request_withdraw`; anything already queued stays frozen and the admin can cancel it. At `Kaigen` it deletes its recorded classical daily and intents keys and cancels its queue.
 
 ---
 
@@ -100,10 +100,10 @@ Track: **`security`** (AI Security & Defense). Fallback: **`open`** (Open Innova
 
 | Phase | What happens | Where it is enforced |
 | --- | --- | --- |
-| Init | Kizashi takes its omens (8 max, ed25519 or secp256k1, warning or kaigen level); Mamori takes its daily limit and a delay of at least 300 s | `Kizashi::new`, `Mamori::init` |
+| Init | Kizashi takes its omens (8 max, ed25519 or secp256k1, warning or kaigen level); Mamori takes its daily limit and a delay of at least 24 h (production build) | `Kizashi::new`, `Mamori::init` |
 | Operate | Daily keys send within the 24 h limit; larger sends queue | `send_small`, `request_withdraw`, `execute` |
 | Strike | Refused calls count against the key; the key burns at the limit | `refuse` (line 703), burn at 712-714 |
-| Warn | Era reaches `Warning`; `send_small` pauses and the delay doubles | `trip`, `on_era` |
+| Warn | Era reaches `Warning`; `send_small` and `request_withdraw` pause, queued withdrawals stay frozen and cancellable | `trip`, `on_era` |
 | Kaigen | Era reaches `Kaigen`; classical keys deleted; queue cancelled; cleanup continues over repeated `trip` calls | `trip`, `lock_down` |
 | Lock (not done) | Kizashi's own access keys deleted, so it has no admin | `mainnet lock` (`jobs/src/mainnet.mjs`), gated |
 
@@ -167,14 +167,14 @@ To create your own testnet accounts, run `node jobs/src/bin.mjs testnet`. It mak
 | Rule | Enforced on-chain | Function | Limit and default |
 | --- | --- | --- | --- |
 | Direct sends are capped in 24 h | Yes | `send_small`, `spend` | Daily limit per token (`set_token_limit`) |
-| Larger sends wait out a delay | Yes | `request_withdraw`, `execute` | Delay at least 300 s (`MIN_DELAY_SECS`); 24 h production delay is an open decision |
+| Larger sends wait out a delay | Yes | `request_withdraw`, `execute` | Delay at least 24 h in the production build (`MIN_DELAY_SECS`); drill builds allow a short delay for rehearsal |
 | Queued value is capped | Yes | `request_withdraw`, `fits_pending` | Pending limit: 10x the daily limit for NEAR; zero for a token with no daily limit |
 | Requests per 24 h are capped | Yes | `request_withdraw`, `add_to_window` | Same size as the pending limit |
 | Only allowlisted recipients | Yes, when enforced | `send_small`, `allow_recipient` | Allowlist up to 32 entries |
 | Refused keys are burned | Yes | `refuse` | 3 strikes in 24 h by default; admin sets 1 to 10 (`set_max_strikes`) |
 | Dust and no-limit tokens do not burn a key | Yes | `send_small`, `refuse_uncounted` | Minimum send 0.001 NEAR by default |
 | Lockdown at Kaigen | Yes | `trip`, `lock_down` | Deletes daily and intents keys; repeat `trip` until empty |
-| Warning pauses sends and doubles the delay | Yes | `trip`, `on_era` | Era `Warning` |
+| Warning pauses sends and new withdrawal requests | Yes | `trip`, `on_era` | Era `Warning` |
 | Claim names its claimant | Yes | `claim`, `build_claim_message` | Copied signatures cannot redirect the bounty |
 | Omen keys cannot be reused | Yes | `Kizashi::new`, `claim` | Duplicate, all-zero and small-order ed25519 keys are rejected; a dead omen cannot claim again |
 | Drill reset is not in production | Yes | `reset` (drill feature only) | Refuses accounts that are not `.testnet` |
@@ -222,20 +222,20 @@ if token.is_none() && amount.0 < self.min_send {
 
 | What | File | Lines |
 | --- | --- | --- |
-| Kizashi: omen cap, init and key checks | `contracts/kizashi/src/lib.rs` | 28 (`MAX_OMENS`); 167 (`new`); 492 (`require_usable_ed25519`) |
-| Kizashi: claim, signature check, era raise, payouts | `contracts/kizashi/src/lib.rs` | 201 (`claim`); 194-195 (sha256 note); 499 (`build_claim_message`); 503 (`verify`) |
-| Kizashi: payout callbacks and events | `contracts/kizashi/src/lib.rs` | 243 (`on_near_payout`); 283 (`on_usdc_paid`); 525-532 (`emit_payout_*`) |
-| Kizashi: owed payouts and USDC registration | `contracts/kizashi/src/lib.rs` | 298 (`retry_payout`); 329 (`register_usdc`) |
-| Kizashi: views | `contracts/kizashi/src/lib.rs` | 339 (`era`); 343 (`omens`); 361 (`bounty`); 377 (`claim_message`) |
-| Kizashi: drill-only reset | `contracts/kizashi/src/lib.rs` | 384 (`#[cfg(feature = "drill")]`); 385 (`reset`) |
-| Mamori: constants (limits, strikes, pending multiple, min send, delay floor) | `contracts/mamori/src/lib.rs` | 17 (`DAY_NS`); 18 (`MAX_DAILY_KEYS`); 20 (`MAX_QUEUE`); 21 (`MAX_ALLOWED`); 23-24 (strikes); 28 (`MAX_WINDOW_ENTRIES`); 32 (`PENDING_LIMIT_MULTIPLE`); 34 (`DEFAULT_MIN_SEND`); 37 (`DEFAULT_ALLOWANCE`); 60 (`MIN_DELAY_SECS`) |
-| Mamori: init and delay floor | `contracts/mamori/src/lib.rs` | 185 (`init`); 188-189 (delay check) |
-| Mamori: admin setters | `contracts/mamori/src/lib.rs` | 215 (`add_daily_key`); 242 (`register_intents_key`); 252 (`set_token_limit`); 260 (`set_pending_limit`); 267 (`set_min_send`); 274 (`allow_recipient`); 288 (`set_max_strikes`); 290 (strike range check); 302 (`cancel`) |
-| Mamori: send guard, 24 h cap, pause at warning | `contracts/mamori/src/lib.rs` | 320 (`send_small`); 322 (`era == Calm`); 618 (`spend`) |
-| Mamori: queue, pending limit, 24 h request window | `contracts/mamori/src/lib.rs` | 350 (`request_withdraw`); 355 (`fits_pending`); 356-361 (window check); 629 (`add_to_window`); 659 (`pending_limit_for`); 667 (`fits_pending`) |
-| Mamori: execute, trip, lockdown, delay doubling | `contracts/mamori/src/lib.rs` | 373 (`execute`); 393 (`trip`, anyone); 403 (`on_era`); 437 (`lock_down`); 728 (doubled delay at warning) |
-| Mamori: strikes and burn | `contracts/mamori/src/lib.rs` | 686 (`cancel_queued_by`); 703 (`refuse`); 712-714 (burn) |
-| Mamori: refusal without strike | `contracts/mamori/src/lib.rs` | 695 (`refuse_uncounted`) |
+| Kizashi: omen cap, init and key checks | `contracts/kizashi/src/lib.rs` | 28 (`MAX_OMENS`); 177 (`new`); 561 (`require_usable_ed25519`) |
+| Kizashi: claim, signature check, era raise, payouts | `contracts/kizashi/src/lib.rs` | 218 (`claim`); 568 (`build_claim_message`); 572 (`verify`) |
+| Kizashi: payout callbacks and events | `contracts/kizashi/src/lib.rs` | 260 (`on_near_payout`); 314 (`on_usdc_paid`) |
+| Kizashi: owed payouts and USDC registration | `contracts/kizashi/src/lib.rs` | 342 (`retry_payout`); 377 (`register_usdc`) |
+| Kizashi: views | `contracts/kizashi/src/lib.rs` | 387 (`era`); 391 (`omens`); 409 (`bounty`); 425 (`claim_message`) |
+| Kizashi: drill-only reset | `contracts/kizashi/src/lib.rs` | 432 (`#[cfg(feature = "drill")]`); 433 (`reset`) |
+| Mamori: constants (limits, strikes, pending multiple, min send, delay floor) | `contracts/mamori/src/lib.rs` | 17 (`DAY_NS`); 18 (`MAX_DAILY_KEYS`); 20 (`MAX_QUEUE`); 21 (`MAX_ALLOWED`); 28 (`MAX_WINDOW_ENTRIES`); 32 (`PENDING_LIMIT_MULTIPLE`); 34 (`DEFAULT_MIN_SEND`); 37 (`DEFAULT_ALLOWANCE`); 63 (`MIN_DELAY_SECS`) |
+| Mamori: init and delay floor | `contracts/mamori/src/lib.rs` | 195 (`init`) |
+| Mamori: admin setters | `contracts/mamori/src/lib.rs` | 226 (`add_daily_key`); 257 (`register_intents_key`); 267 (`set_token_limit`); 275 (`set_pending_limit`); 282 (`set_min_send`); 289 (`allow_recipient`); 303 (`set_max_strikes`); 290 (strike range check); 317 (`cancel`) |
+| Mamori: send guard, 24 h cap, pause at warning | `contracts/mamori/src/lib.rs` | 343 (`send_small`); 692 (`spend`) |
+| Mamori: queue, pending limit, 24 h request window | `contracts/mamori/src/lib.rs` | 383 (`request_withdraw`); 741 (`fits_pending`); 703 (`add_to_window`); 733 (`pending_limit_for`); 741 (`fits_pending`) |
+| Mamori: execute, trip, lockdown | `contracts/mamori/src/lib.rs` | 413 (`execute`); 434 (`trip`, anyone); 444 (`on_era`); 478 (`lock_down`) |
+| Mamori: strikes and burn | `contracts/mamori/src/lib.rs` | 760 (`cancel_queued_by`); 791 (`refuse`) |
+| Mamori: refusal without strike | `contracts/mamori/src/lib.rs` | 783 (`refuse_uncounted`) |
 | Tooling: CLI commands | `jobs/src/bin.mjs` | 97 (fire-test records written to `fire-tests/`); 136 (`judge` writes `judge-report.json`); 161 (`verify`); 164 (`verify` reads `fire-tests/`); 196 (`mainnet`) |
 | Tooling: judge checks | `jobs/src/judge.mjs` | `checks()`: each claim, its command and evidence |
 | Tooling: mainnet dry-run and lock | `jobs/src/mainnet.mjs` | whole file (dry-run by default) |
@@ -254,7 +254,7 @@ if token.is_none() && amount.0 < self.min_send {
 - A hijacked daily key can send up to the daily limit per token in any rolling 24 h (`spend`, `contracts/mamori/src/lib.rs`).
 - It can queue up to the pending limit at once. The default pending limit for NEAR is 10x the daily limit, and zero for a token with no daily limit (`pending_limit_for`).
 - It can request up to the pending limit again in each rolling 24 h (`request_withdraw`, `add_to_window`). Executing or cancelling a request does not return that budget.
-- The delay floor is 300 s in the code. A production delay (for example 24 h) is an open owner decision; see [docs/PLAN-submission-and-mainnet.md](docs/PLAN-submission-and-mainnet.md), section E.
+- The production delay floor is 24 h (`MIN_DELAY_SECS`); drill builds use a short delay. A hijacked daily key can still queue up to the pending limit inside the rolling 24 h window until the admin cancels.
 - Refusals are recorded successes, not reverts, so each refused call costs the vault a little gas before the key burns.
 
 **Omen limits.** A silent attacker who never publishes a break triggers nothing. A first-to-break state actor who keeps the break private triggers nothing. An omen claim pays the whole bounty to the first claimant, including a warning-level omen. An omen does not say who broke the curve or how widely.
@@ -385,7 +385,7 @@ Steps 1 to 2 need no funds and no chain. Step 4 needs one funded testnet account
 
 | # | Do this | You should see |
 | --- | --- | --- |
-| 1 | `make test`, or without make: `cargo test --workspace`, then `cd scripts && node --test omens.test.mjs predeploy.test.mjs`, then `cd jobs && node --test test/*.test.mjs` | Every suite ends with `0 failed`. Counts: <!-- COUNTS: fill after verifying `make test` --> |
+| 1 | `make test`, or without make: `cargo test --workspace`, then `cd scripts && node --test omens.test.mjs predeploy.test.mjs`, then `cd jobs && node --test test/*.test.mjs` | Every suite ends with `0 failed`. Counts at the last run: Kizashi 60, Mamori 78 (`cargo test --workspace`, 0 failed); app 62 (`npm test`, 0 failed). Jobs and scripts counts: run the commands. |
 | 2 | `node jobs/src/bin.mjs judge` | A report of PASS or SKIPPED per claim, with the evidence line; it writes `judge-report.json`. A check that cannot run is SKIPPED with the reason, never PASS |
 | 3 | Open `fire-tests/0003.json` | Claim, trip, post-quantum send and re-arm transactions for a drill vault, with the block where the classical keys were gone. Look the hashes up on a NEAR testnet explorer |
 | 4 | `node jobs/src/bin.mjs testnet` (needs `out/drill`, see Deploy, and a funder file set by `KAIGEN_FUNDER_FILE` or the faucet) | About 8 minutes; PASS or FAIL per step: the ML-DSA admin, the claim on each curve, the lockdown, the injection demo ending with the burned key |
