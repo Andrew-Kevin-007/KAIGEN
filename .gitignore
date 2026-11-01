@@ -1,0 +1,29 @@
+target/
+node_modules/
+.env*
+!.env.example
+secrets/
+.next/
+out/
+
+# Drill and keeper secrets: keep them out of the repo wherever they are written.
+*seeds*.json
+drill-*.json
+*.secret.json
+keys/
+
+.kaigen-testnet/
+
+judge-report.json
+
+# Local agent tooling
+.claude/
+
+# Generated and local state
+deployments.json
+data/
+*.tsbuildinfo
+.claude/settings.local.json
+
+# Internal planning notes (not part of the public repo)
+docs/internal/

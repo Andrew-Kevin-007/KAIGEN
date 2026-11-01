@@ -1,0 +1,19 @@
+[package]
+name = "mamori"
+version = "0.1.0"
+edition = "2021"
+description = "KAIGEN vault guard: caps classical keys and deletes them when Kizashi reports kaigen."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Drill vaults only: the cached era follows Kizashi down as well as up, so a drill vault can be reused
+# after Kizashi's drill `reset`. Never enabled for the production build.
+drill = []
+
+[dependencies]
+near-sdk = { version = "5.30", default-features = false }
+
+[dev-dependencies]
+near-sdk = { version = "5.30", default-features = false, features = ["unit-testing"] }

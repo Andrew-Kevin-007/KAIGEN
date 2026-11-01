@@ -1,0 +1,6 @@
+# near-sdk only uses the chain's real host functions (including the panic call that carries the error
+# message) when built with `--cfg near`, which cargo-near sets and a plain `cargo build` does not. Without
+# it every refusal compiles to a bare abort and the message is lost. Scoped to wasm32 because host-side
+# `cargo test` must not see this flag.
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg", "near"]

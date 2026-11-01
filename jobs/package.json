@@ -1,0 +1,17 @@
+{
+  "name": "kaigen-jobs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@fastnear/api": "^2.5.0",
+    "@fastnear/ml-dsa-65": "^2.5.0",
+    "@fastnear/utils": "^2.5.0",
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0",
+    "@scure/base": "^2.4.0"
+  }
+}
