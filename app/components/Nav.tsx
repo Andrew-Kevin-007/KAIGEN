@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { describedBy } from "@/lib/aria";
 import { LINKS, fullLoad } from "@/lib/nav";
 import { NETWORK } from "@/lib/network";
 import { useWallet } from "@/lib/wallet";
@@ -32,36 +33,44 @@ function NavLink({ href, current, children, ...props }: NavLinkProps) {
 
 export function Nav() {
   const path = usePathname();
-  const { account, busy, connect, disconnect } = useWallet();
+  const { account, busy, error, connect, disconnect, clearError } = useWallet();
   const [menu, setMenu] = useState(false);
   const [wallet, setWallet] = useState(false);
   const [copied, setCopied] = useState(false);
   const root = useRef<HTMLDivElement>(null);
+  const walletTrigger = useRef<HTMLButtonElement>(null);
+  const menuTrigger = useRef<HTMLButtonElement>(null);
 
-  // Close menus on navigation, on Escape and on a click elsewhere.
+  // Close menus on navigation, on Escape, on a click elsewhere and when focus leaves the header. A wallet error is
+  // about the page the person was on, so it goes too.
   useEffect(() => {
     setMenu(false);
     setWallet(false);
-  }, [path]);
+    clearError();
+  }, [path, clearError]);
   useEffect(() => {
     if (!menu && !wallet) return;
-    const key = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        setMenu(false);
-        setWallet(false);
-      }
+    const close = () => {
+      setMenu(false);
+      setWallet(false);
     };
-    const click = (e: MouseEvent) => {
-      if (root.current && !root.current.contains(e.target as Node)) {
-        setMenu(false);
-        setWallet(false);
-      }
+    const key = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      // Focus goes back to the button that opened what is closing. On a phone the links vanish with the menu, which
+      // would otherwise drop focus onto the page.
+      (wallet ? walletTrigger : menuTrigger).current?.focus();
+      close();
+    };
+    const outside = (e: Event) => {
+      if (root.current && !root.current.contains(e.target as Node)) close();
     };
     window.addEventListener("keydown", key);
-    window.addEventListener("mousedown", click);
+    window.addEventListener("mousedown", outside);
+    window.addEventListener("focusin", outside);
     return () => {
       window.removeEventListener("keydown", key);
-      window.removeEventListener("mousedown", click);
+      window.removeEventListener("mousedown", outside);
+      window.removeEventListener("focusin", outside);
     };
   }, [menu, wallet]);
 
@@ -96,20 +105,28 @@ export function Nav() {
             {path !== "/migrate" &&
               (account ? (
                 <>
-                  <button type="button" className="btn btn-secondary btn-compact" aria-haspopup="menu" aria-expanded={wallet} aria-label={`Wallet ${account}`} onClick={() => setWallet((v) => !v)}>
+                  {/* A disclosure, not an ARIA menu: Tab moves through the items, Escape closes and returns here. */}
+                  <button
+                    ref={walletTrigger}
+                    type="button"
+                    className="btn btn-secondary btn-compact"
+                    aria-expanded={wallet}
+                    aria-controls="wallet-panel"
+                    aria-label={`Wallet ${account}`}
+                    onClick={() => setWallet((v) => !v)}
+                  >
                     {short(account)}
                   </button>
                   {wallet && (
-                    <div className="dropdown" role="menu">
+                    <div className="dropdown" id="wallet-panel">
                       <p className="meta mono" style={{ padding: "9px 12px", color: "var(--body)" }}>
                         {account}
                       </p>
-                      <button type="button" role="menuitem" onClick={copy}>
+                      <button type="button" onClick={copy}>
                         {copied ? "Copied" : "Copy address"}
                       </button>
                       <button
                         type="button"
-                        role="menuitem"
                         onClick={() => {
                           setWallet(false);
                           void disconnect();
@@ -121,11 +138,19 @@ export function Nav() {
                   )}
                 </>
               ) : (
-                <button type="button" className="btn btn-compact" onClick={connect} disabled={busy}>
+                <button type="button" className="btn btn-compact" onClick={connect} disabled={busy} aria-describedby={describedBy(error && "nav-wallet-error")}>
                   {busy ? "Connecting..." : "Connect wallet"}
                 </button>
               ))}
-            <button type="button" className="menu-btn" aria-label="Menu" aria-expanded={menu} aria-controls="main-nav" onClick={() => setMenu((v) => !v)}>
+            {path !== "/migrate" && error && (
+              <div id="nav-wallet-error" className="nav-error" role="alert">
+                <span>{error}</span>
+                <button type="button" onClick={clearError}>
+                  Dismiss
+                </button>
+              </div>
+            )}
+            <button ref={menuTrigger} type="button" className="menu-btn" aria-label="Menu" aria-expanded={menu} aria-controls="main-nav" onClick={() => setMenu((v) => !v)}>
               <span />
             </button>
           </div>

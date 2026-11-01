@@ -2,9 +2,12 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Modal } from "@/components/Modal";
+import { WalletError } from "@/components/WalletError";
+import { describedBy } from "@/lib/aria";
 import { accessKeys } from "@/lib/near";
 import { NETWORK } from "@/lib/network";
 import {
+  TEMP_KEY_GONE_AT,
   VAULT_CREATE_ENABLED,
   adminKeyFromBackupText,
   adminKeyFromHash,
@@ -16,7 +19,9 @@ import {
   initialSteps,
   nextStep,
   outcomeFailure,
+  placeCaption,
   recoveryNote,
+  stepCaption,
   txHashOf,
   txUrl,
   vaultAccountId,
@@ -37,6 +42,10 @@ const STEP_TEXT: Record<StepId, { title: string; detail: string }> = {
 const STATUS_TEXT: Record<StepStatus, string> = { todo: "Waiting", running: "Running", done: "Done", failed: "Failed" };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// The three panels on this page. Their captions are counted from this list, and the steps inside the last one from the real step list.
+const PARTS = ["admin", "account", "steps"] as const;
+const partCaption = (part: (typeof PARTS)[number]) => placeCaption("Part", PARTS.indexOf(part), PARTS.length);
 
 export default function CreateVaultPage() {
   return (
@@ -94,6 +103,21 @@ function Flow() {
     }
   }
 
+  // The backup file holds only the public key in the clear. A file that cannot be read (moved or deleted after it was
+  // picked, or refused by the browser) is said so, not left as a silent rejection.
+  async function chooseBackup(file: File | undefined) {
+    if (!file) return;
+    let text: string;
+    try {
+      text = await file.text();
+    } catch {
+      setAdmin(null);
+      setAdminError("That file could not be read. Choose it again.");
+      return;
+    }
+    await acceptKey(adminKeyFromBackupText(text));
+  }
+
   // The Protect page links here with the public key in the fragment.
   useEffect(() => {
     const fromLink = window.location.hash ? adminKeyFromHash(window.location.hash) : undefined;
@@ -108,7 +132,7 @@ function Flow() {
   );
 
   // While the temporary key still controls the vault, leaving this tab would strand it.
-  const tempLive = Boolean(tempPub) && steps[2].status !== "done";
+  const tempLive = Boolean(tempPub) && steps[TEMP_KEY_GONE_AT - 1].status !== "done";
   useEffect(() => {
     if (!tempLive) return;
     const hold = (e: BeforeUnloadEvent) => e.preventDefault();
@@ -118,6 +142,8 @@ function Flow() {
 
   const vault = wallet.account ? vaultAccountId(label, wallet.account) : null;
   const yocto = fundingYocto(funding);
+  const nameBad = Boolean(label) && vault !== null && !vault.ok;
+  const fundingBad = Boolean(funding) && yocto === null;
   const locked = steps[0].status !== "todo";
   const next = nextStep(steps);
   const note = vault?.ok ? recoveryNote(steps, vault.id, tempPub || "not made yet") : null;
@@ -222,7 +248,7 @@ function Flow() {
   return (
     <div className="stack-lg">
       <section className="panel" aria-labelledby="admin-h">
-        <p className="caption">1 of 3</p>
+        <p className="caption">{partCaption("admin")}</p>
         <h2 id="admin-h">Admin key</h2>
         {admin ? (
           <div className="field-group">
@@ -243,23 +269,26 @@ function Flow() {
             accept="application/json,.json"
             disabled={locked}
             aria-invalid={Boolean(adminError)}
-            onChange={async (e) => {
-              const file = e.target.files?.[0];
-              if (file) await acceptKey(adminKeyFromBackupText(await file.text()));
-            }}
+            aria-describedby={describedBy(adminError && "backup-error")}
+            onChange={(e) => void chooseBackup(e.target.files?.[0])}
           />
-          {adminError && <span className="hint error">{adminError}</span>}
+          {adminError && (
+            <span id="backup-error" className="hint error">
+              {adminError}
+            </span>
+          )}
         </div>
       </section>
 
       <section className="panel" aria-labelledby="account-h">
-        <p className="caption">2 of 3</p>
+        <p className="caption">{partCaption("account")}</p>
         <h2 id="account-h">Vault account</h2>
         {!wallet.account ? (
           <div className="actions">
-            <button type="button" className="btn" onClick={wallet.connect} disabled={wallet.busy}>
+            <button type="button" className="btn" onClick={wallet.connect} disabled={wallet.busy} aria-describedby={describedBy(wallet.error && "create-wallet-error")}>
               Connect wallet
             </button>
+            <WalletError id="create-wallet-error" />
           </div>
         ) : (
           <>
@@ -270,24 +299,58 @@ function Flow() {
               <label className="label" htmlFor="vault-name">
                 Vault name
               </label>
-              <input id="vault-name" className="field" value={label} onChange={(e) => setLabel(e.target.value)} disabled={locked} autoCapitalize="none" autoCorrect="off" spellCheck={false} aria-invalid={Boolean(label) && vault !== null && !vault.ok} />
-              {vault?.ok && <span className="hint">The account will be {vault.id}</span>}
-              {label && vault && !vault.ok && <span className="hint error">{vault.error}</span>}
+              <input
+                id="vault-name"
+                className="field"
+                value={label}
+                onChange={(e) => setLabel(e.target.value)}
+                disabled={locked}
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                aria-invalid={nameBad}
+                aria-describedby={describedBy(vault?.ok && "vault-name-hint", nameBad && "vault-name-error")}
+              />
+              {vault?.ok && (
+                <span id="vault-name-hint" className="hint">
+                  The account will be {vault.id}
+                </span>
+              )}
+              {nameBad && vault && !vault.ok && (
+                <span id="vault-name-error" className="hint error">
+                  {vault.error}
+                </span>
+              )}
             </div>
             <div className="field-group">
               <label className="label" htmlFor="funding">
                 Funding (NEAR)
               </label>
-              <input id="funding" className="field num" inputMode="decimal" value={funding} onChange={(e) => setFunding(e.target.value)} disabled={locked} aria-invalid={Boolean(funding) && yocto === null} />
-              <span className="hint">At least 0.05. It pays for the account and for the next two transactions. Add more after the vault has its contract.</span>
-              {funding && yocto === null && <span className="hint error">Enter a plain amount of at least 0.05.</span>}
+              <input
+                id="funding"
+                className="field num"
+                inputMode="decimal"
+                value={funding}
+                onChange={(e) => setFunding(e.target.value)}
+                disabled={locked}
+                aria-invalid={fundingBad}
+                aria-describedby={describedBy("funding-hint", fundingBad && "funding-error")}
+              />
+              <span id="funding-hint" className="hint">
+                At least 0.05. It pays for the account and for the next two transactions. Add more after the vault has its contract.
+              </span>
+              {fundingBad && (
+                <span id="funding-error" className="hint error">
+                  Enter a plain amount of at least 0.05.
+                </span>
+              )}
             </div>
           </>
         )}
       </section>
 
       <section className="panel" aria-labelledby="steps-h">
-        <p className="caption">3 of 3</p>
+        <p className="caption">{partCaption("steps")}</p>
         <h2 id="steps-h">Steps</h2>
         <ol className="rows">
           {steps.map((s, i) => (
@@ -320,7 +383,7 @@ function Flow() {
         <div className="actions">
           {next && vault?.ok && (
             <button type="button" className="btn" onClick={startNext} disabled={busy || !ready}>
-              {busy ? "Working..." : steps[nextIndex]?.status === "failed" ? "Retry this step" : `Run step ${nextIndex + 1}`}
+              {busy ? "Working..." : steps[nextIndex]?.status === "failed" ? "Retry this step" : `Run ${stepCaption(next).toLowerCase()}`}
             </button>
           )}
           {failedCreate && (
@@ -329,7 +392,7 @@ function Flow() {
             </button>
           )}
         </div>
-        {tempLive && <p className="small body">Keep this tab open until step 3 is done. The temporary key exists only here.</p>}
+        {tempLive && <p className="small body">Keep this tab open until step {TEMP_KEY_GONE_AT} is done. The temporary key exists only here.</p>}
       </section>
 
       {note && (

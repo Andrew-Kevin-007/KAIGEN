@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Modal } from "@/components/Modal";
+import { describedBy } from "@/lib/aria";
 import { BackupError, decryptSeed, downloadBackup, encryptSeed, type BackupFile } from "@/lib/backup";
 import { MIN_PASSPHRASE, checkPassphrase } from "@/lib/passphrase";
 import { VAULT_CREATE_ENABLED } from "@/lib/vault-create";
@@ -149,6 +150,7 @@ export function MigrateClient() {
   const strength = checkPassphrase(passphrase);
   const passphraseOk = strength.ok && passphrase === again;
   const weak = passphrase.length >= MIN_PASSPHRASE && !strength.ok;
+  const mismatch = Boolean(again) && passphrase !== again;
 
   return (
     <div className="container page">
@@ -193,18 +195,26 @@ export function MigrateClient() {
                 <label className="label" htmlFor="pass">
                   Passphrase
                 </label>
-                <input id="pass" className="field" type="password" autoComplete="new-password" value={passphrase} onChange={(e) => setPassphrase(e.target.value)} aria-describedby="pass-hint" aria-invalid={weak} />
+                <input id="pass" className="field" type="password" autoComplete="new-password" value={passphrase} onChange={(e) => setPassphrase(e.target.value)} aria-describedby={describedBy("pass-hint", weak && "pass-error")} aria-invalid={weak} />
                 <span id="pass-hint" className="hint">
                   At least {MIN_PASSPHRASE} characters, and not a common one. Four or five unrelated words work well. There is no recovery if you forget it.
                 </span>
-                {weak && <span className="hint error">{strength.message}</span>}
+                {weak && (
+                  <span id="pass-error" className="hint error">
+                    {strength.message}
+                  </span>
+                )}
               </div>
               <div className="field-group">
                 <label className="label" htmlFor="again">
                   Repeat passphrase
                 </label>
-                <input id="again" className="field" type="password" autoComplete="new-password" value={again} onChange={(e) => setAgain(e.target.value)} aria-invalid={Boolean(again) && passphrase !== again} />
-                {again && passphrase !== again && <span className="hint error">Does not match.</span>}
+                <input id="again" className="field" type="password" autoComplete="new-password" value={again} onChange={(e) => setAgain(e.target.value)} aria-invalid={mismatch} aria-describedby={describedBy(mismatch && "again-error")} />
+                {mismatch && (
+                  <span id="again-error" className="hint error">
+                    Does not match.
+                  </span>
+                )}
               </div>
               <div className="callout" data-tone="warning">
                 <strong>A backup is required.</strong>

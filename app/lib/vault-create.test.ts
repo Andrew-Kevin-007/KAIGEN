@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   STEP_ORDER,
+  TEMP_KEY_GONE_AT,
   adminKeyFromBackupText,
   adminKeyFromHash,
   begin,
@@ -12,7 +13,9 @@ import {
   initialSteps,
   nextStep,
   outcomeFailure,
+  placeCaption,
   recoveryNote,
+  stepCaption,
   txHashOf,
   vaultAccountId,
 } from "./vault-create.ts";
@@ -129,4 +132,18 @@ test("APP-5: the admin key comes from the Protect page's link or from the backup
   assert.equal(adminKeyFromBackupText(JSON.stringify({ v: 1, app: "kaigen", publicKey: KEY, ciphertext: "x" })), KEY);
   assert.equal(adminKeyFromBackupText(JSON.stringify({ app: "other", publicKey: KEY })), null);
   assert.equal(adminKeyFromBackupText("not json"), null);
+});
+
+test("APP-C1: step captions are read from the real step list, so the count on screen is the count of steps", () => {
+  const captions = STEP_ORDER.map(stepCaption);
+  assert.deepEqual(captions, ["Step 1 of 4", "Step 2 of 4", "Step 3 of 4", "Step 4 of 4"]);
+  // Every caption ends in the length of the list, whatever that length becomes.
+  for (const c of captions) assert.ok(c.endsWith(` of ${STEP_ORDER.length}`), c);
+  assert.equal(placeCaption("Part", 0, 3), "Part 1 of 3");
+  assert.equal(placeCaption("Part", 2, 3), "Part 3 of 3");
+});
+
+test("APP-C1: 'keep this tab open until step N is done' names the step that deletes the temporary key", () => {
+  assert.equal(STEP_ORDER[TEMP_KEY_GONE_AT - 1], "cleanup");
+  assert.equal(TEMP_KEY_GONE_AT, 3);
 });

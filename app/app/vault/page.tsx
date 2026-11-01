@@ -1,7 +1,12 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import { WalletError } from "@/components/WalletError";
+import { describedBy } from "@/lib/aria";
+import { errorText } from "@/lib/errors";
+import { latestOnly } from "@/lib/latest";
 import { hasContract, isEra, view, yoctoToNear, type Era, type QueuedWithdrawal, type VaultConfig } from "@/lib/near";
+import { vaultShapeProblem } from "@/lib/vault-shape";
 import { useWallet } from "@/lib/wallet";
 
 const RANK: Record<Era, number> = { Calm: 0, Warning: 1, Kaigen: 2 };
@@ -46,44 +51,74 @@ export default function VaultPage() {
   const wallet = useWallet();
   const [tripState, setTripState] = useState<"idle" | "sending" | "sent">("idle");
   const [tripError, setTripError] = useState("");
+  // Only the newest lookup, and the trip for the vault now on screen, may change the page; anything older is dropped.
+  const [lookups] = useState(latestOnly);
+  const [trips] = useState(latestOnly);
+  const inFlight = useRef<AbortController | null>(null);
+
+  // Leaving the page ends any lookup still waiting on the network.
+  useEffect(
+    () => () => {
+      lookups.invalidate();
+      trips.invalidate();
+      inFlight.current?.abort();
+    },
+    [lookups, trips],
+  );
 
   async function trip(id: string) {
+    const current = trips.begin();
     setTripState("sending");
     setTripError("");
     try {
       // `trip` reserves 200 Tgas for its callback, so the transaction carries 250.
       await wallet.call({ receiver: id, method: "trip", gasTgas: 250 });
-      setTripState("sent");
+      if (current()) setTripState("sent");
     } catch (err) {
+      if (!current()) return;
       setTripState("idle");
-      setTripError(err instanceof Error ? err.message : String(err));
+      setTripError(errorText(err, "The wallet did not complete the request."));
     }
   }
 
   async function lookup(e: FormEvent) {
     e.preventDefault();
     const id = account.trim().toLowerCase();
+    // A new lookup replaces the old one: its answer, its network calls and the trip state that belonged to its vault.
+    inFlight.current?.abort();
+    const current = lookups.begin();
+    trips.invalidate();
     setError("");
     setVault(null);
-    if (!ACCOUNT.test(id)) return setError("That is not a valid NEAR account name.");
-    setBusy(true);
-    try {
-      if (!(await hasContract(id))) throw new Error("No contract is deployed on that account, so it is not a vault.");
-      const [config, keys, queue, spent] = await Promise.all([
-        view<VaultConfig>(id, "config"),
-        view<string[]>(id, "daily_keys"),
-        view<QueuedWithdrawal[]>(id, "queue"),
-        view<string>(id, "spent_24h", { token: null }),
-      ]);
-      const kizashiEra = await view<unknown>(config.kizashi, "era");
-      if (!isEra(kizashiEra)) throw new Error("Kizashi returned an era this page does not know.");
-      // A contract that answers these views with something else is not a KAIGEN vault.
-      if (!isEra(config?.era) || !Array.isArray(keys) || !Array.isArray(queue)) throw new Error("That contract does not look like a KAIGEN vault.");
-      setVault({ account: id, config, keys, queue, spent, kizashiEra });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
+    setTripState("idle");
+    setTripError("");
+    if (!ACCOUNT.test(id)) {
       setBusy(false);
+      return setError("That is not a valid NEAR account name.");
+    }
+    setBusy(true);
+    const ctrl = new AbortController();
+    inFlight.current = ctrl;
+    try {
+      if (!(await hasContract(id, ctrl.signal))) throw new Error("No contract is deployed on that account, so it is not a vault.");
+      const [config, keys, queue, spent] = await Promise.all([
+        view<unknown>(id, "config", {}, ctrl.signal),
+        view<unknown>(id, "daily_keys", {}, ctrl.signal),
+        view<unknown>(id, "queue", {}, ctrl.signal),
+        view<unknown>(id, "spent_24h", { token: null }, ctrl.signal),
+      ]);
+      // A contract that answers these views with something else is not a KAIGEN vault. Checked before any field is read.
+      const problem = vaultShapeProblem({ config, keys, queue, spent });
+      if (problem) throw new Error(problem);
+      const vaultConfig = config as VaultConfig;
+      const kizashiEra = await view<unknown>(vaultConfig.kizashi, "era", {}, ctrl.signal);
+      if (!isEra(kizashiEra)) throw new Error("Kizashi returned an era this page does not know.");
+      if (!current()) return;
+      setVault({ account: id, config: vaultConfig, keys: keys as string[], queue: queue as QueuedWithdrawal[], spent: spent as string, kizashiEra });
+    } catch (err) {
+      if (current()) setError(errorText(err, "That vault could not be read."));
+    } finally {
+      if (current()) setBusy(false);
     }
   }
 
@@ -117,16 +152,18 @@ export default function VaultPage() {
             spellCheck={false}
             inputMode="url"
             aria-invalid={Boolean(error) && !vault}
+            aria-describedby={describedBy(Boolean(error) && !vault && "lookup-error")}
           />
         </div>
-        <button type="submit" className="btn btn-secondary" disabled={busy || !account.trim()}>
+        {/* Not disabled while looking: a lookup that hangs can be started again, and the newer one wins. */}
+        <button type="submit" className="btn btn-secondary" disabled={!account.trim()}>
           {busy ? "Looking..." : "Look up"}
         </button>
       </form>
 
       {error && (
         <div className="reading" style={{ marginTop: "1.25rem" }}>
-          <p role="alert" className="callout" data-tone="invalid">
+          <p id="lookup-error" role="alert" className="callout" data-tone="invalid">
             {error}
           </p>
         </div>
@@ -238,11 +275,12 @@ export default function VaultPage() {
                     {tripState === "sending" ? "Waiting for your wallet..." : "Trip now"}
                   </button>
                 ) : (
-                  <button type="button" className="btn" onClick={wallet.connect} disabled={wallet.busy}>
+                  <button type="button" className="btn" onClick={wallet.connect} disabled={wallet.busy} aria-describedby={describedBy(wallet.error && "trip-wallet-error")}>
                     Connect a wallet to trip
                   </button>
                 )}
               </div>
+              <WalletError id="trip-wallet-error" />
               {tripState === "sent" && (
                 <p role="status" className="callout" data-tone="valid">
                   Sent. Look the vault up again in a minute to see its keys gone.

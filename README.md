@@ -6,7 +6,7 @@
 
 KAIGEN is a set of NEAR smart contracts and Node tooling for accounts that defend themselves. An account holds a cold admin key that signs with ML-DSA-65 (a post-quantum signature scheme), and any number of classical hot keys (for a person or an AI agent) that are rate-limited, capped in value, and deleted by the account after repeated refusals. An optional "omen" contract lets anyone who discloses a break of a classical curve trigger a permissionless lockdown of opted-in vaults, with no oracle and no admin. Status: **testnet-proven, not on mainnet, no outside audit.** Nothing is deployed to mainnet. The mainnet lock is staged behind an evidence gate and has not run.
 
-Source Code: this repository (`<!-- REPO URL: add when the repository is public, before 14 Nov 2026 23:59 UTC -->`). Demo post: `<!-- DEMO POST URL: Kevin adds after publishing -->`. There is no live demo yet; the app runs locally (see Getting Started).
+[Source Code](https://github.com/Andrew-Kevin-007/KAIGEN). Demo post: `<!-- DEMO POST URL: Kevin adds after publishing -->`. There is no live demo yet; the app runs locally (see Getting Started).
 
 ---
 
@@ -26,7 +26,7 @@ A NEAR account keeps accepting a key after that key is broken or stolen, and an 
 
 | Situation | Without KAIGEN | With KAIGEN |
 | --- | --- | --- |
-| A classical key is broken | Keys keep working until a person deletes them | A vault in lockdown deletes its classical daily and intents keys on the next `trip` (testnet drill: see Proof) |
+| A classical key is broken | Keys keep working until a person deletes them | A vault in lockdown deletes its classical daily and intents keys on the next `trip` (testnet drill: see `fire-tests/`) |
 | An agent is prompt-injected | The agent's key sends whatever it is asked to, or is refused by app logic only | The contract refuses sends above the 24 h limit, to non-allowlisted recipients, and burns the key after the strike limit |
 | A large send is hijacked | It leaves at once | Sends above the direct-send limit wait in a queue the admin can cancel during the delay |
 | Admin key | Often a full-access classical key | ML-DSA-65 full-access key that signs AddKey and DeleteKey |
@@ -55,7 +55,7 @@ Track: **`security`** (AI Security & Defense). Fallback: **`open`** (Open Innova
 | Function-call access keys with allowance | Daily hot keys can call only `send_small` and `request_withdraw` on the vault (`add_daily_key`, `contracts/mamori/src/lib.rs`) | Built; tested on testnet |
 | Full-access keys, AddKey and DeleteKey | Admin key rotation and deleting classical keys at lockdown | Built; tested on testnet |
 | ML-DSA-65 full-access keys | Post-quantum admin key that deletes classical keys | Proven on testnet protocol 88; mainnet protocol 86 not run |
-| Signature verification in the contract | Omen claims: ed25519 and secp256k1 (`verify`, `contracts/kizashi/src/lib.rs`) | Proven on testnet (see Proof) |
+| Signature verification in the contract | Omen claims: ed25519 and secp256k1 (`verify`, `contracts/kizashi/src/lib.rs`) | Proven on testnet (`fire-tests/0001.json` to `0004.json`) |
 | `intents.near` key registration | Lockdown removes keys recorded on `intents.near` | Code path present; method names unconfirmed (gate G4); not run on chain |
 | 1Click (NEAR Intents) top-up | Server-side top-up route in `app/` | UI and routes present; USDC leg not run on chain |
 
@@ -63,7 +63,7 @@ Track: **`security`** (AI Security & Defense). Fallback: **`open`** (Open Innova
 
 ## How It Works
 
-1. A vault is an account. Its full-access key is an ML-DSA-65 key. Classical full-access keys are deleted once the ML-DSA key takes over (testnet proof).
+1. A vault is an account. Its full-access key is an ML-DSA-65 key. Classical full-access keys are deleted once the ML-DSA key takes over (testnet drill: `fire-tests/0001.json` to `0004.json`).
 2. Each hot key (human or agent) is a function-call key with an allowance. Mamori's `send_small` checks the 24 h rolling limit per token, the allowlist and the minimum send before it moves anything.
 3. A larger send goes to a queue with a delay. The admin can cancel it during the delay. The queue and the rolling request budget are both capped by the pending limit.
 4. A refusal is a strike against the calling key. At the strike limit the vault deletes that key from the account.
@@ -102,7 +102,7 @@ Track: **`security`** (AI Security & Defense). Fallback: **`open`** (Open Innova
 | --- | --- | --- |
 | Init | Kizashi takes its omens (8 max, ed25519 or secp256k1, warning or kaigen level); Mamori takes its daily limit and a delay of at least 300 s | `Kizashi::new`, `Mamori::init` |
 | Operate | Daily keys send within the 24 h limit; larger sends queue | `send_small`, `request_withdraw`, `execute` |
-| Strike | Refused calls count against the key; the key burns at the limit | `refuse`, `record_strike` path |
+| Strike | Refused calls count against the key; the key burns at the limit | `refuse` (line 703), burn at 712-714 |
 | Warn | Era reaches `Warning`; `send_small` pauses and the delay doubles | `trip`, `on_era` |
 | Kaigen | Era reaches `Kaigen`; classical keys deleted; queue cancelled; cleanup continues over repeated `trip` calls | `trip`, `lock_down` |
 | Lock (not done) | Kizashi's own access keys deleted, so it has no admin | `mainnet lock` (`jobs/src/mainnet.mjs`), gated |
@@ -144,7 +144,7 @@ sequenceDiagram
 | secp256k1 (ECDSA, low-s) | `kizashi`, `scripts/claim.mjs` | Omen and claim verification; `ecrecover` on chain |
 | ML-DSA-65 (FIPS 204) | Admin key via `@fastnear/ml-dsa-65` | Testnet protocol 88 proof only |
 | RFC 9380 hash-to-curve | `scripts/omens.mjs` | Omen keys derived from public seeds |
-| sha256 | `kizashi` | Claim digests (keccak is not used; see `contracts/kizashi/src/lib.rs`) |
+| sha256 | `kizashi` | Claim digests; secp256k1 signs sha256, not keccak256 (`contracts/kizashi/src/lib.rs`, lines 194-195) |
 | NEAR Intents (`intents.near`) | `mamori` | Key removal path present; not run on chain |
 | 1Click API | `app/app/api/topup/*` | Top-up quote and status routes; not run on chain |
 
@@ -170,7 +170,7 @@ To create your own testnet accounts, run `node jobs/src/bin.mjs testnet`. It mak
 | Larger sends wait out a delay | Yes | `request_withdraw`, `execute` | Delay at least 300 s (`MIN_DELAY_SECS`); 24 h production delay is an open decision |
 | Queued value is capped | Yes | `request_withdraw`, `fits_pending` | Pending limit: 10x the daily limit for NEAR; zero for a token with no daily limit |
 | Requests per 24 h are capped | Yes | `request_withdraw`, `add_to_window` | Same size as the pending limit |
-| Only allowlisted recipients | Yes, when enforced | `send_small` | Allowlist up to 32 entries |
+| Only allowlisted recipients | Yes, when enforced | `send_small`, `allow_recipient` | Allowlist up to 32 entries |
 | Refused keys are burned | Yes | `refuse` | 3 strikes in 24 h by default; admin sets 1 to 10 (`set_max_strikes`) |
 | Dust and no-limit tokens do not burn a key | Yes | `send_small`, `refuse_uncounted` | Minimum send 0.001 NEAR by default |
 | Lockdown at Kaigen | Yes | `trip`, `lock_down` | Deletes daily and intents keys; repeat `trip` until empty |
@@ -183,7 +183,7 @@ To create your own testnet accounts, run `node jobs/src/bin.mjs testnet`. It mak
 
 ## Key Code
 
-Omen claim, verbatim from `contracts/kizashi/src/lib.rs`:
+Omen claim, excerpt from `contracts/kizashi/src/lib.rs` (indentation trimmed):
 
 ```rust
 let omen = self.omens.get(&omen_id).unwrap_or_else(|| env::panic_str("unknown omen"));
@@ -192,7 +192,7 @@ let message = build_claim_message(&env::current_account_id(), &omen_id, &claiman
 require!(verify(omen, message.as_bytes(), &signature.0), "bad signature");
 ```
 
-Refusal and burn, verbatim from `contracts/mamori/src/lib.rs`:
+Refusal and burn, excerpt from `contracts/mamori/src/lib.rs` (indentation trimmed):
 
 ```rust
 record.count += 1;
@@ -203,7 +203,7 @@ if burned {
     self.daily_keys.remove(key);
 ```
 
-Send guard, verbatim from `contracts/mamori/src/lib.rs`:
+Send guard, excerpt from `contracts/mamori/src/lib.rs` (indentation trimmed):
 
 ```rust
 if self.limit_for(&token) == 0 {
@@ -218,11 +218,30 @@ if token.is_none() && amount.0 < self.min_send {
 
 ## Exact files and line numbers
 
-<!-- LINES: filled from a grep of the final code; re-check after any contract edit -->
+<!-- Line numbers grepped on 1 Nov 2026 from the code as it stood. Re-check after any contract edit. -->
 
 | What | File | Lines |
 | --- | --- | --- |
-| LINES_PLACEHOLDER | | |
+| Kizashi: omen cap, init and key checks | `contracts/kizashi/src/lib.rs` | 28 (`MAX_OMENS`); 167 (`new`); 492 (`require_usable_ed25519`) |
+| Kizashi: claim, signature check, era raise, payouts | `contracts/kizashi/src/lib.rs` | 201 (`claim`); 194-195 (sha256 note); 499 (`build_claim_message`); 503 (`verify`) |
+| Kizashi: payout callbacks and events | `contracts/kizashi/src/lib.rs` | 243 (`on_near_payout`); 283 (`on_usdc_paid`); 525-532 (`emit_payout_*`) |
+| Kizashi: owed payouts and USDC registration | `contracts/kizashi/src/lib.rs` | 298 (`retry_payout`); 329 (`register_usdc`) |
+| Kizashi: views | `contracts/kizashi/src/lib.rs` | 339 (`era`); 343 (`omens`); 361 (`bounty`); 377 (`claim_message`) |
+| Kizashi: drill-only reset | `contracts/kizashi/src/lib.rs` | 384 (`#[cfg(feature = "drill")]`); 385 (`reset`) |
+| Mamori: constants (limits, strikes, pending multiple, min send, delay floor) | `contracts/mamori/src/lib.rs` | 17 (`DAY_NS`); 18 (`MAX_DAILY_KEYS`); 20 (`MAX_QUEUE`); 21 (`MAX_ALLOWED`); 23-24 (strikes); 28 (`MAX_WINDOW_ENTRIES`); 32 (`PENDING_LIMIT_MULTIPLE`); 34 (`DEFAULT_MIN_SEND`); 37 (`DEFAULT_ALLOWANCE`); 60 (`MIN_DELAY_SECS`) |
+| Mamori: init and delay floor | `contracts/mamori/src/lib.rs` | 185 (`init`); 188-189 (delay check) |
+| Mamori: admin setters | `contracts/mamori/src/lib.rs` | 215 (`add_daily_key`); 242 (`register_intents_key`); 252 (`set_token_limit`); 260 (`set_pending_limit`); 267 (`set_min_send`); 274 (`allow_recipient`); 288 (`set_max_strikes`); 290 (strike range check); 302 (`cancel`) |
+| Mamori: send guard, 24 h cap, pause at warning | `contracts/mamori/src/lib.rs` | 320 (`send_small`); 322 (`era == Calm`); 618 (`spend`) |
+| Mamori: queue, pending limit, 24 h request window | `contracts/mamori/src/lib.rs` | 350 (`request_withdraw`); 355 (`fits_pending`); 356-361 (window check); 629 (`add_to_window`); 659 (`pending_limit_for`); 667 (`fits_pending`) |
+| Mamori: execute, trip, lockdown, delay doubling | `contracts/mamori/src/lib.rs` | 373 (`execute`); 393 (`trip`, anyone); 403 (`on_era`); 437 (`lock_down`); 728 (doubled delay at warning) |
+| Mamori: strikes and burn | `contracts/mamori/src/lib.rs` | 686 (`cancel_queued_by`); 703 (`refuse`); 712-714 (burn) |
+| Mamori: refusal without strike | `contracts/mamori/src/lib.rs` | 695 (`refuse_uncounted`) |
+| Tooling: CLI commands | `jobs/src/bin.mjs` | 97 (fire-test records written to `fire-tests/`); 136 (`judge` writes `judge-report.json`); 161 (`verify`); 164 (`verify` reads `fire-tests/`); 196 (`mainnet`) |
+| Tooling: judge checks | `jobs/src/judge.mjs` | `checks()`: each claim, its command and evidence |
+| Tooling: mainnet dry-run and lock | `jobs/src/mainnet.mjs` | whole file (dry-run by default) |
+| App: migrate page, headers | `app/app/migrate/page.tsx`, `app/lib/security-headers.ts` | `security-headers.ts` 21-22 (COOP, CORP) |
+| App: top-up guard | `app/lib/topup-guard.ts` | 25 (`guardConfigFromEnv`) |
+| Fire-test records | `fire-tests/0001.json` to `0004.json` | whole files (drill, testnet) |
 
 ---
 
@@ -255,10 +274,11 @@ if token.is_none() && amount.0 < self.min_send {
 | - | Mamori | If every `intents.near` removal keeps failing, intents keys can starve; gas figures come from the unit-test VM | Open |
 | - | Mamori | One `trip` may not finish a lockdown; repeat until `intents_keys()` and `daily_keys()` are empty | Open; the keeper confirms by daily keys only |
 | - | Tooling | The lock reads the chain through one RPC host; the gate file is unsigned; the deployer's full-access key on a Mamori reference is not flagged | Open |
+| - | Verify | `node jobs/src/bin.mjs verify` reads `deployments.json`, which is not committed, so its fire-test checks cannot run from a fresh clone; it also has a freshness limit on fire-test records (`MAX_FIRE_TEST_AGE_BLOCKS`) | Open |
 | - | App | `KIZASHI_CODE_HASH` must be set before any non-dry quote; otherwise top-ups return 503 by design | Config |
 | - | App | The 1Click NEAR USDC asset id `nep141:<usdc_token>` is assumed, not checked against the live token list | Open |
 
-**Fixed in the current code** (checked in the code and covered by tests, per [docs/ARCHITECTURE-REVIEW.md](docs/ARCHITECTURE-REVIEW.md)): K1 USDC payout registration and success or failure events; K2 `reset` only in the drill build; K3 retry of owed payouts; K5 init key checks; S1 pending limit on queued value; S3 send-window bucketing and minimum send; APP-1 `/migrate` isolation; APP-2 top-up destination check.
+**Fixed in the current code** (each one is visible in the code paths named in the table below): K1 payout registration and success or failure events (`on_usdc_paid`, `emit_payout_*`); K2 `reset` only in the drill feature; K3 `retry_payout` for owed payouts; K5 init key checks (`require_usable_ed25519`); S1 pending limit on queued value (`fits_pending`); S-queue requesting key recorded and queue cancelled on burn (`requested_by`, `cancel_queued_by`); S3 send-window bucketing and minimum send (`add_to_window`, `DEFAULT_MIN_SEND`); APP-1 `/migrate` headers (`app/lib/security-headers.ts`). APP-2 is not listed as fixed here because its code was not checked for this README.
 
 **Not checked.** No outside audit. Builds are reproducible on one machine, not yet across machines. No gas measurement on a real mainnet chain.
 

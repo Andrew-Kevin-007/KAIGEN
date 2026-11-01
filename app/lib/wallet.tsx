@@ -5,6 +5,7 @@
 // the browser.
 import { usePathname } from "next/navigation";
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { disconnectOutcome, errorText } from "@/lib/errors";
 import { NETWORK } from "@/lib/network";
 
 const TGAS = (n: number) => String(BigInt(n) * 10n ** 12n);
@@ -21,9 +22,12 @@ export interface WalletCall {
 interface WalletState {
   account: string | null;
   busy: boolean;
+  /** Why the last connect or disconnect failed, or "". Shown next to the Connect wallet buttons. */
   error: string;
   connect: () => Promise<void>;
+  /** Never rejects: a failure lands in `error`. */
   disconnect: () => Promise<void>;
+  clearError: () => void;
   call: (c: WalletCall) => Promise<void>;
   /** One transaction of any actions (as built by `actions` from @fastnear/api), returning the wallet's outcome. */
   sendTx: (receiver: string, actions: unknown[]) => Promise<unknown>;
@@ -77,20 +81,24 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       const r = await w.connect({ network: NETWORK });
       if (r?.accountId) setAccount(r.accountId);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not connect a wallet.");
+      setError(errorText(e, "Could not connect a wallet."));
     } finally {
       setBusy(false);
     }
   }, [load]);
 
+  // The page stops treating the person as connected whatever the wallet says; a failure is shown, not thrown.
   const disconnect = useCallback(async () => {
-    try {
+    setError("");
+    const problem = await disconnectOutcome(async () => {
       const { w } = await load();
       await w.disconnect({ network: NETWORK });
-    } finally {
-      setAccount(null);
-    }
+    });
+    setAccount(null);
+    if (problem) setError(problem);
   }, [load]);
+
+  const clearError = useCallback(() => setError(""), []);
 
   const call = useCallback(
     async (c: WalletCall) => {
@@ -116,6 +124,9 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     [load],
   );
 
-  const value = useMemo(() => ({ account, busy, error, connect, disconnect, call, sendTx }), [account, busy, error, connect, disconnect, call, sendTx]);
+  const value = useMemo(
+    () => ({ account, busy, error, connect, disconnect, clearError, call, sendTx }),
+    [account, busy, error, connect, disconnect, clearError, call, sendTx],
+  );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

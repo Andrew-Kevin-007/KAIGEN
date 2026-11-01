@@ -1,7 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { KIZASHI_ID, view, yoctoToNear, type Bounty } from "@/lib/near";
+import { WalletError } from "@/components/WalletError";
+import { describedBy } from "@/lib/aria";
+import { loadBountyPanel, type BountyPanel } from "@/lib/bounty";
+import { errorText } from "@/lib/errors";
+import { KIZASHI_ID, view, yoctoToNear } from "@/lib/near";
 import { refundAddressError } from "@/lib/refund";
 import { toUnits } from "@/lib/units";
 import { useWallet } from "@/lib/wallet";
@@ -39,6 +43,8 @@ const NEEDS_MESSAGE: Record<string, string> = {
 };
 const TERMINAL = new Set(["SUCCESS", "REFUNDED", "FAILED"]);
 
+type Panel = { status: "loading" } | { status: "error"; message: string } | ({ status: "ready" } & BountyPanel);
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, init);
   const body = await res.json().catch(() => ({}));
@@ -48,8 +54,8 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 
 export default function BountyPage() {
   const wallet = useWallet();
-  const [bounty, setBounty] = useState<Bounty | null>(null);
-  const [registered, setRegistered] = useState<boolean | null>(null);
+  const [panel, setPanel] = useState<Panel>({ status: "loading" });
+  const [attempt, setAttempt] = useState(0);
   const [tokens, setTokens] = useState<Token[]>([]);
   const [tokensError, setTokensError] = useState("");
   const [chain, setChain] = useState("");
@@ -62,24 +68,20 @@ export default function BountyPage() {
   const [error, setError] = useState("");
   const [regState, setRegState] = useState<"idle" | "sending" | "sent">("idle");
 
-  // What the bounty holds, and whether Kizashi can receive USDC at all yet.
+  // What the bounty holds, and whether Kizashi can receive USDC at all yet. A failure is shown with a way to try
+  // again; the rest of the page still works without this panel.
   useEffect(() => {
     if (!KIZASHI_ID) return;
     const ctrl = new AbortController();
-    (async () => {
-      try {
-        const b = await view<Bounty>(KIZASHI_ID, "bounty", {}, ctrl.signal);
-        setBounty(b);
-        if (b.usdc_token) {
-          const sb = await view<{ total: string } | null>(b.usdc_token, "storage_balance_of", { account_id: KIZASHI_ID }, ctrl.signal);
-          setRegistered(sb !== null);
-        }
-      } catch {
-        // The page still works without this panel; the quote will say what is wrong.
-      }
-    })();
+    // A refresh after registering keeps the figures on screen; a retry after an error goes back to "Loading...".
+    setPanel((p) => (p.status === "error" ? { status: "loading" } : p));
+    loadBountyPanel(view, KIZASHI_ID, ctrl.signal)
+      .then((loaded) => setPanel({ status: "ready", ...loaded }))
+      .catch((e: unknown) => {
+        if (!ctrl.signal.aborted) setPanel({ status: "error", message: errorText(e, "The bounty could not be read.") });
+      });
     return () => ctrl.abort();
-  }, [regState]);
+  }, [regState, attempt]);
 
   useEffect(() => {
     api<{ tokens: Token[] }>("/api/topup/tokens")
@@ -92,6 +94,9 @@ export default function BountyPage() {
   const token = tokens.find((t) => t.assetId === assetId);
   const units = token ? toUnits(amount, token.decimals) : null;
   const refundProblem = token ? refundAddressError(token.blockchain, refundTo) : null;
+  const ready = panel.status === "ready" ? panel : null;
+  const amountBad = Boolean(amount) && Boolean(token) && !units;
+  const refundBad = Boolean(refundTo.trim()) && refundProblem !== null;
 
   async function ask(dry: boolean) {
     if (!token || !units) return;
@@ -106,7 +111,7 @@ export default function BountyPage() {
       });
       setQuote(q);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorText(e, "The quote could not be fetched."));
     } finally {
       setBusy(false);
     }
@@ -146,7 +151,7 @@ export default function BountyPage() {
       setRegState("sent");
     } catch (e) {
       setRegState("idle");
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorText(e, "The wallet did not complete the request."));
     }
   }
 
@@ -167,36 +172,48 @@ export default function BountyPage() {
       ) : (
         <section aria-labelledby="now-h" className="stack">
           <h2 id="now-h">In the bounty now</h2>
-          <table className="table">
-            <thead>
-              <tr>
-                <th scope="col">Item</th>
-                <th scope="col" className="num-col">
-                  Amount
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td data-label="Item">NEAR in the bounty</td>
-                <td data-label="Amount" className="num-col">
-                  {bounty ? `${yoctoToNear(bounty.near, 2)} NEAR` : "Loading..."}
-                </td>
-              </tr>
-              {bounty?.usdc_token && (
+          {panel.status === "error" ? (
+            <div className="callout reading" data-tone="invalid" role="alert">
+              <strong>Could not read the bounty.</strong>
+              <span>{panel.message}</span>
+              <div className="actions" style={{ marginTop: "0.75rem" }}>
+                <button type="button" className="btn btn-compact" onClick={() => setAttempt((n) => n + 1)}>
+                  Try again
+                </button>
+              </div>
+            </div>
+          ) : (
+            <table className="table">
+              <thead>
                 <tr>
-                  <td data-label="Item">USDC receiving</td>
+                  <th scope="col">Item</th>
+                  <th scope="col" className="num-col">
+                    Amount
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td data-label="Item">NEAR in the bounty</td>
                   <td data-label="Amount" className="num-col">
-                    {registered === null ? "Loading..." : registered ? <span className="chip" data-tone="valid">Ready</span> : <span className="chip" data-tone="warning">Not set up yet</span>}
+                    {ready ? `${yoctoToNear(ready.bounty.near, 2)} NEAR` : "Loading..."}
                   </td>
                 </tr>
-              )}
-            </tbody>
-          </table>
+                {ready?.bounty.usdc_token && (
+                  <tr>
+                    <td data-label="Item">USDC receiving</td>
+                    <td data-label="Amount" className="num-col">
+                      {ready.registered ? <span className="chip" data-tone="valid">Ready</span> : <span className="chip" data-tone="warning">Not set up yet</span>}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          )}
         </section>
       )}
 
-      {bounty?.usdc_token && registered === false && (
+      {ready?.bounty.usdc_token && ready.registered === false && (
         <div className="panel reading" style={{ marginTop: "2rem" }}>
           <h2>One setup step</h2>
           <p className="body">
@@ -208,11 +225,12 @@ export default function BountyPage() {
                 {regState === "sending" ? "Waiting for your wallet..." : "Register Kizashi for USDC"}
               </button>
             ) : (
-              <button type="button" className="btn" onClick={wallet.connect} disabled={wallet.busy}>
+              <button type="button" className="btn" onClick={wallet.connect} disabled={wallet.busy} aria-describedby={describedBy(wallet.error && "bounty-wallet-error")}>
                 Connect wallet
               </button>
             )}
           </div>
+          <WalletError id="bounty-wallet-error" />
           {regState === "sent" && (
             <p role="status" className="callout" data-tone="valid">
               Sent. This updates in a moment.
@@ -280,8 +298,12 @@ export default function BountyPage() {
             <label className="label" htmlFor="amount">
               Amount
             </label>
-            <input id="amount" className="field num" inputMode="decimal" value={amount} onChange={(e) => (setAmount(e.target.value), setQuote(null))} placeholder="0.0" disabled={!token} aria-invalid={Boolean(amount) && Boolean(token) && !units} />
-            {amount && token && !units && <span className="hint error">Enter a positive number with at most {token.decimals} decimals.</span>}
+            <input id="amount" className="field num" inputMode="decimal" value={amount} onChange={(e) => (setAmount(e.target.value), setQuote(null))} placeholder="0.0" disabled={!token} aria-invalid={amountBad} aria-describedby={describedBy(amountBad && "amount-error")} />
+            {amountBad && token && (
+              <span id="amount-error" className="hint error">
+                Enter a positive number with at most {token.decimals} decimals.
+              </span>
+            )}
           </div>
 
           <div className="field-group">
@@ -298,10 +320,17 @@ export default function BountyPage() {
               autoCorrect="off"
               spellCheck={false}
               disabled={!token}
-              aria-invalid={Boolean(refundTo.trim()) && refundProblem !== null}
+              aria-invalid={refundBad}
+              aria-describedby={describedBy(refundBad && "refund-error", "refund-hint")}
             />
-            {refundTo.trim() && refundProblem && <span className="hint error">{refundProblem}</span>}
-            <span className="hint">If the swap cannot finish, this is where your deposit comes back. Double-check it.</span>
+            {refundBad && (
+              <span id="refund-error" className="hint error">
+                {refundProblem}
+              </span>
+            )}
+            <span id="refund-hint" className="hint">
+              If the swap cannot finish, this is where your deposit comes back. Double-check it.
+            </span>
           </div>
 
           <div className="actions">

@@ -20,6 +20,15 @@ export interface StepState {
 
 export const initialSteps = (): StepState[] => STEP_ORDER.map((id) => ({ id, status: "todo" }));
 
+/** "Part 2 of 3": a place in a list, counted from 1. */
+export const placeCaption = (noun: string, index: number, total: number): string => `${noun} ${index + 1} of ${total}`;
+
+/** "Step 2 of 4", read from the real step list, so adding or dropping a step cannot leave a stale count behind. */
+export const stepCaption = (id: StepId): string => placeCaption("Step", STEP_ORDER.indexOf(id), STEP_ORDER.length);
+
+/** Which step (counted from 1) removes the temporary key, after which closing the tab no longer strands the vault. */
+export const TEMP_KEY_GONE_AT = STEP_ORDER.indexOf("cleanup") + 1;
+
 /** The step to run next: the first one not done (a failed one comes round again), and none while a step runs. */
 export function nextStep(steps: readonly StepState[]): StepId | null {
   if (steps.some((s) => s.status === "running")) return null;
