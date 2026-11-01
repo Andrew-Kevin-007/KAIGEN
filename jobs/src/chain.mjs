@@ -106,7 +106,11 @@ export function loadDeployerKey(file, { network = "mainnet" } = {}) {
 }
 
 /** The keeper's `sendTrip`: `trip()` reserves 200 Tgas for its callback, so the transaction carries 250. */
-export const makeSendTrip = (submit) => (vault) => submit({ receiver: vault, method: "trip", gas: TGAS(250) });
+export const TRIP_GAS_TGAS = 250;
+export const makeSendTrip = (submit) => (vault) => submit({ receiver: vault, method: "trip", gas: TGAS(TRIP_GAS_TGAS) });
+
+/** `claim` reserves about 70 Tgas for its callbacks (the USDC balance read and the payout chain), so the transaction carries 100. */
+export const CLAIM_GAS_TGAS = 100;
 
 /** Chain interface for `runFireTest`, backed by real transactions and views. */
 export function makeDrillChain({ rpc, submit, network = "mainnet", cfg, drillSecretsPath, adminSeedsPath, dailyKeys: dailyKeyByVault, omens }) {
@@ -133,7 +137,7 @@ export function makeDrillChain({ rpc, submit, network = "mainnet", cfg, drillSec
       const omen = omens.find((o) => o.id === omenId);
       if (!omen) throw new Error(`unknown drill omen ${omenId}`);
       const signature = signClaim({ curve: omen.curve, secretHex: secrets[omenId], kizashi: cfg.kizashi, omenId, claimant: cfg.submitter });
-      return submit({ receiver: cfg.kizashi, method: "claim", args: { omen_id: omenId, claimant: cfg.submitter, signature: toBase64(signature) }, gas: TGAS(100) });
+      return submit({ receiver: cfg.kizashi, method: "claim", args: { omen_id: omenId, claimant: cfg.submitter, signature: toBase64(signature) }, gas: TGAS(CLAIM_GAS_TGAS) });
     },
     trip: makeSendTrip(submit),
     // Proves the post-quantum admin key still controls the account after the classical keys are gone.

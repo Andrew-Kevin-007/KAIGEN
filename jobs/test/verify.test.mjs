@@ -35,6 +35,7 @@ function fixture() {
     kizashi: "kizashi.near",
     mamoriReference: "vault.near",
     bountyYocto: String(50n * NEAR),
+    mainnet: { deployer: "deployer.near" },
     drill: { kizashi: "k.drill", vaults: ["v1.drill"] },
   };
   const omenView = productionOmens().map((o) => ({ ...o, death: null }));
@@ -209,6 +210,7 @@ test("verify: report counts failures and verifyAll runs every check", async () =
 // ---- release mode: J-net, J-hash, J-rpc ------------------------------------------------------
 
 const FULL_KEY = key("ed25519:K");
+const DEPLOYER_FULL_KEY = key("ed25519:DEPLOYER");
 const HOSTS = ["https://rpc.alpha.example", "https://rpc.beta.example"];
 const KEYS_CHECK = "kizashi access keys are readable (the lock deletes them)";
 
@@ -222,7 +224,9 @@ function releaseFixture({ keys = [], height = [900, 900], hash = ["BH", "BH"] } 
     status: async () => ({ chain_id: "mainnet", protocol_version: 86, sync_info: { latest_block_height: 1000 } }),
     account: async (id, b) => (seen.push(b), f.rpc.account(id)),
     view: async (id, m, a, b) => (seen.push(b), f.rpc.view(id, m)),
-    accessKeys: async (id, b) => (seen.push(b), keys),
+    // `keys` are Kizashi's. The deployer holds its own full-access key and has left none on the Mamori reference
+    // (T3), as in a clean deployment; answering every account with Kizashi's keys would put one key on both.
+    accessKeys: async (id, b) => (seen.push(b), id === f.dep.mainnet.deployer ? [DEPLOYER_FULL_KEY] : id === f.dep.mamoriReference ? [] : keys),
   });
   const archive = () => ({ tx: async (h) => f.rpc.tx(h), accessKeys: async () => [PQ] });
   return { ...f, a: node(0), b: node(1), seen, archivals: [archive(), archive()] };
@@ -254,6 +258,20 @@ test("release: reads are pinned to the older of the two final blocks, so the lag
   const { results } = await release(f);
   assert.equal(failures(results), "");
   assert.ok(f.seen.every((b) => b === "BEHIND"));
+});
+
+test("release: the deployer's full-access key left on the Mamori reference fails the run, the gate and the lock's acceptance of it", async () => {
+  const f = releaseFixture({ keys: [FULL_KEY] });
+  for (const node of [f.a, f.b]) {
+    const clean = node.accessKeys;
+    node.accessKeys = async (id, b) => (id === f.dep.mamoriReference ? [DEPLOYER_FULL_KEY] : clean(id, b));
+  }
+  const { results, gate } = await release(f);
+  assert.match(failures(results), /deployer key is not left on the mamori reference: .*ed25519:DEPLOYER/);
+  assert.equal(gate.ok, false);
+  const verdict = validateGate({ gate, dep: f.dep, now: NOW });
+  assert.equal(verdict.ok, false);
+  assert.match(verdict.problems.join(" | "), /deployer key is not left on the mamori reference/);
 });
 
 test("release: a deployments file that says testnet fails, even when the node says mainnet", async () => {

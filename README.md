@@ -385,7 +385,7 @@ Steps 1 to 2 need no funds and no chain. Step 4 needs one funded testnet account
 
 | # | Do this | You should see |
 | --- | --- | --- |
-| 1 | `make test`, or without make: `cargo test --workspace`, then `cd scripts && node --test omens.test.mjs predeploy.test.mjs`, then `cd jobs && node --test test/*.test.mjs` | Every suite ends with `0 failed`. Counts at the last run: Kizashi 60, Mamori 78 (`cargo test --workspace`, 0 failed); app 62 (`npm test`, 0 failed). Jobs and scripts counts: run the commands. |
+| 1 | `make test`, or without make: `cargo test --workspace`, then `cd scripts && node --test omens.test.mjs predeploy.test.mjs`, then `cd jobs && node --test test/*.test.mjs` | Every suite ends with `0 failed`. Counts at the last run: Kizashi 60, Mamori 78 (`cargo test --workspace`, 0 failed); app 62 (`npm test`, 0 failed). jobs 149, scripts 20 (`node --test`, 0 failed). |
 | 2 | `node jobs/src/bin.mjs judge` | A report of PASS or SKIPPED per claim, with the evidence line; it writes `judge-report.json`. A check that cannot run is SKIPPED with the reason, never PASS |
 | 3 | Open `fire-tests/0003.json` | Claim, trip, post-quantum send and re-arm transactions for a drill vault, with the block where the classical keys were gone. Look the hashes up on a NEAR testnet explorer |
 | 4 | `node jobs/src/bin.mjs testnet` (needs `out/drill`, see Deploy, and a funder file set by `KAIGEN_FUNDER_FILE` or the faucet) | About 8 minutes; PASS or FAIL per step: the ML-DSA admin, the claim on each curve, the lockdown, the injection demo ending with the burned key |

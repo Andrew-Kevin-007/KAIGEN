@@ -76,3 +76,30 @@ test("loadDeployerKey: a bad file is refused without echoing a fragment of it", 
   }
   assert.throws(() => loadDeployerKey(path.join(os.tmpdir(), "no-such-keyfile.json")), /cannot read the key file.*ENOENT/);
 });
+
+// ---- gas: the keeper's transactions carry more than the callbacks they reserve --------------------
+
+const { makeDrillChain, makeSendTrip, CLAIM_GAS_TGAS, TRIP_GAS_TGAS } = await import("../src/chain.mjs");
+
+test("keeper gas: a claim carries 100 Tgas against the ~70 it reserves, and a trip carries 250 against its 200", async () => {
+  const sent = [];
+  const submit = async (tx) => (sent.push(tx), "H");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gas-"));
+  keyDirs.push(dir);
+  // A public, obviously fake omen secret (32 bytes of 0x01). It controls nothing.
+  fs.writeFileSync(path.join(dir, "secrets.json"), JSON.stringify({ "drill-omen": "01".repeat(32) }));
+  fs.writeFileSync(path.join(dir, "seeds.json"), "{}");
+  const chain = makeDrillChain({
+    rpc: {}, submit, cfg: { kizashi: "k.drill", submitter: "keeper.drill" },
+    drillSecretsPath: path.join(dir, "secrets.json"), adminSeedsPath: path.join(dir, "seeds.json"),
+    dailyKeys: {}, omens: [{ id: "drill-omen", curve: "Ed25519" }],
+  });
+  await chain.claim("drill-omen");
+  await chain.trip("v.drill");
+  await makeSendTrip(submit)("w.drill");
+  const tgas = (tx) => BigInt(tx.gas) / 10n ** 12n;
+  assert.deepEqual(sent.map((t) => [t.method, tgas(t)]), [["claim", 100n], ["trip", 250n], ["trip", 250n]]);
+  assert.equal(CLAIM_GAS_TGAS, 100);
+  assert.equal(TRIP_GAS_TGAS, 250);
+  assert.ok(CLAIM_GAS_TGAS > 70 && TRIP_GAS_TGAS > 200, "never less than the callbacks the contracts reserve");
+});

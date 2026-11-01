@@ -181,16 +181,16 @@ test("keeper: does nothing while calm", async () => {
 
 /** What a real `trip` leaves behind at Kaigen: the vault's era cached and its daily keys gone. */
 const lockDown = (accounts, v) => {
-  accounts[v].views = { era: "Kaigen", daily_keys: [] };
+  accounts[v].views = { era: "Kaigen", daily_keys: [], intents_keys: [] };
   accounts[v].keys = [key("ml-dsa-65-hash:B")];
 };
 
 test("keeper: trips stale vaults, skips current ones, retries half-finished lockdowns, survives errors", async () => {
   const accounts = {
     k: { views: { era: "Kaigen" } },
-    stale: { views: { era: "Calm", daily_keys: ["ed25519:D"] } },
-    done: { views: { era: "Kaigen", daily_keys: [] } },
-    partial: { views: { era: "Kaigen", daily_keys: ["ed25519:D"] } },
+    stale: { views: { era: "Calm", daily_keys: ["ed25519:D"], intents_keys: [] } },
+    done: { views: { era: "Kaigen", daily_keys: [], intents_keys: [] } },
+    partial: { views: { era: "Kaigen", daily_keys: ["ed25519:D"], intents_keys: [] } },
   };
   const rpc = fakeChain(accounts);
   const sent = [];
@@ -303,7 +303,7 @@ test("hinomi: every read is pinned to the one final block", async () => {
 test("keeper: an era it does not know stops the pass instead of reading as up to date", async () => {
   const rpc = fakeChain({ k: { views: { era: "Quantum" } } });
   await assert.rejects(() => tripOnce({ rpc, kizashi: "k", vaults: [], sendTrip: async () => "h" }), /unknown era/);
-  const rpc2 = fakeChain({ k: { views: { era: "Kaigen" } }, v: { views: { era: "Weird", daily_keys: [] } } });
+  const rpc2 = fakeChain({ k: { views: { era: "Kaigen" } }, v: { views: { era: "Weird", daily_keys: [], intents_keys: [] } } });
   const r = await tripOnce({ rpc: rpc2, kizashi: "k", vaults: ["v"], sendTrip: async () => "h" });
   assert.equal(r.results[0].action, "error");
   assert.match(r.results[0].error, /unknown era/);
@@ -312,7 +312,7 @@ test("keeper: an era it does not know stops the pass instead of reading as up to
 test("keeper: a live function-call key the contract no longer lists still triggers a trip", async () => {
   const accounts = {
     k: { views: { era: "Kaigen" } },
-    v: { views: { era: "Kaigen", daily_keys: [] }, amount: "1", keys: [key("ml-dsa-65-hash:B"), key("ed25519:D", fc)] },
+    v: { views: { era: "Kaigen", daily_keys: [], intents_keys: [] }, amount: "1", keys: [key("ml-dsa-65-hash:B"), key("ed25519:D", fc)] },
   };
   const rpc = fakeChain(accounts);
   const sent = [];
@@ -325,18 +325,19 @@ test("keeper: a trip that was submitted but did not lock the vault is 'unconfirm
   // Submission succeeded (a hash came back) but re-reading the chain still shows a live function-call key.
   const accounts = {
     k: { views: { era: "Kaigen" } },
-    stuck: { views: { era: "Calm", daily_keys: ["ed25519:D"] }, amount: "1", keys: [key("ml-dsa-65-hash:B"), key("ed25519:D", fc)] },
-    eraOnly: { views: { era: "Calm", daily_keys: [] }, amount: "1", keys: [key("ml-dsa-65-hash:B"), key("ed25519:D", fc)] },
-    good: { views: { era: "Calm", daily_keys: ["ed25519:D"] }, amount: "1", keys: [key("ml-dsa-65-hash:B"), key("ed25519:D", fc)] },
+    stuck: { views: { era: "Calm", daily_keys: ["ed25519:D"], intents_keys: [] }, amount: "1", keys: [key("ml-dsa-65-hash:B"), key("ed25519:D", fc)] },
+    eraOnly: { views: { era: "Calm", daily_keys: [], intents_keys: [] }, amount: "1", keys: [key("ml-dsa-65-hash:B"), key("ed25519:D", fc)] },
+    good: { views: { era: "Calm", daily_keys: ["ed25519:D"], intents_keys: [] }, amount: "1", keys: [key("ml-dsa-65-hash:B"), key("ed25519:D", fc)] },
   };
   const rpc = fakeChain(accounts);
   const r = await tripOnce({
     rpc,
     kizashi: "k",
     vaults: ["stuck", "eraOnly", "good"],
+    sleep: async () => {},
     sendTrip: async (v) => {
       if (v === "good") lockDown(accounts, v);
-      if (v === "eraOnly") accounts[v].views = { era: "Kaigen", daily_keys: [] }; // era moved, the key survived
+      if (v === "eraOnly") accounts[v].views = { era: "Kaigen", daily_keys: [], intents_keys: [] }; // era moved, the key survived
       return `hash-${v}`;
     },
   });
