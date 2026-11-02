@@ -7,6 +7,7 @@
 //! never has to read the admin key, which matters because it is a post-quantum key.
 //! When Kizashi reports `kaigen`, `trip` deletes every recorded classical key.
 
+use near_sdk::borsh::BorshSerialize;
 use near_sdk::json_types::{U128, U64};
 use near_sdk::store::{IterableMap, IterableSet, LookupMap};
 use near_sdk::{
@@ -61,6 +62,19 @@ const FANOUT_STEP_GAS: Gas = Gas::from_tgas(40);
 /// how fast), so lower it only on purpose. Keep it a multiple of 3600, the refusal message counts hours.
 #[cfg_attr(feature = "drill", allow(dead_code))] // only `init`'s production check reads it
 const MIN_DELAY_SECS: u64 = 86_400;
+/// How long a queued request stays executable once it has unlocked: it expires at `unlocks_at` plus this.
+/// A decision, not a copy of anyone's default. `execute` is permissionless and one call, so a day is far more
+/// than any keeper needs. It equals the production delay floor, so a request lives at most `delay + 24 h`: an
+/// owner who looks once per delay period (the cadence the 24 h delay already assumes) has seen it before it
+/// can run, and one the owner missed does not stay armed for more than a day after it unlocks. A window of a
+/// few hours would be shorter than the delay it follows and would punish an honest keeper that checks daily.
+/// Expiry only ever removes requests from what can execute, so it cannot loosen the loss bound.
+const EXECUTE_WINDOW_SECS: u64 = 86_400;
+/// Most queue entries one purge looks at. The queue never holds more than `MAX_QUEUE` entries, expired ones
+/// included (every insert first clears the expired ones, then checks for room), so this is the whole queue.
+/// It is a guard: `purge_expired` can be called by anyone, and its gas must stay bounded even if that stopped
+/// being true.
+const PURGE_SCAN_LIMIT: usize = MAX_QUEUE as usize;
 
 /// Same wire format as Kizashi's `Era`.
 #[near(serializers = [borsh, json])]
@@ -79,6 +93,9 @@ pub struct Withdrawal {
     pub amount: U128,
     pub to: AccountId,
     pub requested_at: U64,
+    /// First instant (ns) at which the request can no longer execute: its unlock time plus
+    /// `EXECUTE_WINDOW_SECS`. A request at or past this time is stale and never runs.
+    pub expires_at: U64,
     /// The daily key that asked. Removing or burning that key cancels the request.
     pub requested_by: PublicKey,
 }
@@ -154,9 +171,12 @@ trait KizashiView {
 /// state, `trip` included: it then needs a `migrate` that reads the old layout. The test
 /// `the_state_layout_is_pinned_so_a_change_cannot_brick_a_deployed_vault_unnoticed` fails on any change.
 ///
-/// The v3 rules (M2/M3: `add_daily_key` refusing a key still in `revoked_keys`, `lock_down` keeping a key there
-/// until its delete is confirmed, and a refusal because the cap is used up earning no strike) add no field and
-/// change no stored value's meaning, so no `migrate` is needed for them.
+/// The first v3 rules (`add_daily_key` refusing a key still in `revoked_keys`, `lock_down` keeping a key there
+/// until its delete is confirmed, and a refusal because the cap is used up earning no strike) added no field and
+/// changed no stored value's meaning. The queue rules after them did change the layout, in two places: every
+/// queued `Withdrawal` gained `expires_at`, and the vault gained `requested_by_key`. This code cannot read the
+/// state the v2 code (tag `v2-testnet`) wrote, so moving a deployed v2 vault onto it needs a `migrate` (only
+/// testnet drill vaults exist, and they are throwaway: redeploy them instead).
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct Mamori {
@@ -189,6 +209,11 @@ pub struct Mamori {
     /// Daily keys the vault no longer serves (removed by the admin, or burned for repeated refusals) whose
     /// deletion from the account the account has not confirmed. See `delete_revoked_key`.
     revoked_keys: IterableSet<PublicKey>,
+    /// Each daily key's own part of `requested`: value that key asked for through `request_withdraw` in the
+    /// last 24 h, per token, against its share of the pending limit (see `request_withdraw`). The account-wide
+    /// `requested` stays the bound on the sum. A removed key's logs stay until they age out or the key is
+    /// recorded again; each is at most `MAX_WINDOW_ENTRIES` long.
+    requested_by_key: LookupMap<(PublicKey, Option<AccountId>), Vec<(u64, u128)>>,
 }
 
 #[near]
@@ -221,6 +246,7 @@ impl Mamori {
             max_strikes: DEFAULT_MAX_STRIKES,
             strikes: LookupMap::new(b"s"),
             revoked_keys: IterableSet::new(b"x"),
+            requested_by_key: LookupMap::new(b"k"),
         }
     }
 
@@ -328,6 +354,19 @@ impl Mamori {
         emit("cancel", serde_json::json!({ "id": id, "to": w.to, "token": w.token, "amount": w.amount }));
     }
 
+    /// Cancels every queued request, expired ones too, logs what it removed and returns how many. An empty queue
+    /// is not an error. Like `cancel`, it frees queue room but gives no request budget back: what was asked for
+    /// in the last 24 h stays counted. The queue holds at most `MAX_QUEUE` entries, so one call is enough.
+    pub fn cancel_all(&mut self) -> u32 {
+        self.assert_admin();
+        let ids: Vec<u64> = self.queue.keys().copied().collect();
+        let cancelled = self.take_from_queue(ids);
+        if !cancelled.is_empty() {
+            emit("queue_cancelled", serde_json::json!({ "reason": "cancel_all", "withdrawals": cancelled }));
+        }
+        cancelled.len() as u32
+    }
+
     // ---- daily keys -----------------------------------------------------------------------
 
     /// Sends within the 24 h limit, to allowed recipients. Paused once the era is warning.
@@ -390,35 +429,47 @@ impl Mamori {
     /// would only spend the request budget and a queue slot on something frozen. At kaigen the refusal says
     /// "lockdown", at warning "paused".
     ///
+    /// One key cannot crowd the others out. The queue's room and the request budget are split between the
+    /// recorded daily keys: with `n` of them (at least 1), each may hold `MAX_QUEUE / n` requests at once, and
+    /// its queued value and its value asked for in 24 h may each reach `pending_limit / n` per token. A vault
+    /// with one key gets all of it, as before. The account-wide limits above still apply on top, and the shares
+    /// are recomputed from the keys recorded now, so adding a key shrinks everyone's share from that moment
+    /// (what a key already holds stays, it just cannot ask for more until it is under its new share).
+    ///
     /// Refusals here are panics, not recorded outcomes, so they earn no strike (a panic rolls the strike back).
-    /// That covers an amount over the pending limit or the 24 h request budget, and a full queue. Turning
-    /// them into recorded refusals would change this method's return type (a public contract), and a full
-    /// queue or a spent budget is as likely an honest key as a hijacked one; what bounds a key that keeps
-    /// trying is the gas allowance of its access key, which each failed call spends.
+    /// That covers an amount over the pending limit or the 24 h request budget (the account's or this key's
+    /// share), and a full queue or no slots left for this key. Turning them into recorded refusals would change
+    /// this method's return type (a public contract), and a full queue or a spent budget is as likely an honest
+    /// key as a hijacked one; what bounds a key that keeps trying is the gas allowance of its access key,
+    /// which each failed call spends.
     pub fn request_withdraw(&mut self, token: Option<AccountId>, amount: U128, to: AccountId) -> U64 {
         self.assert_daily_key();
         require!(self.era != Era::Kaigen, "lockdown");
         require!(self.era == Era::Calm, "paused: era is not calm");
         require!(amount.0 > 0, "amount must be > 0");
-        require!(self.queue.len() < MAX_QUEUE, "queue full");
-        require!(self.fits_pending(&token, amount.0), "over the pending limit for this token");
-        let limit = self.pending_limit_for(&token);
-        require!(
-            Self::add_to_window(&mut self.requested, &token, amount.0, env::block_timestamp(), limit),
-            "over the 24 h pending limit for this token"
-        );
+        // Expired requests are not in the way: clear them first, so the count and the pending sum below see only
+        // live ones and the queue never holds more than `MAX_QUEUE` entries, however long nobody purged it.
+        self.remove_expired();
+        let requested_by = env::signer_account_pk();
+        let requested_at = env::block_timestamp();
+        self.queue_room(&requested_by, &token, amount.0).unwrap_or_else(|reason| env::panic_str(reason));
+        self.take_request_budget(&requested_by, &token, amount.0, requested_at).unwrap_or_else(|reason| env::panic_str(reason));
         let id = self.next_id;
         self.next_id += 1;
-        let requested_by = env::signer_account_pk();
-        let w = Withdrawal { token, amount, to, requested_at: U64(env::block_timestamp()), requested_by };
-        emit("request_withdraw", serde_json::json!({ "id": id, "token": w.token, "amount": w.amount, "to": w.to }));
+        let expires_at = U64(self.unlock_time(requested_at).saturating_add(EXECUTE_WINDOW_SECS.saturating_mul(1_000_000_000)));
+        let w = Withdrawal { token, amount, to, requested_at: U64(requested_at), expires_at, requested_by };
+        emit(
+            "request_withdraw",
+            serde_json::json!({ "id": id, "token": w.token, "amount": w.amount, "to": w.to, "expires_at": w.expires_at }),
+        );
         self.queue.insert(id, w);
         U64(id)
     }
 
     // ---- anyone ---------------------------------------------------------------------------
 
-    /// Sends a queued request once the delay has passed AND the era is calm. Both are needed, always.
+    /// Sends a queued request once the delay has passed AND the era is calm. Both are needed, always. It must
+    /// also not have expired: from `expires_at` (unlock time plus `EXECUTE_WINDOW_SECS`) on, a request never runs.
     ///
     /// What a warning does to a queued request: nothing leaves through it. It stays in the queue, frozen,
     /// whether or not its delay has passed, and the admin can `cancel` it at any time (cancel is never paused).
@@ -428,7 +479,10 @@ impl Mamori {
     pub fn execute(&mut self, id: U64) -> Promise {
         require!(self.era == Era::Calm, "paused: era is not calm");
         let w = self.queue.get(&id.0).cloned().unwrap_or_else(|| env::panic_str("no such request"));
-        require!(env::block_timestamp() >= self.unlocks_at(&w), "still locked");
+        let now = env::block_timestamp();
+        require!(now >= self.unlocks_at(&w), "still locked");
+        // A stale request never runs. It stays in the queue until `purge_expired` (or the next request) clears it.
+        require!(now < w.expires_at.0, "expired");
         self.queue.remove(&id.0);
         emit("execute", serde_json::json!({ "id": id, "to": w.to, "token": w.token, "amount": w.amount }));
         transfer(&w.token, w.amount.0, w.to.clone()).then(
@@ -436,6 +490,15 @@ impl Mamori {
                 .with_static_gas(CALLBACK_GAS)
                 .on_execute_done(id, w),
         )
+    }
+
+    /// Anyone. Removes the requests that have expired (they can never run), logs them and returns how many. The
+    /// queue clears them by itself whenever a request is made, so this only tidies up after a quiet spell; it
+    /// reads at most `PURGE_SCAN_LIMIT` entries, so its gas is bounded whatever the queue holds. Nothing that
+    /// has not expired is touched. (By the time a request expires, its 24 h of request budget has aged out on its
+    /// own, so purging neither gives budget back nor needs to.)
+    pub fn purge_expired(&mut self) -> u32 {
+        self.remove_expired()
     }
 
     /// Reads `kizashi.era()`. At kaigen: removes recorded keys from `intents.near`, deletes every recorded
@@ -563,9 +626,12 @@ impl Mamori {
         }
         // The funds never left. Put the request back to retry or cancel, unless the vault has locked
         // down meanwhile (the queue was cleared on purpose), its key was removed or burned meanwhile (its
-        // requests were cancelled on purpose), or newer requests took the slot or the pending headroom.
-        let room = self.queue.len() < MAX_QUEUE && self.fits_pending(&withdrawal.token, withdrawal.amount.0);
-        if self.era == Era::Kaigen || !room || !self.daily_keys.contains(&withdrawal.requested_by) {
+        // requests were cancelled on purpose), it expired meanwhile (a stale request does not come back), or
+        // newer requests took the slot or the pending headroom. Expired entries do not count as taking either.
+        let expired = env::block_timestamp() >= withdrawal.expires_at.0;
+        self.remove_expired();
+        let room = self.queue_room(&withdrawal.requested_by, &withdrawal.token, withdrawal.amount.0).is_ok();
+        if self.era == Era::Kaigen || expired || !room || !self.daily_keys.contains(&withdrawal.requested_by) {
             emit("execute_dropped", serde_json::json!({ "id": id, "to": withdrawal.to, "token": withdrawal.token, "amount": withdrawal.amount }));
         } else {
             self.queue.insert(id.0, withdrawal);
@@ -717,20 +783,37 @@ impl Mamori {
 
     /// Adds `amount` to the token's log of (time, amount) and returns true when the last 24 h plus it stay
     /// within `limit`. Otherwise nothing is stored.
-    fn add_to_window(
-        windows: &mut LookupMap<Option<AccountId>, Vec<(u64, u128)>>,
-        token: &Option<AccountId>,
+    fn add_to_window<K: BorshSerialize + Ord + Clone>(
+        windows: &mut LookupMap<K, Vec<(u64, u128)>>,
+        key: &K,
         amount: u128,
         now: u64,
         limit: u128,
     ) -> bool {
-        let cutoff = now.saturating_sub(DAY_NS);
-        let mut log: Vec<(u64, u128)> =
-            windows.get(token).map(|l| l.iter().copied().filter(|(t, _)| *t > cutoff).collect()).unwrap_or_default();
-        let used: u128 = log.iter().map(|(_, a)| a).sum();
-        if !used.checked_add(amount).is_some_and(|total| total <= limit) {
+        let mut log = Self::live_log(windows, key, now);
+        if !Self::fits_in(&log, amount, limit) {
             return false;
         }
+        Self::push_amount(&mut log, amount, now);
+        windows.insert(key.clone(), log);
+        true
+    }
+
+    /// What `windows` holds under `key` that is still inside the 24 h before `now`.
+    fn live_log<K: BorshSerialize + Ord + Clone>(windows: &LookupMap<K, Vec<(u64, u128)>>, key: &K, now: u64) -> Vec<(u64, u128)> {
+        let cutoff = now.saturating_sub(DAY_NS);
+        windows.get(key).map(|l| l.iter().copied().filter(|(t, _)| *t > cutoff).collect()).unwrap_or_default()
+    }
+
+    /// Whether the log plus `amount` stays within `limit`.
+    fn fits_in(log: &[(u64, u128)], amount: u128, limit: u128) -> bool {
+        let used: u128 = log.iter().map(|(_, a)| a).sum();
+        used.checked_add(amount).is_some_and(|total| total <= limit)
+    }
+
+    /// Adds `amount` to the log (the caller has checked that it fits). A log that is full folds it into the
+    /// newest entry instead of refusing.
+    fn push_amount(log: &mut Vec<(u64, u128)>, amount: u128, now: u64) {
         let full = log.len() >= MAX_WINDOW_ENTRIES;
         match log.last_mut() {
             // Full: fold into the newest entry instead of refusing. Its time moves up to now, so the folded
@@ -741,8 +824,62 @@ impl Mamori {
             }
             _ => log.push((now, amount)),
         }
-        windows.insert(token.clone(), log);
-        true
+    }
+
+    /// How many daily keys the room and the budget are shared between: the recorded ones, at least one.
+    fn key_count(&self) -> u32 {
+        self.daily_keys.len().max(1)
+    }
+
+    /// How many requests `key` holds in the queue, and how much of `token` they add up to.
+    fn held_by(&self, key: &PublicKey, token: &Option<AccountId>) -> (u32, u128) {
+        self.queue.values().filter(|w| &w.requested_by == key).fold((0, 0u128), |(count, sum), w| {
+            (count + 1, if &w.token == token { sum.saturating_add(w.amount.0) } else { sum })
+        })
+    }
+
+    /// Whether `key` may put `amount` of `token` in the queue now, as a refusal reason if not: there is a free
+    /// slot and the pending limit has room, and so does the key's own share of both (see `request_withdraw`).
+    /// Only live requests are in the queue by now (`remove_expired`). The cheap account-wide checks go first, so
+    /// a vault with one key, whose share is the whole, gets the same refusals as before the shares existed.
+    fn queue_room(&self, key: &PublicKey, token: &Option<AccountId>, amount: u128) -> Result<(), &'static str> {
+        if self.queue.len() >= MAX_QUEUE {
+            return Err("queue full");
+        }
+        let keys = self.key_count();
+        let (held, queued) = self.held_by(key, token);
+        if held >= MAX_QUEUE / keys {
+            return Err("this key's queue slots are used up");
+        }
+        if !self.fits_pending(token, amount) {
+            return Err("over the pending limit for this token");
+        }
+        let share = self.pending_limit_for(token) / u128::from(keys);
+        if !queued.checked_add(amount).is_some_and(|total| total <= share) {
+            return Err("over this key's share of the pending limit for this token");
+        }
+        Ok(())
+    }
+
+    /// Spends `amount` of `token` from the 24 h request budget: the account's and `key`'s share of it. Nothing is
+    /// recorded unless both have room. Neither `execute` nor `cancel` gives any of it back.
+    fn take_request_budget(&mut self, key: &PublicKey, token: &Option<AccountId>, amount: u128, now: u64) -> Result<(), &'static str> {
+        let limit = self.pending_limit_for(token);
+        let share = limit / u128::from(self.key_count());
+        let mut account_log = Self::live_log(&self.requested, token, now);
+        if !Self::fits_in(&account_log, amount, limit) {
+            return Err("over the 24 h pending limit for this token");
+        }
+        let slot = (key.clone(), token.clone());
+        let mut key_log = Self::live_log(&self.requested_by_key, &slot, now);
+        if !Self::fits_in(&key_log, amount, share) {
+            return Err("over this key's share of the 24 h pending limit for this token");
+        }
+        Self::push_amount(&mut account_log, amount, now);
+        self.requested.insert(token.clone(), account_log);
+        Self::push_amount(&mut key_log, amount, now);
+        self.requested_by_key.insert(slot, key_log);
+        Ok(())
     }
 
     /// The most value of `token` that may wait in the queue: the admin's override, else a multiple of the
@@ -758,6 +895,18 @@ impl Mamori {
     fn fits_pending(&self, token: &Option<AccountId>, amount: u128) -> bool {
         let queued = self.queue.values().filter(|w| &w.token == token).fold(0u128, |sum, w| sum.saturating_add(w.amount.0));
         queued.checked_add(amount).is_some_and(|total| total <= self.pending_limit_for(token))
+    }
+
+    /// Removes the expired requests among the first `PURGE_SCAN_LIMIT` entries, logs them and returns how many.
+    fn remove_expired(&mut self) -> u32 {
+        let now = env::block_timestamp();
+        let ids: Vec<u64> =
+            self.queue.iter().take(PURGE_SCAN_LIMIT).filter(|(_, w)| now >= w.expires_at.0).map(|(id, _)| *id).collect();
+        let expired = self.take_from_queue(ids);
+        if !expired.is_empty() {
+            emit("queue_expired", serde_json::json!({ "withdrawals": expired }));
+        }
+        expired.len() as u32
     }
 
     /// Removes these queued requests and returns each as event data, so that nothing leaves the queue
@@ -831,7 +980,11 @@ impl Mamori {
     }
 
     fn unlocks_at(&self, w: &Withdrawal) -> u64 {
-        w.requested_at.0.saturating_add(self.delay_secs.saturating_mul(1_000_000_000))
+        self.unlock_time(w.requested_at.0)
+    }
+
+    fn unlock_time(&self, requested_at: u64) -> u64 {
+        requested_at.saturating_add(self.delay_secs.saturating_mul(1_000_000_000))
     }
 }
 

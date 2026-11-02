@@ -1762,10 +1762,14 @@ fn lockdown_at_maximum_load(given: Gas) -> Vec<(u32, u32)> {
     for n in 11..11 + MAX_INTENTS_KEYS as u8 {
         let _ = m.register_intents_key(key(n));
     }
-    as_daily(&key(1), 2_000 * SEC);
-    for _ in 0..MAX_QUEUE {
-        m.request_withdraw(None, U128(1), accounts(2));
+    // A full queue, as 8 keys can build it: each holds its `MAX_QUEUE / 8` slots (one key could not fill them all).
+    for n in 1..=MAX_DAILY_KEYS as u8 {
+        as_daily(&key(n), 2_000 * SEC);
+        for _ in 0..MAX_QUEUE / MAX_DAILY_KEYS {
+            m.request_withdraw(None, U128(1), accounts(2));
+        }
     }
+    assert_eq!(m.queue().len(), MAX_QUEUE as usize);
     as_callback(2_100 * SEC);
     m.on_era(Ok(Era::Kaigen));
 
@@ -1861,13 +1865,568 @@ fn init_enforces_the_named_delay_floor_and_its_message_follows_it() {
     let _ = Mamori::init(accounts(1), U128(NEAR), MIN_DELAY_SECS);
 }
 
+// ---- M2 step 1: a queued request expires -----------------------------------------------------------------
+
+/// When a request made at `at` (seconds) with the test delay stops being executable, in ns.
+fn expiry_ns(at: u64) -> u64 {
+    (at + TEST_DELAY + EXECUTE_WINDOW_SECS) * SEC
+}
+
+#[test]
+fn a_request_expires_the_execute_window_after_it_unlocks_and_says_when() {
+    let mut m = setup();
+    as_daily(&key(1), 2_000 * SEC);
+    let id = m.request_withdraw(None, U128(NEAR), accounts(2));
+    let q = m.queue();
+    assert_eq!(q[0].withdrawal.expires_at.0, expiry_ns(2_000));
+    assert_eq!(q[0].withdrawal.expires_at.0 - q[0].unlocks_at.0, EXECUTE_WINDOW_SECS * SEC);
+    // Never shorter than the delay it follows: the production floor is a day, and so is the window.
+    assert!(EXECUTE_WINDOW_SECS >= MIN_DELAY_SECS);
+    let logged = event("request_withdraw").expect("the request is logged");
+    assert_eq!((logged["data"]["id"].clone(), logged["data"]["expires_at"].clone()), (serde_json::json!(id.0), serde_json::json!(U64(expiry_ns(2_000)))));
+    // The view keeps every field it had, and `expires_at` is flat beside them.
+    let v = serde_json::to_value(&q[0]).unwrap();
+    assert_eq!(v["expires_at"], serde_json::json!(expiry_ns(2_000).to_string()));
+}
+
+#[test]
+fn an_unlocked_request_runs_until_the_last_instant_before_it_expires_and_never_after() {
+    let mut m = setup();
+    as_daily(&key(1), 2_000 * SEC);
+    let early = m.request_withdraw(None, U128(1), accounts(2));
+    let at_expiry = m.request_withdraw(None, U128(2), accounts(2));
+    let late = m.request_withdraw(None, U128(3), accounts(2));
+    let end = expiry_ns(2_000);
+    as_anyone(end - 1);
+    let _ = m.execute(early); // the last nanosecond it can run
+    assert!(receipts_text().contains("Transfer"));
+    for (id, now) in [(at_expiry, end), (late, end + 30 * DAY_NS)] {
+        as_anyone(now);
+        let msg = panics_with(|| {
+            let _ = m.execute(id);
+        });
+        assert!(msg.contains("expired"), "{msg}");
+    }
+    assert_eq!(m.queue().len(), 2, "an expired request is not run and is not silently dropped");
+}
+
+#[test]
+fn a_failed_execute_is_put_back_only_while_the_request_is_still_alive() {
+    let mut m = setup();
+    let stale = queue_dust(&mut m, &key(1), 2_000, 1)[0]; // expires at `end`
+    let alive = queue_dust(&mut m, &key(1), 2_001, 1)[0]; // expires a second later
+    let (ws, wa) = (m.queue()[0].withdrawal.clone(), m.queue()[1].withdrawal.clone());
+    let end = expiry_ns(2_000);
+    as_anyone(end - 2);
+    let _ = m.execute(stale);
+    let _ = m.execute(alive); // both left the queue and are in flight
+    assert!(m.queue().is_empty());
+    callback_after_failure(end - 1);
+    m.on_execute_done(stale, ws); // still alive for one more nanosecond: back in the queue
+    assert_eq!(queued_ids(&m), vec![stale.0]);
+    callback_after_failure(end);
+    m.on_execute_done(alive, wa);
+    assert_eq!(queued_ids(&m), vec![alive.0], "`stale` expired meanwhile and was cleared; `alive` came back");
+    assert!(event("execute_dropped").is_none());
+    // And a request whose own time has run out when its callback comes back is dropped, logged.
+    let gone = queue_dust(&mut m, &key(1), 3_000, 1)[0];
+    let wg = m.queue().iter().find(|q| q.id == gone).unwrap().withdrawal.clone();
+    as_anyone(expiry_ns(3_000) - 1);
+    let _ = m.execute(gone);
+    callback_after_failure(expiry_ns(3_000));
+    m.on_execute_done(gone, wg);
+    assert!(!queued_ids(&m).contains(&gone.0));
+    assert!(event("execute_dropped").is_some());
+}
+
+// ---- M2 step 2: cancel_all and purge_expired ---------------------------------------------------------------
+
+/// `n` one-yocto requests from `k` at `at` seconds; returns their ids.
+fn queue_dust(m: &mut Mamori, k: &PublicKey, at: u64, n: u32) -> Vec<U64> {
+    as_daily(k, at * SEC);
+    (0..n).map(|_| m.request_withdraw(None, U128(1), accounts(2))).collect()
+}
+
+/// Ids in the queue, sorted.
+fn queued_ids(m: &Mamori) -> Vec<u64> {
+    let mut ids: Vec<u64> = m.queue().iter().map(|q| q.id.0).collect();
+    ids.sort_unstable();
+    ids
+}
+
+/// The ids named in the `withdrawals` of the logged event, sorted (they are logged as strings).
+fn logged_ids(name: &str) -> Vec<u64> {
+    let ev = event(name).unwrap_or_else(|| panic!("no `{name}` event was logged"));
+    let mut ids: Vec<u64> =
+        ev["data"]["withdrawals"].as_array().unwrap().iter().map(|w| w["id"].as_str().unwrap().parse().unwrap()).collect();
+    ids.sort_unstable();
+    ids
+}
+
+#[test]
+fn cancel_all_empties_the_queue_logs_every_request_and_gives_no_request_budget_back() {
+    let mut m = setup();
+    as_daily(&key(1), 2_000 * SEC);
+    m.request_withdraw(None, U128(PENDING_CAP / 2), accounts(2));
+    m.request_withdraw(None, U128(PENDING_CAP / 2), accounts(2));
+    as_admin(2_001 * SEC);
+    assert_eq!(m.cancel_all(), 2);
+    assert!(m.queue().is_empty());
+    assert_eq!(logged_ids("queue_cancelled"), vec![0, 1]);
+    assert_eq!(event("queue_cancelled").unwrap()["data"]["reason"], "cancel_all");
+    // Queue room is back; what was asked for in the last 24 h is still counted.
+    as_daily(&key(1), 2_002 * SEC);
+    let msg = panics_with(|| {
+        m.request_withdraw(None, U128(1), accounts(2));
+    });
+    assert!(msg.contains("24 h pending limit"), "{msg}");
+}
+
+#[test]
+fn cancel_all_takes_expired_requests_too_and_an_empty_queue_is_not_an_error() {
+    let mut m = setup();
+    as_admin(1_100 * SEC);
+    assert_eq!(m.cancel_all(), 0);
+    assert!(event("queue_cancelled").is_none(), "nothing to cancel, nothing to log");
+    queue_dust(&mut m, &key(1), 2_000, 3);
+    as_admin(expiry_ns(2_000) + SEC); // all three have expired and nobody purged them
+    assert_eq!(m.queue().len(), 3);
+    assert_eq!(m.cancel_all(), 3);
+    assert!(m.queue().is_empty());
+}
+
+#[test]
+fn only_the_admin_can_cancel_all_and_no_daily_key_can_reach_it_through_the_runtime() {
+    let mut m = setup();
+    queue_dust(&mut m, &key(1), 2_000, 2);
+    as_anyone(2_001 * SEC);
+    assert!(panics_with(|| {
+        m.cancel_all();
+    })
+    .contains("admin only"));
+    assert_eq!(m.queue().len(), 2);
+    // A daily key never gets past the access-key layer: its method list is these two and nothing else.
+    assert_eq!(DAILY_METHODS, "send_small,request_withdraw");
+}
+
+#[test]
+fn anyone_can_purge_expired_requests_and_only_those_and_the_boundary_is_exact() {
+    let mut m = setup();
+    let old = queue_dust(&mut m, &key(1), 2_000, 2);
+    let young = queue_dust(&mut m, &key(1), 50_000, 1);
+    let end = expiry_ns(2_000);
+    as_anyone(end - 1);
+    assert_eq!(m.purge_expired(), 0, "one nanosecond before it expires, a request is still alive");
+    assert!(event("queue_expired").is_none());
+    as_anyone(end);
+    assert_eq!(m.purge_expired(), 2);
+    assert_eq!(logged_ids("queue_expired"), old.iter().map(|i| i.0).collect::<Vec<_>>());
+    assert_eq!(queued_ids(&m), young.iter().map(|i| i.0).collect::<Vec<_>>());
+    as_anyone(end + SEC);
+    assert_eq!(m.purge_expired(), 0, "a second purge finds nothing");
+    assert!(event("queue_expired").is_none());
+    // The live one is still good: it runs once it unlocks.
+    as_anyone(expiry_ns(50_000) - 1);
+    let _ = m.execute(young[0]);
+}
+
+#[test]
+fn a_purge_reads_a_bounded_number_of_entries_whatever_the_queue_holds() {
+    let mut m = setup();
+    queue_dust(&mut m, &key(1), 2_000, 1);
+    let stale = m.queue()[0].withdrawal.clone();
+    // A queue far past `MAX_QUEUE`, which the contract never builds (see the next tests), to prove the guard:
+    // one call removes a bounded number of entries and so reads a bounded number of them.
+    for id in 1..=(3 * PURGE_SCAN_LIMIT) as u64 {
+        m.queue.insert(id, stale.clone());
+    }
+    let held = m.queue.len() as usize;
+    as_anyone(expiry_ns(2_000));
+    assert_eq!(m.purge_expired() as usize, PURGE_SCAN_LIMIT);
+    assert_eq!(m.queue.len() as usize, held - PURGE_SCAN_LIMIT);
+    while m.queue.len() > 0 {
+        assert!(m.purge_expired() > 0, "every call makes progress");
+    }
+}
+
+#[test]
+fn purging_a_full_queue_of_expired_requests_costs_a_fixed_small_amount_of_gas() {
+    let mut m = setup();
+    queue_dust(&mut m, &key(1), 2_000, MAX_QUEUE);
+    as_anyone(expiry_ns(2_000));
+    assert_eq!(m.purge_expired(), MAX_QUEUE);
+    let used = env::used_gas().as_gas();
+    println!("purge_expired of {MAX_QUEUE} expired requests: {:.2} Tgas", used as f64 / 1e12);
+    assert!(used <= Gas::from_tgas(5).as_gas(), "purge used {used} gas");
+}
+
+/// Bytes of everything the last call logged. A receipt may log 16 384 bytes in all (the protocol's
+/// `max_total_log_length`); the unit-test VM enforces the same limit.
+fn logged_bytes() -> usize {
+    get_logs().iter().map(String::len).sum()
+}
+
+#[test]
+fn the_biggest_purge_and_cancel_all_logs_fit_in_one_receipt() {
+    let long: AccountId = "a".repeat(64).parse().unwrap(); // the longest account id
+    let token: AccountId = "b".repeat(64).parse().unwrap();
+    let huge = U128(10u128.pow(36)); // a 37-digit amount
+    let mut m = setup();
+    as_admin(1_100 * SEC);
+    m.set_pending_limit(Some(token.clone()), U128(10u128.pow(38)));
+    let ask = |m: &mut Mamori, at: u64| {
+        as_daily(&key(1), at * SEC);
+        for _ in 0..MAX_QUEUE {
+            m.request_withdraw(Some(token.clone()), huge, long.clone());
+        }
+    };
+    ask(&mut m, 2_000);
+    as_admin(2_001 * SEC);
+    assert_eq!(m.cancel_all(), MAX_QUEUE);
+    let (cancel_bytes, cancel_logs) = (logged_bytes(), get_logs().len());
+    ask(&mut m, 2_002);
+    as_anyone(expiry_ns(2_002));
+    assert_eq!(m.purge_expired(), MAX_QUEUE);
+    let (purge_bytes, purge_logs) = (logged_bytes(), get_logs().len());
+    // The request that clears a full queue of stale ones logs the purge and its own event in one receipt.
+    ask(&mut m, 2_003);
+    as_daily(&key(1), expiry_ns(2_003));
+    m.request_withdraw(Some(token.clone()), huge, long.clone());
+    let (request_bytes, request_logs) = (logged_bytes(), get_logs().len());
+    println!("worst-case logs: cancel_all {cancel_bytes} B in {cancel_logs}, purge {purge_bytes} B in {purge_logs}, request+purge {request_bytes} B in {request_logs}");
+    for bytes in [cancel_bytes, purge_bytes, request_bytes] {
+        assert!(bytes < 16_384, "{bytes} bytes of logs in one receipt");
+    }
+}
+
+#[test]
+fn a_new_request_clears_expired_ones_so_a_queue_full_of_stale_requests_blocks_nobody() {
+    let mut m = setup();
+    queue_dust(&mut m, &key(1), 2_000, MAX_QUEUE);
+    as_daily(&key(1), 2_001 * SEC);
+    let msg = panics_with(|| {
+        m.request_withdraw(None, U128(1), accounts(2));
+    });
+    assert!(msg.contains("queue full"), "live requests still fill the queue: {msg}");
+    as_daily(&key(1), expiry_ns(2_000));
+    let id = m.request_withdraw(None, U128(1), accounts(2));
+    assert_eq!(queued_ids(&m), vec![id.0]);
+    assert_eq!(logged_ids("queue_expired").len(), MAX_QUEUE as usize, "what was cleared is logged");
+}
+
+#[test]
+fn expired_requests_stop_counting_toward_the_pending_sum() {
+    let mut m = setup();
+    as_daily(&key(1), 2_000 * SEC);
+    m.request_withdraw(None, U128(PENDING_CAP), accounts(2));
+    as_daily(&key(1), 2_001 * SEC);
+    let msg = panics_with(|| {
+        m.request_withdraw(None, U128(1), accounts(2));
+    });
+    assert!(msg.contains("pending limit"), "{msg}");
+    as_daily(&key(1), expiry_ns(2_000)); // expired, never purged, and its day of request budget has aged out
+    m.request_withdraw(None, U128(PENDING_CAP), accounts(2));
+    assert_eq!(m.queue().len(), 1);
+}
+
+#[test]
+fn the_queue_never_holds_more_than_its_cap_however_long_nobody_purges_it() {
+    let mut m = setup();
+    let mut t = 2_000u64;
+    for round in 0..12 {
+        as_daily(&key(1), t * SEC);
+        for _ in 0..MAX_QUEUE {
+            m.request_withdraw(None, U128(1), accounts(2));
+        }
+        assert_eq!(m.queue.len(), MAX_QUEUE, "round {round}: full and no more");
+        t += TEST_DELAY + EXECUTE_WINDOW_SECS + 1; // every request of this round has expired by the next
+    }
+}
+
+#[test]
+fn expired_requests_do_not_stop_a_failed_execute_from_coming_back() {
+    let mut m = setup();
+    queue_dust(&mut m, &key(1), 2_000, MAX_QUEUE - 1);
+    let late = queue_dust(&mut m, &key(1), 50_000, 1)[0];
+    let w = m.queue().iter().find(|q| q.id == late).unwrap().withdrawal.clone();
+    as_anyone(60_000 * SEC);
+    let _ = m.execute(late); // in flight
+    let newer = queue_dust(&mut m, &key(1), 60_001, 1)[0]; // the freed slot goes to a newer request
+    assert_eq!(m.queue().len(), MAX_QUEUE as usize);
+    callback_after_failure(100_000 * SEC); // the 31 old ones expired at 92 000 s; `late` lives until 140 000 s
+    m.on_execute_done(late, w);
+    assert_eq!(queued_ids(&m), vec![late.0, newer.0]);
+    assert!(event("execute_dropped").is_none());
+}
+
+// ---- M2 step 3: per-key queue slots and each key's share of the request budget --------------------------
+
+/// A vault with daily keys 1..=n (the vault from `setup` has key 1).
+fn vault_with_keys(n: u8) -> Mamori {
+    let mut m = setup();
+    as_admin(1_100 * SEC);
+    for i in 2..=n {
+        let _ = m.add_daily_key(key(i), None);
+    }
+    m
+}
+
+/// `k` asks for `amount` of NEAR at `at` seconds.
+fn request_as(m: &mut Mamori, k: &PublicKey, at: u64, amount: u128) -> U64 {
+    as_daily(k, at * SEC);
+    m.request_withdraw(None, U128(amount), accounts(2))
+}
+
+/// The refusal `k` gets for asking for `amount` of NEAR at `at` seconds.
+fn refusal_of(m: &mut Mamori, k: &PublicKey, at: u64, amount: u128) -> String {
+    as_daily(k, at * SEC);
+    panics_with(|| {
+        m.request_withdraw(None, U128(amount), accounts(2));
+    })
+}
+
+const SLOTS_USED_UP: &str = "this key's queue slots are used up";
+const OVER_QUEUE_SHARE: &str = "over this key's share of the pending limit for this token";
+const OVER_BUDGET_SHARE: &str = "over this key's share of the 24 h pending limit for this token";
+const OVER_QUEUE_SUM: &str = "over the pending limit for this token";
+const OVER_BUDGET: &str = "over the 24 h pending limit for this token";
+
+#[test]
+fn one_key_cannot_fill_the_queue_for_the_others() {
+    let mut m = vault_with_keys(MAX_DAILY_KEYS as u8);
+    let slots = MAX_QUEUE / MAX_DAILY_KEYS;
+    let first: Vec<U64> = (0..slots).map(|_| request_as(&mut m, &key(1), 2_000, 1)).collect();
+    let msg = refusal_of(&mut m, &key(1), 2_001, 1);
+    assert!(msg.contains(SLOTS_USED_UP), "{msg}");
+    // Every other key still gets its own slots, and between them the keys fill the queue exactly.
+    for n in 2..=MAX_DAILY_KEYS as u8 {
+        for _ in 0..slots {
+            request_as(&mut m, &key(n), 2_002, 1);
+        }
+    }
+    assert_eq!(m.queue().len(), MAX_QUEUE as usize);
+    let msg = refusal_of(&mut m, &key(2), 2_003, 1);
+    assert!(msg.contains("queue full"), "{msg}");
+    // A slot comes back when its request goes (here: cancelled), and only to the key that held it.
+    as_admin(2_004 * SEC);
+    m.cancel(first[0]);
+    request_as(&mut m, &key(1), 2_005, 1);
+}
+
+#[test]
+fn the_slots_are_shared_equally_between_the_keys_recorded_now() {
+    let mut m = vault_with_keys(2);
+    for _ in 0..MAX_QUEUE / 2 {
+        request_as(&mut m, &key(1), 2_000, 1);
+    }
+    let msg = refusal_of(&mut m, &key(1), 2_001, 1);
+    assert!(msg.contains(SLOTS_USED_UP), "two keys get half each: {msg}");
+    for _ in 0..MAX_QUEUE / 2 {
+        request_as(&mut m, &key(2), 2_002, 1);
+    }
+    // Key 2 goes: its requests are cancelled and key 1, now alone, has the whole queue to itself, as in v2.
+    as_admin(2_003 * SEC);
+    let _ = m.remove_daily_key(key(2));
+    assert_eq!(m.queue().len(), (MAX_QUEUE / 2) as usize);
+    for _ in 0..MAX_QUEUE / 2 {
+        request_as(&mut m, &key(1), 2_004, 1);
+    }
+    assert_eq!(m.queue().len(), MAX_QUEUE as usize);
+}
+
+#[test]
+fn one_key_cannot_take_the_pending_value_the_others_need() {
+    let mut m = vault_with_keys(2);
+    let share = PENDING_CAP / 2;
+    request_as(&mut m, &key(1), 2_000, share);
+    let msg = refusal_of(&mut m, &key(1), 2_001, 1);
+    assert!(msg.contains(OVER_QUEUE_SHARE), "{msg}");
+    // Key 2 has its whole share; and then the account's pending limit is exactly full for everyone.
+    request_as(&mut m, &key(2), 2_002, share);
+    let msg = refusal_of(&mut m, &key(2), 2_003, 1);
+    assert!(msg.contains(OVER_QUEUE_SUM), "{msg}");
+}
+
+#[test]
+fn a_key_is_held_to_its_share_of_the_queued_value_even_when_its_24_h_budget_has_aged_out() {
+    let mut m = vault_with_keys(2);
+    let share = PENDING_CAP / 2;
+    let first = request_as(&mut m, &key(1), 2_000, share);
+    // A day and a second later: the request is unlocked and alive, but no longer in the 24 h window.
+    let later = 2_000 + 86_401;
+    let msg = refusal_of(&mut m, &key(1), later, 1);
+    assert!(msg.contains(OVER_QUEUE_SHARE) && !msg.contains("24 h"), "{msg}");
+    as_admin((later + 1) * SEC);
+    m.cancel(first);
+    request_as(&mut m, &key(1), later + 2, share);
+}
+
+#[test]
+fn one_key_cannot_spend_the_24_h_request_budget_the_others_need() {
+    let mut m = vault_with_keys(2);
+    let share = PENDING_CAP / 2;
+    let id = request_as(&mut m, &key(1), 2_000, share);
+    as_anyone((2_000 + TEST_DELAY + 1) * SEC);
+    let _ = m.execute(id); // it left: nothing queued, but the budget it used is not given back
+    let msg = refusal_of(&mut m, &key(1), 6_000, 1);
+    assert!(msg.contains(OVER_BUDGET_SHARE), "{msg}");
+    // Key 1 spent its own share, not key 2's: key 2 still has its whole share of the budget.
+    request_as(&mut m, &key(2), 6_001, share);
+    let msg = refusal_of(&mut m, &key(2), 6_002, 1);
+    assert!(msg.contains(OVER_QUEUE_SHARE), "{msg}");
+    // A day on, key 1's share is back.
+    request_as(&mut m, &key(1), 2_000 + 86_401, share);
+}
+
+#[test]
+fn the_shares_follow_the_number_of_keys_recorded_now() {
+    let mut m = vault_with_keys(2);
+    let msg = refusal_of(&mut m, &key(1), 2_000, PENDING_CAP / 2 + 1);
+    assert!(msg.contains(OVER_QUEUE_SHARE), "two keys get half each: {msg}");
+    as_admin(2_001 * SEC);
+    let _ = m.remove_daily_key(key(2));
+    request_as(&mut m, &key(1), 2_002, PENDING_CAP / 2 + 1); // alone, it has the whole pending limit again
+    let more = refusal_of(&mut m, &key(1), 2_003, PENDING_CAP / 2);
+    assert!(more.contains(OVER_QUEUE_SUM), "the account-wide limit still holds: {more}");
+}
+
+#[test]
+fn a_failed_execute_cannot_give_a_key_more_slots_than_its_share() {
+    let mut m = vault_with_keys(2);
+    let slots = MAX_QUEUE / 2;
+    let ids: Vec<U64> = (0..slots).map(|_| request_as(&mut m, &key(1), 2_000, 1)).collect();
+    let w = m.queue().iter().find(|q| q.id == ids[0]).unwrap().withdrawal.clone();
+    as_anyone((2_000 + TEST_DELAY + 1) * SEC);
+    let _ = m.execute(ids[0]); // in flight: key 1 holds one slot fewer
+    let replacement = request_as(&mut m, &key(1), 2_000 + TEST_DELAY + 2, 1); // and uses it
+    callback_after_failure((2_000 + TEST_DELAY + 3) * SEC);
+    m.on_execute_done(ids[0], w); // coming back would make 17 of its 16
+    assert!(event("execute_dropped").is_some());
+    assert_eq!(m.queue().len(), slots as usize);
+    assert!(queued_ids(&m).contains(&replacement.0) && !queued_ids(&m).contains(&ids[0].0));
+}
+
+/// The call's panic message, or its value.
+fn try_call<T>(f: impl FnOnce() -> T) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|err| {
+        err.downcast_ref::<String>().cloned().or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default()
+    })
+}
+
+/// Next value of a small deterministic generator (splitmix64), so a failing sequence replays.
+fn next(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Everything step 3 promises, checked on the state itself: the queue, each key's part of it, and both request
+/// logs, for NEAR, with `keys` daily keys recorded.
+fn assert_queue_bounds(m: &Mamori, now: u64, keys: u32) {
+    let (slots, share) = (MAX_QUEUE / keys, PENDING_CAP / u128::from(keys));
+    assert!(m.queue.len() <= MAX_QUEUE, "the queue holds {} entries", m.queue.len());
+    let held: Vec<Withdrawal> = m.queue().into_iter().map(|q| q.withdrawal).collect();
+    let total: u128 = held.iter().map(|w| w.amount.0).sum();
+    assert!(total <= PENDING_CAP, "{total} queued against a limit of {PENDING_CAP}");
+    let account: u128 = Mamori::live_log(&m.requested, &None, now).iter().map(|(_, a)| a).sum();
+    assert!(account <= PENDING_CAP, "{account} asked for in 24 h against {PENDING_CAP}");
+    for n in 1..=keys as u8 {
+        let mine: Vec<&Withdrawal> = held.iter().filter(|w| w.requested_by == key(n)).collect();
+        assert!(mine.len() as u32 <= slots, "key {n} holds {} of its {slots} slots", mine.len());
+        let queued: u128 = mine.iter().map(|w| w.amount.0).sum();
+        assert!(queued <= share, "key {n} has {queued} queued against its share {share}");
+        let asked: u128 = Mamori::live_log(&m.requested_by_key, &(key(n), None), now).iter().map(|(_, a)| a).sum();
+        assert!(asked <= share, "key {n} asked for {asked} in 24 h against its share {share}");
+    }
+}
+
+const REFUSALS: [&str; 6] = ["queue full", SLOTS_USED_UP, OVER_QUEUE_SUM, OVER_QUEUE_SHARE, OVER_BUDGET, OVER_BUDGET_SHARE];
+
+/// One random run of `steps` calls over a vault with four daily keys. After every call the state is checked
+/// against the bounds. Returns how often each kind of refusal was met. Each run needs its own thread: the
+/// unit-test VM keeps its storage across `testing_env!`, so a second vault in one thread would read the first.
+fn random_run(seed: u64, steps: u32) -> std::collections::BTreeMap<&'static str, u32> {
+    let mut seen = std::collections::BTreeMap::new();
+    let mut m = vault_with_keys(4);
+    let (mut rng, mut t) = (seed, 2_000u64);
+    for step in 0..steps {
+        // Mostly short steps, now and then a day and a half, so windows roll and requests expire.
+        t += if next(&mut rng) % 50 == 0 { 130_000 } else { next(&mut rng) % 600 };
+        let now = t * SEC;
+        match next(&mut rng) % 100 {
+            0..=69 => {
+                // Key 1 plays the flooder: half of all requests are its.
+                let k = key(if next(&mut rng) % 2 == 0 { 1 } else { 2 + (next(&mut rng) % 3) as u8 });
+                let amount = if next(&mut rng) % 5 != 0 {
+                    1 + u128::from(next(&mut rng) % 10)
+                } else {
+                    1 + u128::from(next(&mut rng)) * 150_000 % (PENDING_CAP / 3)
+                };
+                as_daily(&k, now);
+                if let Err(msg) = try_call(|| m.request_withdraw(None, U128(amount), accounts(2))) {
+                    let class = REFUSALS.iter().find(|c| msg.contains(**c)).unwrap_or_else(|| panic!("seed {seed} step {step}: unexpected refusal `{msg}`"));
+                    *seen.entry(*class).or_default() += 1;
+                }
+            }
+            70..=77 => {
+                let ids = queued_ids(&m);
+                if !ids.is_empty() {
+                    let id = ids[next(&mut rng) as usize % ids.len()];
+                    let w = m.queue().iter().find(|q| q.id.0 == id).unwrap().withdrawal.clone();
+                    as_anyone(now);
+                    if try_call(|| m.execute(U64(id))).is_ok() && next(&mut rng) % 2 == 0 {
+                        callback_after_failure(now + SEC);
+                        m.on_execute_done(U64(id), w);
+                    }
+                }
+            }
+            78..=84 => {
+                let ids = queued_ids(&m);
+                if !ids.is_empty() {
+                    as_admin(now);
+                    m.cancel(U64(ids[next(&mut rng) as usize % ids.len()]));
+                }
+            }
+            85..=97 => {
+                as_anyone(now);
+                m.purge_expired();
+            }
+            _ => {
+                as_admin(now);
+                m.cancel_all();
+            }
+        }
+        assert_queue_bounds(&m, now, 4);
+    }
+    seen
+}
+
+#[test]
+fn random_sequences_over_four_keys_never_break_a_per_key_or_an_account_bound() {
+    // Fixed seeds, chosen so that between them the runs meet every per-key refusal (checked below). The runs are
+    // short because every call in the unit-test VM pays for a fresh context, about 20 ms.
+    let runs: Vec<_> = [(1u64, 60u32), (9, 60), (4, 80)].into_iter().map(|(seed, steps)| std::thread::spawn(move || random_run(seed, steps))).collect();
+    let mut seen = std::collections::BTreeMap::<&str, u32>::new();
+    for run in runs {
+        for (class, n) in run.join().expect("a random run broke a bound") {
+            *seen.entry(class).or_default() += n;
+        }
+    }
+    println!("refusals met: {seen:?}");
+    for class in [SLOTS_USED_UP, OVER_QUEUE_SHARE, OVER_BUDGET_SHARE] {
+        assert!(seen.contains_key(class), "the sequences never met `{class}`, so they prove nothing about it: {seen:?}");
+    }
+}
+
 // ---- R4: the state layout is frozen until a migration exists --------------------------------------
 
 /// Borsh bytes of a fresh vault, as hex. Nothing runs on mainnet yet and the testnet drill vaults are
 /// throwaway, so the layout may still change: when it does, rebuild this string from the failure message.
 /// From the first mainnet deploy on, a change here means every deployed vault fails to read its state (and
 /// `trip` with it): write a `migrate` that reads the old layout first, and only then update this string.
-const FRESH_STATE_HEX: &str = "03000000626f62000000a1edccce1bc2d30000000000008051010000000000000000000002000000647602000000646d0000000002000000697602000000696d010000006c010000007001000000720000a0dec5adc935360000000000000001000000770000000002000000717602000000716d00000000000000000000000002000000617602000000616d000300000001000000730000000002000000787602000000786d";
+const FRESH_STATE_HEX: &str = "03000000626f62000000a1edccce1bc2d30000000000008051010000000000000000000002000000647602000000646d0000000002000000697602000000696d010000006c010000007001000000720000a0dec5adc935360000000000000001000000770000000002000000717602000000716d00000000000000000000000002000000617602000000616d000300000001000000730000000002000000787602000000786d010000006b";
 
 #[test]
 fn the_state_layout_is_pinned_so_a_change_cannot_brick_a_deployed_vault_unnoticed() {

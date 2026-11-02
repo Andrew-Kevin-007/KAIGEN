@@ -285,11 +285,11 @@ fn on_usdc_balance_pays_the_balance_with_one_yocto_and_ignores_zero_or_errors() 
         Some("usdc.token".parse().unwrap()),
     );
     ctx_init();
-    k.on_usdc_balance(accounts(2), Ok(U128(0)));
+    k.on_usdc_balance(accounts(2), U64(k.usdc_epoch), Ok(U128(0)));
     assert!(near_sdk::test_utils::get_created_receipts().is_empty(), "nothing to send");
-    k.on_usdc_balance(accounts(2), Err(PromiseError::Failed));
+    k.on_usdc_balance(accounts(2), U64(k.usdc_epoch), Err(PromiseError::Failed));
     assert!(near_sdk::test_utils::get_created_receipts().is_empty(), "a failed balance read sends nothing");
-    k.on_usdc_balance(accounts(2), Ok(U128(5_000_000)));
+    k.on_usdc_balance(accounts(2), U64(k.usdc_epoch), Ok(U128(5_000_000)));
     let r = receipts_text();
     assert!(r.contains("ft_transfer") && r.contains("5000000") && r.contains("inner: 1 }"), "{r}");
 }
@@ -451,7 +451,7 @@ fn the_longest_retry_fits_a_transaction() {
 fn usdc_payout_registers_the_claimant_then_transfers_then_resolves() {
     let mut k = usdc_registry();
     ctx_init();
-    k.on_usdc_balance(accounts(2), Ok(U128(PAID)));
+    k.on_usdc_balance(accounts(2), U64(k.usdc_epoch), Ok(U128(PAID)));
     let r = receipts_text();
     let (register, transfer, resolve) = (pos(&r, "storage_deposit"), pos(&r, "ft_transfer"), pos(&r, "on_usdc_paid"));
     assert!(register < transfer && transfer < resolve, "{r}");
@@ -464,7 +464,7 @@ fn usdc_payout_registers_the_claimant_then_transfers_then_resolves() {
 fn failed_usdc_balance_read_is_reported_not_swallowed() {
     let mut k = usdc_registry();
     ctx_init();
-    k.on_usdc_balance(accounts(2), Err(PromiseError::Failed));
+    k.on_usdc_balance(accounts(2), U64(k.usdc_epoch), Err(PromiseError::Failed));
     assert!(logged("payout_failed"), "{:?}", get_logs());
     assert!(get_created_receipts().is_empty());
 }
@@ -474,7 +474,7 @@ fn usdc_payout_the_contract_cannot_fund_is_recorded_not_lost() {
     let mut k = usdc_registry();
     // 0.001 NEAR above the reserve: not enough for the 0.01 NEAR registration deposit.
     ctx_with_balance(NearToken::from_yoctonear(storage_reserve() + 1_000_000_000_000_000_000_000));
-    k.on_usdc_balance(accounts(2), Ok(U128(PAID)));
+    k.on_usdc_balance(accounts(2), U64(k.usdc_epoch), Ok(U128(PAID)));
     assert!(get_created_receipts().is_empty(), "no registration deposit to attach");
     assert!(logged("payout_failed"));
     assert_eq!(k.owed(accounts(2)).usdc.0, PAID);
@@ -485,7 +485,7 @@ fn usdc_owed_to_an_earlier_claimant_is_not_swept_by_a_later_one() {
     let mut k = usdc_registry();
     k.record_owed(&accounts(2), 0, 3_000_000);
     ctx_init();
-    k.on_usdc_balance(accounts(3), Ok(U128(PAID)));
+    k.on_usdc_balance(accounts(3), U64(k.usdc_epoch), Ok(U128(PAID)));
     let r = receipts_text();
     assert!(r.contains("\"amount\":\"2000000\"") && !r.contains("\"amount\":\"5000000\""), "only the unowed part moves: {r}");
 }
@@ -635,7 +635,7 @@ fn failed_usdc_balance_read_is_held_so_the_claimant_can_retry_it() {
     // could ever sweep the USDC, and with no keys on the account it was stranded for good.
     let mut k = usdc_registry();
     ctx_callback(PromiseResult::Failed);
-    k.on_usdc_balance(accounts(2), Err(PromiseError::Failed));
+    k.on_usdc_balance(accounts(2), U64(k.usdc_epoch), Err(PromiseError::Failed));
     let owed = k.owed(accounts(2));
     assert!(owed.usdc_unread, "the read is what is owed");
     assert_eq!((owed.near.0, owed.usdc.0), (0, 0), "no amount is known, so none is recorded");
@@ -646,7 +646,7 @@ fn failed_usdc_balance_read_is_held_so_the_claimant_can_retry_it() {
 fn retry_of_a_failed_usdc_balance_read_reads_again_and_pays_in_the_callback() {
     let mut k = usdc_registry();
     ctx_callback(PromiseResult::Failed);
-    k.on_usdc_balance(accounts(2), Err(PromiseError::Failed));
+    k.on_usdc_balance(accounts(2), U64(k.usdc_epoch), Err(PromiseError::Failed));
     ctx(); // accounts(1) calls: anyone may
     let _ = k.retry_payout(accounts(2));
     let r = receipts_text();
@@ -664,7 +664,7 @@ fn retry_of_a_failed_usdc_balance_read_reads_again_and_pays_in_the_callback() {
 fn retry_of_a_failed_usdc_balance_read_needs_no_payable_near() {
     let mut k = usdc_registry();
     ctx_callback(PromiseResult::Failed);
-    k.on_usdc_balance(accounts(2), Err(PromiseError::Failed));
+    k.on_usdc_balance(accounts(2), U64(k.usdc_epoch), Err(PromiseError::Failed));
     ctx_with_balance(NearToken::from_yoctonear(storage_reserve()));
     let _ = k.retry_payout(accounts(2));
     assert!(receipts_text().contains("ft_balance_of"));
@@ -676,7 +676,7 @@ fn retry_of_all_three_legs_is_one_ordered_chain() {
     let one_near = NearToken::from_near(1).as_yoctonear();
     k.record_owed(&accounts(2), one_near, PAID);
     ctx_callback(PromiseResult::Failed);
-    k.on_usdc_balance(accounts(2), Err(PromiseError::Failed));
+    k.on_usdc_balance(accounts(2), U64(k.usdc_epoch), Err(PromiseError::Failed));
     ctx();
     let _ = k.retry_payout(accounts(2));
     let r = receipts_text();
@@ -696,7 +696,7 @@ fn retry_with_part_of_the_near_still_owed_keeps_that_part_and_hands_the_read_on(
     let one_near = NearToken::from_near(1).as_yoctonear();
     k.record_owed(&accounts(2), one_near, 0);
     ctx_callback(PromiseResult::Failed);
-    k.on_usdc_balance(accounts(2), Err(PromiseError::Failed));
+    k.on_usdc_balance(accounts(2), U64(k.usdc_epoch), Err(PromiseError::Failed));
     let spare = 400_000_000_000_000_000_000_000; // 0.4 NEAR above the reserve and the margin
     ctx_with_balance(NearToken::from_yoctonear(storage_reserve() + STORAGE_MARGIN.as_yoctonear() + spare));
     let _ = k.retry_payout(accounts(2));
@@ -835,8 +835,8 @@ fn receiver_is(text: &str, who: &AccountId) -> bool {
 fn two_payouts_close_together_cannot_both_be_paid_the_same_balance() {
     let mut k = usdc_registry();
     ctx_init();
-    k.on_usdc_balance(accounts(2), Ok(U128(PAID)));
-    k.on_usdc_balance(accounts(3), Ok(U128(PAID))); // read before the first transfer landed: the same balance
+    k.on_usdc_balance(accounts(2), U64(k.usdc_epoch), Ok(U128(PAID)));
+    k.on_usdc_balance(accounts(3), U64(k.usdc_epoch), Ok(U128(PAID))); // read before the first transfer landed: the same balance
     let r = receipts_text();
     assert_eq!(r.matches("ft_transfer").count(), 1, "only one transfer may be scheduled: {r}");
     assert!(receiver_is(&r, &accounts(2)) && !r.contains(&accounts(3).to_string()), "{r}");
@@ -848,8 +848,8 @@ fn owed_and_in_flight_usdc_both_stay_out_of_reach_of_a_later_claim() {
     let mut k = usdc_registry();
     k.record_owed(&accounts(2), 0, 3_000_000);
     ctx_init();
-    k.on_usdc_balance(accounts(3), Ok(U128(PAID))); // 2 000 000 is free, and goes in flight
-    k.on_usdc_balance(accounts(4), Ok(U128(PAID))); // nothing is free any more
+    k.on_usdc_balance(accounts(3), U64(k.usdc_epoch), Ok(U128(PAID))); // 2 000 000 is free, and goes in flight
+    k.on_usdc_balance(accounts(4), U64(k.usdc_epoch), Ok(U128(PAID))); // nothing is free any more
     let r = receipts_text();
     assert_eq!(r.matches("ft_transfer").count(), 1, "{r}");
     assert!(r.contains("\"amount\":\"2000000\"") && !r.contains(&accounts(4).to_string()), "{r}");
@@ -860,13 +860,13 @@ fn owed_and_in_flight_usdc_both_stay_out_of_reach_of_a_later_claim() {
 fn a_settled_payout_releases_its_reservation_whether_it_succeeded_or_not() {
     let mut k = usdc_registry();
     ctx_init();
-    k.on_usdc_balance(accounts(2), Ok(U128(PAID)));
+    k.on_usdc_balance(accounts(2), U64(k.usdc_epoch), Ok(U128(PAID)));
     assert_eq!(k.in_flight_total(), PAID);
     ctx_callback(PromiseResult::Successful(vec![]));
     k.on_usdc_paid(accounts(2), U128(PAID));
     assert_eq!(k.in_flight_total(), 0, "paid");
     ctx_init();
-    k.on_usdc_balance(accounts(3), Ok(U128(PAID)));
+    k.on_usdc_balance(accounts(3), U64(k.usdc_epoch), Ok(U128(PAID)));
     assert_eq!(k.in_flight_total(), PAID);
     ctx_callback(PromiseResult::Failed);
     k.on_usdc_paid(accounts(3), U128(PAID));
@@ -910,7 +910,7 @@ fn a_transfer_that_failed_for_a_real_reason_is_paid_after_the_re_read() {
     ctx();
     let _ = k.retry_payout(accounts(2));
     ctx_init();
-    k.on_usdc_balance(accounts(2), Ok(U128(PAID))); // the read confirms it
+    k.on_usdc_balance(accounts(2), U64(k.usdc_epoch), Ok(U128(PAID))); // the read confirms it
     let r = receipts_text();
     assert!(r.contains("\"amount\":\"5000000\"") && receiver_is(&r, &accounts(2)), "{r}");
     let owed = k.owed(accounts(2));
@@ -922,11 +922,11 @@ fn a_transfer_that_failed_for_a_real_reason_is_paid_after_the_re_read() {
 fn a_phantom_debt_clears_at_the_re_read_and_hides_no_later_top_up() {
     let mut k = usdc_registry();
     ctx_init();
-    k.on_usdc_balance(accounts(2), Ok(U128(PAID)));
+    k.on_usdc_balance(accounts(2), U64(k.usdc_epoch), Ok(U128(PAID)));
     ctx_callback(PromiseResult::Successful(vec![]));
     k.on_usdc_paid(accounts(2), U128(PAID)); // the first payout landed: the token holds nothing now
-    ctx_init();
-    k.on_usdc_balance(accounts(3), Ok(U128(PAID))); // a read taken before that transfer landed
+    // A transfer for tokens the token no longer holds. A read from before the first payout landed no longer gets
+    // this far (see K10), but a payout whose reservation timed out and which landed late still can.
     ctx_callback(PromiseResult::Failed);
     k.on_usdc_paid(accounts(3), U128(PAID)); // the token had nothing to send
     assert_eq!(k.owed(accounts(3)).usdc.0, PAID, "recorded, as unverified");
@@ -934,14 +934,14 @@ fn a_phantom_debt_clears_at_the_re_read_and_hides_no_later_top_up() {
     ctx();
     let _ = k.retry_payout(accounts(3));
     ctx_init();
-    k.on_usdc_balance(accounts(3), Ok(U128(0))); // the token holds nothing
+    k.on_usdc_balance(accounts(3), U64(k.usdc_epoch), Ok(U128(0))); // the token holds nothing
     let o = k.owed(accounts(3));
     assert_eq!((o.near.0, o.usdc.0, o.usdc_unread), (0, 0, false), "the phantom is gone");
     assert!(logged("owed_reconciled"), "{:?}", get_logs());
     assert!(get_created_receipts().is_empty());
 
     ctx_init();
-    k.on_usdc_balance(accounts(4), Ok(U128(TOP_UP))); // a top-up arrives and the next claim takes all of it
+    k.on_usdc_balance(accounts(4), U64(k.usdc_epoch), Ok(U128(TOP_UP))); // a top-up arrives and the next claim takes all of it
     let r = receipts_text();
     assert!(r.contains(&format!("\"amount\":\"{TOP_UP}\"")) && receiver_is(&r, &accounts(4)), "{r}");
 }
@@ -955,7 +955,7 @@ fn a_re_read_never_pays_more_than_the_token_holds_beyond_what_others_are_owed() 
     ctx();
     let _ = k.retry_payout(accounts(2));
     ctx_init();
-    k.on_usdc_balance(accounts(2), Ok(U128(4_000_000)));
+    k.on_usdc_balance(accounts(2), U64(k.usdc_epoch), Ok(U128(4_000_000)));
     let r = receipts_text();
     assert!(r.contains("\"amount\":\"3000000\""), "4 000 000 held minus 1 000 000 owed to the other claimant: {r}");
     assert!(logged("owed_reconciled"), "the recorded 5 000 000 was more than there was: {:?}", get_logs());
@@ -970,7 +970,7 @@ fn a_verified_retry_reserves_its_amount_while_it_is_in_flight() {
     let _ = k.retry_payout(accounts(2));
     assert_eq!(k.in_flight_total(), PAID);
     ctx_init();
-    k.on_usdc_balance(accounts(3), Ok(U128(PAID)));
+    k.on_usdc_balance(accounts(3), U64(k.usdc_epoch), Ok(U128(PAID)));
     assert!(get_created_receipts().is_empty(), "the amount being retried is not free for another claim");
 }
 
@@ -984,7 +984,7 @@ fn the_balance_callback_costs_the_same_gas_however_many_records_are_owed() {
     let mut k = usdc_registry();
     let one_call = |k: &mut Kizashi, claimant: AccountId| {
         let before = env::used_gas().as_gas();
-        k.on_usdc_balance(claimant, Ok(U128(PAID * 100)));
+        k.on_usdc_balance(claimant, U64(k.usdc_epoch), Ok(U128(PAID * 100)));
         assert!(
             get_created_receipts().iter().any(|r| format!("{:?}", r.actions).contains("FunctionCall")),
             "a transfer was scheduled, so the figure includes the calls it attaches gas to"
@@ -1021,7 +1021,7 @@ fn the_balance_callback_fits_its_gas_in_the_fullest_state_it_can_meet() {
     }
     ctx_init_at(IN_FLIGHT_TIMEOUT_NS);
     let before = env::used_gas().as_gas();
-    k.on_usdc_balance(accounts(2), Ok(U128(PAID * 100)));
+    k.on_usdc_balance(accounts(2), U64(k.usdc_epoch), Ok(U128(PAID * 100)));
     let used = env::used_gas().as_gas() - before;
     assert!(logged("in_flight_released"), "the stale entries were released in this call");
     assert!(get_created_receipts().iter().any(|r| format!("{:?}", r.actions).contains("FunctionCall")), "and the payout was scheduled");
@@ -1105,16 +1105,16 @@ fn ctx_callback_at(ts: u64, result: PromiseResult) {
 fn a_reservation_whose_callback_never_came_back_is_released_after_the_timeout() {
     let mut k = usdc_registry();
     ctx_init_at(0);
-    k.on_usdc_balance(accounts(2), Ok(U128(PAID))); // scheduled; its on_usdc_paid never runs
+    k.on_usdc_balance(accounts(2), U64(k.usdc_epoch), Ok(U128(PAID))); // scheduled; its on_usdc_paid never runs
     assert_eq!(k.in_flight_total(), PAID);
 
     ctx_init_at(IN_FLIGHT_TIMEOUT_NS - 1);
-    k.on_usdc_balance(accounts(3), Ok(U128(PAID)));
+    k.on_usdc_balance(accounts(3), U64(k.usdc_epoch), Ok(U128(PAID)));
     assert!(get_created_receipts().is_empty(), "inside the timeout the reservation holds, so nothing is free");
     assert_eq!(k.in_flight_total(), PAID);
 
     ctx_init_at(IN_FLIGHT_TIMEOUT_NS);
-    k.on_usdc_balance(accounts(3), Ok(U128(PAID)));
+    k.on_usdc_balance(accounts(3), U64(k.usdc_epoch), Ok(U128(PAID)));
     let r = receipts_text();
     assert!(r.contains("\"amount\":\"5000000\"") && receiver_is(&r, &accounts(3)), "at the timeout it is let go and the USDC is paid out: {r}");
     assert!(logged("in_flight_released"), "{:?}", get_logs());
@@ -1125,7 +1125,7 @@ fn a_reservation_whose_callback_never_came_back_is_released_after_the_timeout() 
 fn anyone_can_release_a_stale_reservation_and_a_fresh_one_is_left_alone() {
     let mut k = usdc_registry();
     ctx_init_at(1_000);
-    k.on_usdc_balance(accounts(2), Ok(U128(PAID)));
+    k.on_usdc_balance(accounts(2), U64(k.usdc_epoch), Ok(U128(PAID)));
     assert_eq!((k.usdc_in_flight().usdc.0, k.usdc_in_flight().payouts), (PAID, 1));
 
     ctx_at(1_000 + IN_FLIGHT_TIMEOUT_NS - 1);
@@ -1145,9 +1145,9 @@ fn anyone_can_release_a_stale_reservation_and_a_fresh_one_is_left_alone() {
 fn a_late_callback_after_the_release_frees_nothing_that_belongs_to_a_newer_payout() {
     let mut k = usdc_registry();
     ctx_init_at(0);
-    k.on_usdc_balance(accounts(2), Ok(U128(PAID))); // payout A, whose callback is very late
+    k.on_usdc_balance(accounts(2), U64(k.usdc_epoch), Ok(U128(PAID))); // payout A, whose callback is very late
     ctx_init_at(IN_FLIGHT_TIMEOUT_NS);
-    k.on_usdc_balance(accounts(3), Ok(U128(PAID))); // A is released, and payout B takes the same amount
+    k.on_usdc_balance(accounts(3), U64(k.usdc_epoch), Ok(U128(PAID))); // A is released, and payout B takes the same amount
     assert_eq!(k.in_flight_total(), PAID);
 
     ctx_callback_at(IN_FLIGHT_TIMEOUT_NS + 1, PromiseResult::Successful(vec![]));
@@ -1165,7 +1165,7 @@ fn a_late_callback_after_the_release_frees_nothing_that_belongs_to_a_newer_payou
 fn a_late_failure_after_the_release_is_still_held_as_unverified_debt() {
     let mut k = usdc_registry();
     ctx_init_at(0);
-    k.on_usdc_balance(accounts(2), Ok(U128(PAID)));
+    k.on_usdc_balance(accounts(2), U64(k.usdc_epoch), Ok(U128(PAID)));
     ctx_at(IN_FLIGHT_TIMEOUT_NS);
     let _ = k.release_stale_in_flight();
     ctx_callback_at(IN_FLIGHT_TIMEOUT_NS + 1, PromiseResult::Failed);
@@ -1179,7 +1179,7 @@ fn a_late_failure_after_the_release_is_still_held_as_unverified_debt() {
 fn a_late_success_after_the_release_leaves_the_books_as_they_are() {
     let mut k = usdc_registry();
     ctx_init_at(0);
-    k.on_usdc_balance(accounts(2), Ok(U128(PAID)));
+    k.on_usdc_balance(accounts(2), U64(k.usdc_epoch), Ok(U128(PAID)));
     ctx_at(IN_FLIGHT_TIMEOUT_NS);
     let _ = k.release_stale_in_flight();
     ctx_callback_at(IN_FLIGHT_TIMEOUT_NS + 1, PromiseResult::Successful(vec![]));
@@ -1195,7 +1195,7 @@ fn with_the_in_flight_list_full_a_payout_is_held_as_owed_instead_of_scheduled() 
         k.in_flight.push(InFlight { claimant: accounts(4), amount: 1, at: 0 });
     }
     ctx_init_at(1);
-    k.on_usdc_balance(accounts(2), Ok(U128(PAID)));
+    k.on_usdc_balance(accounts(2), U64(k.usdc_epoch), Ok(U128(PAID)));
     assert!(get_created_receipts().is_empty(), "nothing is scheduled while MAX_IN_FLIGHT payouts are unreported");
     let owed = k.owed(accounts(2));
     assert_eq!(owed.usdc.0, PAID - MAX_IN_FLIGHT as u128, "what the claimant is owed is held for them, minus what is reserved");
@@ -1224,4 +1224,809 @@ fn a_successful_callback_removes_exactly_one_entry() {
     assert_eq!(k.in_flight.len(), 2, "one of the two identical entries went, the other claimant's stayed");
     assert!(k.in_flight.iter().any(|p| p.claimant == accounts(3)));
     assert!(k.in_flight.iter().any(|p| p.claimant == accounts(2) && p.at == 6), "the oldest of the twins went first");
+}
+
+
+// --- K10: a balance read from before another payout landed is not paid from ---
+//
+// `claim` (and `retry_payout` of an unread amount) reads the token's balance and a LATER callback pays from it.
+// The read is a snapshot. A payout that is in flight is subtracted from it, but once that payout has landed and
+// reported, nothing is subtracted any more, while a read taken before it landed still counts those tokens. Paying
+// from that read pays the same tokens twice: either out of tokens held for another claimant, or of tokens that are
+// no longer there (the token refuses, and the amount is held as a phantom debt). Every read now carries `usdc_epoch`
+// as it was when the read was ordered, and the callback refuses one ordered under an older value.
+
+/// The first payout's transfer has landed and `on_usdc_paid` has heard of it.
+fn first_payout_lands_and_reports(k: &mut Kizashi, claimant: AccountId, amount: u128) {
+    ctx_callback(PromiseResult::Successful(vec![]));
+    k.on_usdc_paid(claimant, U128(amount));
+    assert_eq!(k.in_flight_total(), 0, "the reservation is gone, as it should be once the payout reported");
+}
+
+#[test]
+fn a_balance_read_from_before_a_payout_landed_cannot_pay_out_tokens_held_for_another_claimant() {
+    // The token holds 10 000 000; 5 000 000 of it are held for accounts(4). Two claims read it while it held all of it.
+    let mut k = usdc_registry();
+    k.record_owed(&accounts(4), 0, 5_000_000);
+    let ordered = k.usdc_epoch;
+    ctx_init();
+    k.on_usdc_balance(accounts(2), U64(ordered), Ok(U128(10_000_000))); // the first claim: 5 000 000 go in flight
+    assert_eq!(k.in_flight_total(), 5_000_000);
+    first_payout_lands_and_reports(&mut k, accounts(2), 5_000_000);
+    // The second claim's callback, with the read it took before that transfer landed. The token now holds only
+    // the 5 000 000 held for accounts(4), so nothing may be sent to accounts(3).
+    ctx_init();
+    k.on_usdc_balance(accounts(3), U64(ordered), Ok(U128(10_000_000)));
+    let r = receipts_text();
+    assert!(!r.contains("ft_transfer"), "a transfer was scheduled from a read older than the payout that landed: {r}");
+    assert_eq!(k.owed(accounts(4)).usdc.0, 5_000_000, "and the tokens held for accounts(4) are still held");
+    assert!(k.owed(accounts(3)).usdc_unread, "accounts(3) is paid by a retry, which reads the balance again");
+    assert!(logged("payout_failed"), "the refusal is reported: {:?}", get_logs());
+}
+
+#[test]
+fn a_balance_read_from_before_a_retry_paid_cannot_pay_those_tokens_again() {
+    // claim x retry_payout: accounts(4) is owed 5 000 000 on a verified read, and a claim has read the full 10 000 000.
+    let mut k = usdc_registry();
+    k.record_owed(&accounts(4), 0, 5_000_000);
+    let ordered = k.usdc_epoch;
+    ctx();
+    let _ = k.retry_payout(accounts(4)); // 5 000 000 in flight for accounts(4)
+    assert_eq!(k.in_flight_total(), 5_000_000);
+    first_payout_lands_and_reports(&mut k, accounts(4), 5_000_000);
+    ctx_init();
+    k.on_usdc_balance(accounts(2), U64(ordered), Ok(U128(10_000_000))); // the claim read it before the retry landed
+    let r = receipts_text();
+    assert!(!r.contains("ft_transfer"), "10 000 000 were scheduled; the token holds 5 000 000: {r}");
+    assert!(k.owed(accounts(2)).usdc_unread);
+}
+
+#[test]
+fn a_retry_balance_read_from_before_a_payout_landed_cannot_pay_that_payout_again() {
+    // retry_payout (unread) x claim: the amount held for accounts(4) is not trusted, so its retry reads the balance
+    // again. That read is taken while a claim's payout of 5 000 000 is in flight and comes back after it reported.
+    let mut k = usdc_registry();
+    k.record_owed(&accounts(4), 0, 5_000_000);
+    k.record_unread(&accounts(4));
+    ctx_init();
+    k.on_usdc_balance(accounts(2), U64(k.usdc_epoch), Ok(U128(10_000_000))); // the claim: 10 000 000 less 5 000 000 held
+    assert_eq!(k.in_flight_total(), 5_000_000);
+    ctx();
+    let _ = k.retry_payout(accounts(4)); // its read sees 10 000 000: the claim's transfer has not landed yet
+    let ordered = k.usdc_epoch;
+    first_payout_lands_and_reports(&mut k, accounts(2), 5_000_000);
+    ctx_init();
+    k.on_usdc_balance(accounts(4), U64(ordered), Ok(U128(10_000_000)));
+    let r = receipts_text();
+    assert!(!r.contains("ft_transfer"), "10 000 000 were scheduled; the token holds 5 000 000: {r}");
+    let owed = k.owed(accounts(4));
+    assert_eq!((owed.usdc.0, owed.usdc_unread), (5_000_000, true), "still held, and still to be read again");
+}
+
+#[test]
+fn a_balance_read_ordered_after_the_payout_landed_is_paid_from() {
+    // The same sequence, but the second read is ordered once the first payout has reported: it is a fresh read.
+    let mut k = usdc_registry();
+    k.record_owed(&accounts(4), 0, 5_000_000);
+    ctx_init();
+    k.on_usdc_balance(accounts(2), U64(k.usdc_epoch), Ok(U128(10_000_000)));
+    first_payout_lands_and_reports(&mut k, accounts(2), 5_000_000);
+    let ordered = k.usdc_epoch;
+    ctx_init();
+    k.on_usdc_balance(accounts(3), U64(ordered), Ok(U128(7_000_000))); // the 5 000 000 held for accounts(4), and 2 000 000 more
+    let r = receipts_text();
+    assert!(r.contains("\"amount\":\"2000000\"") && receiver_is(&r, &accounts(3)), "only the top-up is free: {r}");
+}
+
+#[test]
+fn a_transfer_that_failed_does_not_make_earlier_reads_stale() {
+    // A failed transfer moved no tokens, so no read is older than it in a way that matters.
+    let mut k = usdc_registry();
+    let ordered = k.usdc_epoch;
+    ctx_init();
+    k.on_usdc_balance(accounts(2), U64(ordered), Ok(U128(PAID)));
+    ctx_callback(PromiseResult::Failed);
+    k.on_usdc_paid(accounts(2), U128(PAID));
+    assert_eq!(k.usdc_epoch, ordered);
+    ctx_init();
+    k.on_usdc_balance(accounts(3), U64(ordered), Ok(U128(PAID + TOP_UP)));
+    let r = receipts_text();
+    assert!(r.contains(&format!("\"amount\":\"{TOP_UP}\"")) && receiver_is(&r, &accounts(3)), "paid from the read: {r}");
+}
+
+#[test]
+fn releasing_a_timed_out_reservation_makes_earlier_reads_stale_and_releasing_nothing_does_not() {
+    let mut k = usdc_registry();
+    let ordered = k.usdc_epoch;
+    ctx_init_at(1_000);
+    k.on_usdc_balance(accounts(2), U64(ordered), Ok(U128(PAID))); // a payout whose callback never comes back
+    ctx_at(1_000 + IN_FLIGHT_TIMEOUT_NS - 1);
+    assert_eq!(k.release_stale_in_flight().0, 0);
+    assert_eq!(k.usdc_epoch, ordered, "nothing was released, so nothing moved");
+    ctx_at(1_000 + IN_FLIGHT_TIMEOUT_NS);
+    assert_eq!(k.release_stale_in_flight().0, PAID);
+    assert_eq!(k.usdc_epoch, ordered + 1, "what became of that payout is not known");
+    ctx_init_at(1_000 + IN_FLIGHT_TIMEOUT_NS);
+    k.on_usdc_balance(accounts(3), U64(ordered), Ok(U128(PAID)));
+    assert!(get_created_receipts().is_empty(), "a read ordered before the release is not paid from");
+    assert!(k.owed(accounts(3)).usdc_unread);
+}
+
+#[test]
+fn claim_and_retry_order_their_reads_under_the_current_epoch() {
+    let mut k = usdc_registry();
+    k.usdc_epoch = 7;
+    let sig = ed_sig(&k, "ed25519-omen", &accounts(2), &ed_key());
+    ctx();
+    let _ = k.claim("ed25519-omen".into(), accounts(2), sig);
+    let r = receipts_text();
+    assert!(pos(&r, "on_usdc_balance") < pos(&r, "\"epoch\":\"7\""), "claim passes the epoch to its callback: {r}");
+    k.record_owed(&accounts(4), 0, PAID);
+    k.record_unread(&accounts(4));
+    k.usdc_epoch = 9;
+    ctx();
+    let _ = k.retry_payout(accounts(4));
+    let r = receipts_text();
+    assert!(r.contains("\"epoch\":\"9\""), "retry passes the epoch to its callback: {r}");
+}
+
+
+// --- M2 part A: the paths matrix. Every pair of payout paths, in both orders ---
+//
+// The unit-test VM runs one call at a time, so what a chain does between two receipts has to be played by hand.
+// `World` is a small model of the chain around the contract: its NEAR balance, the token's balance, and the
+// receipts the contract has scheduled and nobody has delivered yet. Each scheduled call becomes a `Chain`: its steps
+// run in order, but steps of different chains run in any order, and a new transaction (an `Op`) can arrive between
+// any two of them. `explore` tries every such schedule (merging the ones that reach the same state) and checks the
+// books after every step.
+//
+// What the model assumes of the runtime, and has not checked against nearcore: a callback runs after the receipt
+// it waits for, and the refund of a failed transfer reaches the contract after that callback (the contract's own
+// `retry_payout` message, "owed NEAR has not returned yet", relies on the same order).
+
+use near_sdk::mock::MockAction;
+use std::collections::{BTreeMap, HashSet, VecDeque};
+
+/// NEAR the model contract holds above its storage reserve and margin.
+const POT_NEAR: u128 = 10_000_000_000_000_000_000_000_000;
+/// USDC the model token holds for the contract.
+const POT_USDC: u128 = 10_000_000;
+
+fn omen_key(i: usize) -> (&'static str, EdKey) {
+    [("omen-a", ed_key()), ("omen-b", EdKey::from_bytes(&[3u8; 32]))].into_iter().nth(i).unwrap()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum Step {
+    /// A NEAR transfer to `to` and the contract's `on_near_payout` that waits for it.
+    NearPay { to: AccountId, amount: u128 },
+    /// The refund of a failed transfer. It reaches the contract after the callback.
+    Refund(u128),
+    /// The token's `ft_balance_of`: the balance is read when this is delivered.
+    Read,
+    /// The contract's `on_usdc_balance`, with the balance the read before it returned and the epoch it was ordered under.
+    Balance { claimant: AccountId, epoch: u64 },
+    /// The token's `ft_transfer`. The storage deposit before it is taken to work.
+    FtSend { to: AccountId, amount: u128 },
+    /// The contract's `on_usdc_paid`, with what `ft_transfer` returned.
+    Paid { claimant: AccountId, amount: u128 },
+}
+
+#[derive(Clone, Debug)]
+struct Chain {
+    steps: VecDeque<Step>,
+    /// What the last `Read` of this chain saw.
+    snapshot: u128,
+    /// Whether the last `FtSend` of this chain worked.
+    last_ok: bool,
+}
+
+#[derive(Clone, Debug)]
+enum Op {
+    Claim { omen: usize, by: AccountId },
+    Retry(AccountId),
+    Release,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Move {
+    /// The next transaction of the schedule arrives.
+    Start,
+    /// The next step of chain `i` is delivered.
+    Deliver(usize),
+}
+
+/// The contract's books, kept to undo what a call did before it panicked (a unit-test panic rolls nothing back).
+struct Books {
+    in_flight: Vec<InFlight>,
+    owed: Vec<(AccountId, Owed)>,
+}
+
+impl Books {
+    fn of(k: &Kizashi) -> Self {
+        Self { in_flight: k.in_flight.clone(), owed: k.owed.iter().map(|(a, o)| (a.clone(), o.clone())).collect() }
+    }
+
+    fn restore(self, k: &mut Kizashi) {
+        k.in_flight = self.in_flight;
+        k.owed.clear();
+        for (a, o) in self.owed {
+            k.owed.insert(a, o);
+        }
+    }
+}
+
+struct World {
+    k: Kizashi,
+    near: u128,
+    tok: u128,
+    now: u64,
+    /// NEAR transfers to these accounts fail (the account does not exist).
+    dead: Vec<AccountId>,
+    /// The token refuses USDC once for each of these accounts although it holds enough (the next transfer works).
+    refuse: Vec<AccountId>,
+    chains: Vec<Chain>,
+    /// USDC transfers the token has completed and `on_usdc_paid` has not heard of yet.
+    landed: Vec<u128>,
+    paid_near: BTreeMap<AccountId, u128>,
+    paid_usdc: BTreeMap<AccountId, u128>,
+    /// `ft_transfer`s the token refused for want of tokens.
+    short: u32,
+    /// Pays out from every balance read, however old. Only to show the model sees the race the epoch closes.
+    trust_stale_reads: bool,
+    /// Things that went wrong in a transaction, found as it was made.
+    errors: Vec<String>,
+    trace: Vec<String>,
+}
+
+thread_local! {
+    /// `test_vm_config()` takes 20 ms to build and every step of the model needs one, so it is built once.
+    static VM_CONFIG: std::cell::RefCell<Option<Box<dyn std::any::Any>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The VM config, built once per thread. Its type comes from where it is used.
+macro_rules! vm_config {
+    () => {
+        VM_CONFIG.with(|c| {
+            Clone::clone(c.borrow_mut().get_or_insert_with(|| Box::new(test_vm_config())).downcast_ref().expect("the config"))
+        })
+    };
+}
+
+fn set_env(predecessor: &AccountId, balance: u128, ts: u64, results: Vec<PromiseResult>) {
+    let mut b = VMContextBuilder::new();
+    b.current_account_id(accounts(0))
+        .predecessor_account_id(predecessor.clone())
+        .account_balance(NearToken::from_yoctonear(balance))
+        .block_height(100)
+        .block_timestamp(ts);
+    testing_env!(b.build(), vm_config!(), RuntimeFeesConfig::test(), Default::default(), results);
+}
+
+/// An environment with empty storage. `testing_env!` keeps the storage of the one before it, which a model that
+/// builds many contracts in one test must not.
+fn fresh_env() {
+    let mut b = VMContextBuilder::new();
+    b.current_account_id(accounts(0)).predecessor_account_id(accounts(1));
+    near_sdk::env::set_blockchain_interface(near_sdk::MockedBlockchain::new(
+        b.build(),
+        vm_config!(),
+        RuntimeFeesConfig::test(),
+        vec![],
+        Default::default(),
+        Default::default(),
+        None,
+    ));
+}
+
+fn json_of(args: &[u8]) -> near_sdk::serde_json::Value {
+    near_sdk::serde_json::from_slice(args).expect("receipt arguments are JSON")
+}
+
+fn account_of(v: &near_sdk::serde_json::Value, key: &str) -> AccountId {
+    v[key].as_str().unwrap_or_else(|| panic!("{key} missing in {v}")).parse().unwrap()
+}
+
+fn amount_of(v: &near_sdk::serde_json::Value, key: &str) -> u128 {
+    v[key].as_str().unwrap_or_else(|| panic!("{key} missing in {v}")).parse().unwrap()
+}
+
+/// The receipts the last call created, as the steps they become, and the NEAR they take out of the balance.
+fn scheduled() -> (Vec<Step>, u128) {
+    let (mut steps, mut leaves) = (Vec::new(), 0u128);
+    for r in get_created_receipts() {
+        for a in &r.actions {
+            match a {
+                MockAction::Transfer { deposit, .. } => {
+                    leaves += deposit.as_yoctonear();
+                    steps.push(Step::NearPay { to: r.receiver_id.clone(), amount: deposit.as_yoctonear() });
+                }
+                MockAction::FunctionCallWeight { method_name, args, attached_deposit, .. } => {
+                    // The token refunds what the registration does not need, so its storage deposit is taken to cost nothing.
+                    if method_name.as_slice() != b"storage_deposit" {
+                        leaves += attached_deposit.as_yoctonear();
+                    }
+                    let v = json_of(args);
+                    match method_name.as_slice() {
+                        b"on_near_payout" | b"storage_deposit" => {} // the first rides with its transfer, the second is taken to work
+                        b"ft_balance_of" => steps.push(Step::Read),
+                        b"on_usdc_balance" => steps.push(Step::Balance {
+                            claimant: account_of(&v, "claimant"),
+                            epoch: v["epoch"].as_str().expect("the epoch").parse().unwrap(),
+                        }),
+                        b"ft_transfer" => {
+                            steps.push(Step::FtSend { to: account_of(&v, "receiver_id"), amount: amount_of(&v, "amount") })
+                        }
+                        b"on_usdc_paid" => steps.push(Step::Paid {
+                            claimant: account_of(&v, "claimant"),
+                            amount: amount_of(&v, "amount"),
+                        }),
+                        other => panic!("the model does not know {}", String::from_utf8_lossy(other)),
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    (steps, leaves)
+}
+
+fn panic_message(e: Box<dyn std::any::Any + Send>) -> String {
+    let text = e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default();
+    text.split("panic_msg: \"").nth(1).and_then(|t| t.split('"').next()).unwrap_or(&text).to_string()
+}
+
+impl World {
+    fn new() -> Self {
+        fresh_env();
+        set_env(&accounts(0), 10u128.pow(27), 0, vec![]);
+        let omens = vec![
+            OmenInit {
+                id: "omen-a".into(),
+                curve: Curve::Ed25519,
+                level: Era::Kaigen,
+                public_key: hex::encode(ed_key().verifying_key().to_bytes()),
+            },
+            OmenInit {
+                id: "omen-b".into(),
+                curve: Curve::Ed25519,
+                level: Era::Warning,
+                public_key: hex::encode(EdKey::from_bytes(&[3u8; 32]).verifying_key().to_bytes()),
+            },
+        ];
+        let k = Kizashi::new(omens, Some("usdc.token".parse().unwrap()));
+        set_env(&accounts(1), 10u128.pow(27), 0, vec![]);
+        Self {
+            k,
+            near: storage_reserve() + STORAGE_MARGIN.as_yoctonear() + POT_NEAR,
+            tok: POT_USDC,
+            now: 0,
+            dead: Vec::new(),
+            refuse: Vec::new(),
+            chains: Vec::new(),
+            landed: Vec::new(),
+            paid_near: BTreeMap::new(),
+            paid_usdc: BTreeMap::new(),
+            short: 0,
+            trust_stale_reads: false,
+            errors: Vec::new(),
+            trace: Vec::new(),
+        }
+    }
+
+    /// Runs one call of the contract. `result` is what the promise the callback waits on returned, if it is one.
+    fn call<R>(&mut self, predecessor: &AccountId, result: Option<bool>, f: impl FnOnce(&mut Kizashi) -> R) -> R {
+        let results = result
+            .map(|ok| vec![if ok { PromiseResult::Successful(vec![]) } else { PromiseResult::Failed }])
+            .unwrap_or_default();
+        set_env(predecessor, self.near, self.now, results);
+        let out = f(&mut self.k);
+        let (steps, leaves) = scheduled();
+        self.near = self.near.checked_sub(leaves).expect("the contract scheduled more NEAR than it holds");
+        if !steps.is_empty() {
+            self.chains.push(Chain { steps: steps.into(), snapshot: 0, last_ok: true });
+        }
+        out
+    }
+
+    /// A transaction. One the contract refuses changes nothing, as on the chain.
+    fn start(&mut self, op: &Op) {
+        self.trace.push(format!("{op:?}"));
+        let saved = Books::of(&self.k);
+        let dead_before = match op {
+            Op::Claim { omen, .. } => self.k.omens.get(&omen_key(*omen).0.to_string()).is_some_and(|o| o.death.is_some()),
+            _ => false,
+        };
+        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match op {
+            Op::Claim { omen, by } => {
+                let (id, key) = omen_key(*omen);
+                self.call(&accounts(1), None, |k| {
+                    let sig = ed_sig(k, id, by, &key);
+                    let _ = k.claim(id.into(), by.clone(), sig);
+                });
+            }
+            Op::Retry(who) => self.call(&accounts(1), None, |k| {
+                let _ = k.retry_payout(who.clone());
+            }),
+            Op::Release => self.call(&accounts(1), None, |k| {
+                let _ = k.release_stale_in_flight();
+            }),
+        }));
+        match run {
+            Err(e) => {
+                saved.restore(&mut self.k);
+                self.trace.push(format!("(refused: {})", panic_message(e)));
+            }
+            Ok(()) if dead_before => self.errors.push(format!("{op:?} claimed an omen that was already dead")),
+            Ok(()) => {}
+        }
+    }
+
+    fn deliver(&mut self, i: usize) {
+        let step = self.chains[i].steps.pop_front().expect("a chain with nothing left");
+        self.trace.push(format!("{step:?}"));
+        match step {
+            Step::NearPay { to, amount } => {
+                let ok = !self.dead.contains(&to);
+                if ok {
+                    *self.paid_near.entry(to.clone()).or_default() += amount;
+                }
+                self.call(&accounts(0), Some(ok), |k| k.on_near_payout(to.clone(), U128(amount)));
+                if !ok {
+                    let refund = Chain { steps: VecDeque::from([Step::Refund(amount)]), snapshot: 0, last_ok: true };
+                    self.chains.push(refund);
+                }
+            }
+            Step::Refund(amount) => self.near += amount,
+            Step::Read => self.chains[i].snapshot = self.tok,
+            Step::Balance { claimant, epoch } => {
+                let seen = self.chains[i].snapshot;
+                // `trust_stale_reads` hands the callback the epoch it has now, as if the guard were not there.
+                let epoch = if self.trust_stale_reads { self.k.usdc_epoch } else { epoch };
+                self.call(&accounts(0), None, |k| k.on_usdc_balance(claimant, U64(epoch), Ok(U128(seen))));
+            }
+            Step::FtSend { to, amount } => {
+                let ok = if let Some(at) = self.refuse.iter().position(|a| *a == to) {
+                    self.refuse.remove(at);
+                    false
+                } else if self.tok >= amount {
+                    true
+                } else {
+                    self.short += 1;
+                    false
+                };
+                if ok {
+                    self.tok -= amount;
+                    *self.paid_usdc.entry(to).or_default() += amount;
+                    self.landed.push(amount);
+                }
+                self.chains[i].last_ok = ok;
+            }
+            Step::Paid { claimant, amount } => {
+                let ok = self.chains[i].last_ok;
+                if ok {
+                    let at = self.landed.iter().position(|a| *a == amount).expect("a landed transfer for this callback");
+                    self.landed.remove(at);
+                }
+                self.call(&accounts(0), Some(ok), |k| k.on_usdc_paid(claimant, U128(amount)));
+            }
+        }
+    }
+
+    fn moves(&self, started: usize, total: usize) -> Vec<Move> {
+        let mut moves = Vec::new();
+        if started < total {
+            moves.push(Move::Start);
+        }
+        moves.extend(self.chains.iter().enumerate().filter(|(_, c)| !c.steps.is_empty()).map(|(i, _)| Move::Deliver(i)));
+        moves
+    }
+
+    /// Everything that decides what happens next, so that schedules reaching the same state are explored once.
+    fn key(&self, started: usize) -> String {
+        let mut owed: Vec<String> =
+            self.k.owed.iter().map(|(a, o)| format!("{a}:{}:{}:{}", o.near, o.usdc, o.usdc_unread)).collect();
+        owed.sort();
+        let in_flight: Vec<String> =
+            self.k.in_flight.iter().map(|p| format!("{}:{}:{}", p.claimant, p.amount, p.at)).collect();
+        let mut omens: Vec<String> = self.k.omens.iter().map(|(id, o)| format!("{id}:{}", o.death.is_some())).collect();
+        omens.sort();
+        let mut chains: Vec<String> =
+            self.chains.iter().filter(|c| !c.steps.is_empty()).map(|c| format!("{c:?}")).collect();
+        chains.sort();
+        format!(
+            "{started}|{}|{}|{}|{owed:?}|{in_flight:?}|{}|{omens:?}|{chains:?}|{:?}|{:?}|{:?}|{}|{:?}|{}",
+            self.near,
+            self.tok,
+            self.now,
+            self.k.usdc_epoch,
+            self.landed,
+            self.paid_near,
+            self.paid_usdc,
+            self.short,
+            self.refuse,
+            self.errors.len()
+        )
+    }
+
+    /// What must hold after every step.
+    fn broken(&self) -> Vec<String> {
+        let mut out = self.errors.clone();
+        let (near_out, usdc_out) = (self.paid_near.values().sum::<u128>(), self.paid_usdc.values().sum::<u128>());
+        if near_out > POT_NEAR || usdc_out > POT_USDC {
+            out.push(format!("paid out more than there was: {near_out} NEAR of {POT_NEAR}, {usdc_out} USDC of {POT_USDC}"));
+        }
+        // USDC the contract has promised away (scheduled and unreported, or owed on a verified read) cannot be
+        // more than the token holds, counting what it has already sent and the contract has not heard of.
+        let verified: u128 = self.k.owed.values().filter(|o| !o.usdc_unread).map(|o| o.usdc).sum();
+        let promised = self.k.in_flight_total() + verified;
+        let held = self.tok + self.landed.iter().sum::<u128>();
+        if promised > held {
+            out.push(format!(
+                "USDC promised twice: {promised} promised (in flight {}, owed {verified}), the token holds {held}",
+                self.k.in_flight_total()
+            ));
+        }
+        out
+    }
+
+    /// The end of a schedule: nothing is on its way. The NEAR owed must be backed by NEAR, and what is left owed
+    /// must be payable by the retries anyone may make, without the token ever refusing a transfer for want of tokens.
+    fn broken_at_rest(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        set_env(&accounts(1), self.near, self.now, vec![]);
+        let owed_near: u128 = self.k.owed.values().map(|o| o.near).sum();
+        let backing = self.near.saturating_sub(storage_reserve());
+        if owed_near > backing {
+            out.push(format!("NEAR owed twice: {owed_near} owed, the contract holds {backing} above its storage reserve"));
+        }
+        for _ in 0..4 {
+            let who: Vec<AccountId> = self.k.owed.iter().map(|(a, _)| a.clone()).collect();
+            if who.is_empty() {
+                break;
+            }
+            for a in who {
+                self.start(&Op::Retry(a));
+            }
+            while let Some(i) = self.chains.iter().position(|c| !c.steps.is_empty()) {
+                self.deliver(i);
+            }
+        }
+        if self.short > 0 {
+            out.push(format!("the token refused {} transfer(s) for want of tokens", self.short));
+        }
+        for (a, o) in self.k.owed.iter() {
+            if o.usdc > 0 || o.usdc_unread {
+                out.push(format!("USDC still owed to {a} after every retry: {} (unread {})", o.usdc, o.usdc_unread));
+            }
+        }
+        out.extend(self.broken());
+        out
+    }
+}
+
+/// One move of a schedule.
+fn apply(w: &mut World, ops: &[Op], started: &mut usize, m: Move) {
+    match m {
+        Move::Start => {
+            w.start(&ops[*started]);
+            *started += 1;
+        }
+        Move::Deliver(i) => w.deliver(i),
+    }
+}
+
+fn replay(make: &dyn Fn() -> World, ops: &[Op], prefix: &[Move]) -> (World, usize) {
+    let (mut w, mut started) = (make(), 0);
+    for m in prefix {
+        apply(&mut w, ops, &mut started, *m);
+    }
+    (w, started)
+}
+
+/// Every schedule of `ops` (started in this order) and of the steps they leave behind. Returns what broke, each
+/// with the schedule that broke it, at most `limit` of them; and the number of distinct states visited.
+fn explore(make: &dyn Fn() -> World, ops: &[Op], limit: usize) -> (Vec<String>, usize) {
+    let (mut seen, mut bad) = (HashSet::new(), Vec::new());
+    let mut stack: Vec<(Vec<Move>, Option<(World, usize)>)> = vec![(vec![], None)];
+    while let Some((prefix, live)) = stack.pop() {
+        let (mut w, started) = live.unwrap_or_else(|| replay(make, ops, &prefix));
+        if !seen.insert(w.key(started)) {
+            continue;
+        }
+        let moves = w.moves(started, ops.len());
+        let mut broken = w.broken();
+        if moves.is_empty() {
+            let schedule = w.trace.join(" > ");
+            broken.extend(w.broken_at_rest().into_iter().map(|b| format!("{b} [at rest, schedule: {schedule}]")));
+        }
+        for b in broken {
+            bad.push(format!("{b}\n    after: {}", w.trace.join(" > ")));
+        }
+        if bad.len() >= limit {
+            break;
+        }
+        // The first move carries on in this world; the others start again from the beginning.
+        let mut rest = moves.into_iter();
+        let first = rest.next();
+        for next in rest {
+            stack.push((prefix.iter().copied().chain([next]).collect(), None));
+        }
+        if let Some(next) = first {
+            let (mut w, mut started) = (w, started);
+            apply(&mut w, ops, &mut started, next);
+            stack.push((prefix.iter().copied().chain([next]).collect(), Some((w, started))));
+        }
+    }
+    (bad, seen.len())
+}
+
+// The fixtures. Each is a registry with two omens (`omen-a`, `omen-b`) holding POT_NEAR and POT_USDC, and the
+// pool of transactions that may arrive. `matrix` runs every ordered pair of the pool, every schedule of each.
+
+fn x() -> AccountId {
+    accounts(2) // claims omen-a
+}
+
+fn y() -> AccountId {
+    accounts(3) // claims omen-b
+}
+
+fn w() -> AccountId {
+    accounts(4) // was owed something before the pair starts
+}
+
+/// Fresh registry. Its pool also has a second claim of omen-a, which must always be refused, and a release with nothing to release.
+fn fresh() -> World {
+    World::new()
+}
+
+/// w is owed 5 000 000 USDC on a verified read: held for w, and not free for a claim.
+fn w_owed_verified_usdc() -> World {
+    let mut m = World::new();
+    m.k.record_owed(&w(), 0, 5_000_000);
+    m
+}
+
+/// w is owed 5 000 000 USDC that is not trusted (a failed transfer): its retry reads the balance again.
+fn w_owed_unread_usdc() -> World {
+    let mut m = World::new();
+    m.k.record_owed(&w(), 0, 5_000_000);
+    m.k.record_unread(&w());
+    m
+}
+
+/// w is owed 3 NEAR, backed by the balance.
+fn w_owed_near() -> World {
+    let mut m = World::new();
+    m.k.record_owed(&w(), 3_000_000_000_000_000_000_000_000, 0);
+    m
+}
+
+/// x does not exist as an account: the NEAR sent to it fails and comes back as owed.
+fn x_cannot_receive_near() -> World {
+    let mut m = World::new();
+    m.dead.push(x());
+    m
+}
+
+/// The token refuses the first USDC transfer to y although it holds enough.
+fn token_refuses_y_once() -> World {
+    let mut m = World::new();
+    m.refuse.push(y());
+    m
+}
+
+/// A payout of w's whose transfer landed but whose `on_usdc_paid` never came, 10 minutes ago.
+fn w_payout_never_reported() -> World {
+    let mut m = World::new();
+    m.k.record_owed(&w(), 0, 3_000_000); // held for w as well, so that a retry of w has something to pay
+    m.k.in_flight.push(InFlight { claimant: w(), amount: 4_000_000, at: 0 });
+    m.tok -= 4_000_000;
+    m.landed.push(4_000_000);
+    m.now = IN_FLIGHT_TIMEOUT_NS;
+    m
+}
+
+/// The same, but its `on_usdc_paid` is still on its way.
+fn w_payout_reports_late() -> World {
+    let mut m = w_payout_never_reported();
+    let late = Step::Paid { claimant: w(), amount: 4_000_000 };
+    m.chains.push(Chain { steps: VecDeque::from([late]), snapshot: 0, last_ok: true });
+    m
+}
+
+fn claim_a(by: AccountId) -> Op {
+    Op::Claim { omen: 0, by }
+}
+
+fn claim_b(by: AccountId) -> Op {
+    Op::Claim { omen: 1, by }
+}
+
+/// Every ordered pair of `pool`, started in that order, with every schedule of the steps they leave behind. Panics with
+/// the schedules that broke the books.
+fn matrix(make: fn() -> World, pool: &[Op]) {
+    let (mut broken, mut states) = (Vec::new(), 0);
+    for (i, first) in pool.iter().enumerate() {
+        for (j, second) in pool.iter().enumerate().filter(|(j, _)| *j != i) {
+            let (bad, seen) = explore(&make, &[first.clone(), second.clone()], 2);
+            states += seen;
+            broken.extend(bad.into_iter().map(|b| format!("{first:?} then {second:?}: {b}")));
+            assert!(seen > 1, "pair {i}/{j} explored nothing");
+        }
+    }
+    assert!(broken.is_empty(), "{} schedule(s) broke the books:\n{}", broken.len(), broken.join("\n"));
+    assert!(states >= pool.len() * (pool.len() - 1) * 3, "only {states} states: the model is not running the paths");
+}
+
+/// Two claims of different omens and `more`.
+fn pool(more: &[Op]) -> Vec<Op> {
+    let mut all = vec![claim_a(x()), claim_b(y())];
+    all.extend(more.iter().cloned());
+    all
+}
+
+#[test]
+fn matrix_fresh_registry() {
+    matrix(fresh, &pool(&[claim_a(y()), Op::Release]));
+}
+
+#[test]
+fn matrix_verified_usdc_owed_to_another_claimant() {
+    matrix(w_owed_verified_usdc, &pool(&[Op::Retry(w())]));
+}
+
+#[test]
+fn matrix_unread_usdc_owed_to_another_claimant() {
+    matrix(w_owed_unread_usdc, &pool(&[Op::Retry(w())]));
+}
+
+#[test]
+fn matrix_near_owed_to_another_claimant() {
+    matrix(w_owed_near, &pool(&[Op::Retry(w())]));
+}
+
+#[test]
+fn matrix_a_claimants_near_payout_fails_and_comes_back_owed() {
+    matrix(x_cannot_receive_near, &pool(&[Op::Retry(x())]));
+}
+
+#[test]
+fn matrix_the_token_refuses_one_usdc_transfer() {
+    matrix(token_refuses_y_once, &pool(&[Op::Retry(y())]));
+}
+
+#[test]
+fn matrix_a_payout_that_never_reported_is_released() {
+    matrix(w_payout_never_reported, &pool(&[Op::Retry(w()), Op::Release]));
+}
+
+#[test]
+fn matrix_a_payout_reports_after_its_timeout() {
+    matrix(w_payout_reports_late, &pool(&[Op::Retry(w()), Op::Release]));
+}
+
+#[test]
+fn the_model_sees_the_race_the_epoch_closes() {
+    // Same claims, but every balance read is paid from however old it is: the books break, which shows the
+    // matrix would notice it. (With the epoch check in place the same two claims break nothing.)
+    let trusting = || {
+        let mut m = World::new();
+        m.trust_stale_reads = true;
+        m
+    };
+    let ops = [claim_a(x()), claim_b(y())];
+    let (bad, _) = explore(&trusting, &ops, 5);
+    assert!(bad.iter().any(|b| b.contains("USDC promised twice")), "the model did not see it: {bad:?}");
+    let (bad, _) = explore(&World::new, &ops, 5);
+    assert!(bad.is_empty(), "{bad:?}");
+}
+
+#[test]
+fn the_model_sees_nothing_wrong_with_a_single_claim() {
+    // Guards the checks themselves against flagging a healthy run: one claim, every schedule of its callbacks.
+    let (bad, seen) = explore(&World::new, &[claim_a(x())], 5);
+    assert!(bad.is_empty(), "{bad:?}");
+    assert!(seen > 3);
 }

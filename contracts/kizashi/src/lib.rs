@@ -222,6 +222,17 @@ pub struct Kizashi {
     /// No `migrate` exists or is needed: this field replaced a plain counter before any deploy, and the contract
     /// has no key to upgrade it with afterwards (see the module doc).
     in_flight: Vec<InFlight>,
+    /// Counts the USDC payouts known to have landed (`on_usdc_paid` saw the transfer succeed) and the reservations
+    /// let go by the timeout. A balance read is a snapshot, and `in_flight` only protects against a payout while it
+    /// is reserved: a read taken before a transfer landed still counts those tokens, and once that payout has
+    /// reported nothing is subtracted for it any more. So every read carries the value this had when it was ordered
+    /// (`usdc_read_steps`), and `on_usdc_balance` does not pay from a read ordered under another value: a payout
+    /// landed since, and the read may be older than it. That claimant's balance is then read again by
+    /// `retry_payout`, as after a failed read. A read that is merely late is discarded too; that costs one retry and
+    /// never tokens. A failed transfer does not count: its tokens never left, so no read is stale because of it.
+    ///
+    /// New state: a contract deployed with the layout from before this field cannot be upgraded in place.
+    usdc_epoch: u64,
 }
 
 #[near]
@@ -259,7 +270,7 @@ impl Kizashi {
             require!(prev.is_none(), "duplicate omen id");
             require!(!duplicate_key, "duplicate omen key");
         }
-        Self { omens: map, era: Era::Calm, usdc, owed: IterableMap::new(b"w"), in_flight: Vec::new() }
+        Self { omens: map, era: Era::Calm, usdc, owed: IterableMap::new(b"w"), in_flight: Vec::new(), usdc_epoch: 0 }
     }
 
     /// Prove an omen is dead. Anyone may call; the signature is the only authority.
@@ -277,8 +288,9 @@ impl Kizashi {
     /// only known in a later callback, so that callback reserves what it schedules (`in_flight`, released by
     /// the payout's own callback or, if that never comes, by `release_stale_in_flight`) and the next one takes the
     /// balance minus that, minus what is owed to others. A transfer that fails
-    /// anyway (a read that was already stale) is held as an unverified amount that the retry re-reads, so it
-    /// cannot become a debt that nothing can pay or hide a later top-up.
+    /// anyway is held as an unverified amount that the retry re-reads, so it cannot become a debt that nothing can
+    /// pay or hide a later top-up. A read taken before another payout landed is not paid from at all (`usdc_epoch`):
+    /// once that payout has reported nothing is reserved for it, and the read still counts its tokens.
     pub fn claim(&mut self, omen_id: String, claimant: AccountId, signature: Base64VecU8) -> Promise {
         let omen = self.omens.get(&omen_id).unwrap_or_else(|| env::panic_str("unknown omen"));
         require!(omen.death.is_none(), "omen already dead");
@@ -315,7 +327,7 @@ impl Kizashi {
         match &self.usdc {
             // One chain: pay NEAR, then read the USDC balance, then pay it. Each `then` takes a
             // promise that has not been scheduled after anything yet.
-            Some(usdc) => usdc_read_steps(usdc.clone(), claimant).into_iter().fold(p, Promise::then),
+            Some(usdc) => usdc_read_steps(usdc.clone(), claimant, self.usdc_epoch).into_iter().fold(p, Promise::then),
             None => p,
         }
     }
@@ -334,6 +346,7 @@ impl Kizashi {
     pub fn on_usdc_balance(
         &mut self,
         claimant: AccountId,
+        epoch: U64,
         #[callback_result] balance: Result<U128, PromiseError>,
     ) {
         if self.usdc.is_none() {
@@ -346,6 +359,14 @@ impl Kizashi {
             emit_payout_failed("usdc", &claimant, None, "ft_balance_of failed");
             return;
         };
+        if epoch.0 != self.usdc_epoch {
+            // A payout landed (or a reservation timed out) since this read was ordered, so the balance may still
+            // count tokens that have gone, or that are held for another claimant. Nothing is paid from it. The record
+            // stays as it is, only marked to be read again: `retry_payout` orders a fresh read, as after a failed one.
+            self.record_unread(&claimant);
+            emit_payout_failed("usdc", &claimant, None, "balance read is older than a payout that landed");
+            return;
+        }
         // This read settles whatever USDC this claimant had on record, so the record is spent here, whatever
         // happens below: the balance includes those tokens if they are still held, and the claimant is paid
         // from it. What the read may take is the balance minus what is held for OTHER claimants (their owed
@@ -380,16 +401,21 @@ impl Kizashi {
     pub fn on_usdc_paid(&mut self, claimant: AccountId, amount: U128) {
         // Remove this payout's own entry (the oldest one that matches). If the timeout already released it, there is
         // none: that is reported, and nothing else's reservation is touched. Either way the outcome is booked below.
+        let landed = previous_promise_succeeded();
         match self.in_flight.iter().position(|p| p.claimant == claimant && p.amount == amount.0) {
             Some(i) => {
                 self.in_flight.remove(i);
+                if landed {
+                    // Reads ordered before this are older than the transfer (see `usdc_epoch`).
+                    self.usdc_epoch = self.usdc_epoch.saturating_add(1);
+                }
             }
             None => emit(
                 "in_flight_unknown",
                 serde_json::json!({ "asset": "usdc", "claimant": claimant, "amount": amount }),
             ),
         }
-        if previous_promise_succeeded() {
+        if landed {
             emit_payout_ok("usdc", &claimant, amount.0);
         } else {
             // The token refused the transfer. Either for a real reason (the tokens are still here), or because
@@ -421,6 +447,7 @@ impl Kizashi {
         let near = owed.near.min(self.payable_near());
         require!(near > 0 || owed.usdc > 0 || owed.usdc_unread, "owed NEAR has not returned to the contract yet");
         let read_usdc = self.usdc.clone().filter(|_| owed.usdc_unread);
+        let epoch = self.usdc_epoch; // after `release_stale`: the read is ordered once the reservations are settled
         let usdc_calls = (owed.usdc > 0 && !owed.usdc_unread).then(|| {
             self.start_usdc_payout(&claimant, owed.usdc).unwrap_or_else(|block| env::panic_str(block.refusal()))
         });
@@ -441,7 +468,7 @@ impl Kizashi {
             steps.push(near_resolve(&claimant, near));
         }
         steps.extend(usdc_calls.into_iter().flatten());
-        steps.extend(read_usdc.into_iter().flat_map(|usdc| usdc_read_steps(usdc, claimant.clone())));
+        steps.extend(read_usdc.into_iter().flat_map(|usdc| usdc_read_steps(usdc, claimant.clone(), epoch)));
         chain(steps).unwrap_or_else(|| env::panic_str("nothing to pay"))
     }
 
@@ -564,6 +591,8 @@ impl Kizashi {
         if stale.is_empty() {
             return 0;
         }
+        // What became of those payouts is not known, so a read ordered before this may be older than a transfer.
+        self.usdc_epoch = self.usdc_epoch.saturating_add(1);
         let released = stale.iter().fold(0u128, |sum, p| sum.saturating_add(p.amount));
         let entries: Vec<_> =
             stale.iter().map(|p| serde_json::json!({ "claimant": p.claimant, "amount": U128(p.amount), "at": U64(p.at) })).collect();
@@ -654,10 +683,13 @@ fn chain(steps: Vec<Promise>) -> Option<Promise> {
 }
 
 /// The USDC balance read and the callback that pays what it returned to `claimant`; chain them in this order.
-fn usdc_read_steps(usdc: AccountId, claimant: AccountId) -> [Promise; 2] {
+/// `epoch` is `usdc_epoch` as it is now: the callback pays only if it is still that value when the read comes back.
+fn usdc_read_steps(usdc: AccountId, claimant: AccountId, epoch: u64) -> [Promise; 2] {
     [
         ext_ft::ext(usdc).with_static_gas(FT_BALANCE_GAS).ft_balance_of(env::current_account_id()),
-        Kizashi::ext(env::current_account_id()).with_static_gas(ON_USDC_BALANCE_GAS).on_usdc_balance(claimant),
+        Kizashi::ext(env::current_account_id())
+            .with_static_gas(ON_USDC_BALANCE_GAS)
+            .on_usdc_balance(claimant, epoch.into()),
     ]
 }
 
