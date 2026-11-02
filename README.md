@@ -1,4 +1,4 @@
-<p align="center"><img src="assets/banner.png" alt="KAIGEN"></p>
+<p align="center"><img src="assets/banner.png" alt="KAIGEN: The Infinite Wave Ledger" width="100%"></p>
 
 # KAIGEN: Keys that retire themselves
 
