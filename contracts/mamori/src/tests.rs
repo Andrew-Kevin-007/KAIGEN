@@ -2435,3 +2435,7 @@ fn the_state_layout_is_pinned_so_a_change_cannot_brick_a_deployed_vault_unnotice
     let hex: String = near_sdk::borsh::to_vec(&m).unwrap().iter().map(|b| format!("{b:02x}")).collect();
     assert_eq!(hex, FRESH_STATE_HEX, "the state layout changed: see the note above FRESH_STATE_HEX");
 }
+
+// ---- M3: the loss bound as a property (tests/loss_bound.rs) -----------------------------------------
+
+mod loss_bound;
