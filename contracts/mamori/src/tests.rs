@@ -558,7 +558,7 @@ fn a_burned_key_is_recorded_for_deletion_until_the_account_confirms_it() {
 }
 
 #[test]
-fn lock_down_gives_a_key_whose_deletion_was_never_confirmed_one_more_try() {
+fn lock_down_tries_a_key_whose_deletion_was_never_confirmed_and_keeps_it_recorded_until_it_is() {
     let mut m = setup();
     as_admin(1_100 * SEC);
     let _ = m.remove_daily_key(key(1)); // its callback never came back
@@ -567,11 +567,261 @@ fn lock_down_gives_a_key_whose_deletion_was_never_confirmed_one_more_try() {
     lock_down_at(&mut m, 2_001 * SEC);
     let r = receipts_text();
     assert_eq!(r.matches("DeleteKey").count(), 1, "{r}");
-    assert!(m.revoked_keys().is_empty(), "one try at kaigen: it is not recorded again, or lockdown could never finish");
+    assert_eq!(m.revoked_keys(), vec![key(1)], "the try is not a confirmation: the key stays owed a deletion");
     callback_after_failure(2_002 * SEC);
     m.on_revoked_key_deleted(key(1));
-    assert!(event("delete_key_failed").is_some(), "the failure is still reported");
+    assert!(event("delete_key_failed").is_some(), "the failure is reported");
+    assert_eq!(m.revoked_keys(), vec![key(1)], "and it is still on record, so the next trip tries again");
+    lock_down_at(&mut m, 2_003 * SEC);
+    assert_eq!(receipts_text().matches("DeleteKey").count(), 1, "the next pass tries it again");
+    callback_after_success(2_004 * SEC);
+    m.on_revoked_key_deleted(key(1));
+    assert!(m.revoked_keys().is_empty(), "only the account's confirmation clears it");
+}
+
+#[test]
+fn lock_down_clears_no_revoked_key_by_trying_it() {
+    // Two keys the vault stopped serving, one removed by the admin and one burned, both owed a deletion.
+    let mut m = setup();
+    as_admin(1_100 * SEC);
+    let _ = m.add_daily_key(key(2), None);
+    let _ = m.remove_daily_key(key(2));
+    for n in 0..3 {
+        attack(&mut m, (2_000 + n) * SEC); // burns key 1
+    }
+    assert_eq!(m.revoked_keys().len(), 2);
+    as_callback(3_000 * SEC);
+    m.on_era(Ok(Era::Kaigen));
+    lock_down_at(&mut m, 3_001 * SEC);
+    assert_eq!(receipts_text().matches("DeleteKey").count(), 2);
+    assert_eq!(m.revoked_keys().len(), 2, "neither is confirmed yet");
+    callback_after_success(3_002 * SEC);
+    m.on_revoked_key_deleted(key(2));
+    assert_eq!(m.revoked_keys(), vec![key(1)], "each leaves on its own confirmation");
+}
+
+// ---- a key the vault stopped serving cannot be added again until its deletion is confirmed -----------------
+
+#[test]
+fn a_removed_key_cannot_be_added_again_until_its_deletion_is_confirmed() {
+    let mut m = setup();
+    as_admin(1_100 * SEC);
+    let _ = m.remove_daily_key(key(1));
+    assert!(panics_with(|| {
+        let _ = m.add_daily_key(key(1), None);
+    })
+    .contains("revoked"));
+    assert!(m.daily_keys().is_empty(), "the refused add recorded nothing");
+    callback_after_failure(1_101 * SEC);
+    m.on_revoked_key_deleted(key(1));
+    as_admin(1_102 * SEC);
+    assert!(panics_with(|| {
+        let _ = m.add_daily_key(key(1), None);
+    })
+    .contains("revoked"), "a delete that failed is not a delete that landed");
+    callback_after_success(1_103 * SEC);
+    m.on_revoked_key_deleted(key(1));
+    as_admin(1_104 * SEC);
+    let _ = m.add_daily_key(key(1), None);
+    assert_eq!(m.daily_keys(), vec![key(1)], "once the account confirms the delete the key may come back");
+    assert!(receipts_text().contains("AddKey"));
+}
+
+#[test]
+fn a_burned_key_cannot_be_added_again_until_its_deletion_is_confirmed() {
+    let mut m = setup();
+    for n in 0..3 {
+        attack(&mut m, (2_000 + n) * SEC);
+    }
+    assert_eq!(m.revoked_keys(), vec![key(1)]);
+    as_admin(2_010 * SEC);
+    assert!(panics_with(|| {
+        let _ = m.add_daily_key(key(1), None);
+    })
+    .contains("revoked"));
+    assert!(m.daily_keys().is_empty());
+    callback_after_success(2_011 * SEC);
+    m.on_revoked_key_deleted(key(1));
+    as_admin(2_012 * SEC);
+    let _ = m.add_daily_key(key(1), None);
+    assert_eq!(m.daily_keys(), vec![key(1)]);
+}
+
+#[test]
+fn another_key_can_be_added_while_a_revoked_one_waits() {
+    let mut m = setup();
+    as_admin(1_100 * SEC);
+    let _ = m.remove_daily_key(key(1));
+    let _ = m.add_daily_key(key(2), None);
+    assert_eq!(m.daily_keys(), vec![key(2)]);
+}
+
+// ---- K4: a burned key is recorded once, never twice, never for the wrong key --------------------------------
+
+/// The books of served and revoked keys agree: no key is both (it would be deleted while still served, or served
+/// while being deleted), and none is recorded twice.
+fn assert_books_are_consistent(m: &Mamori) {
+    let (served, owed) = (m.daily_keys(), m.revoked_keys());
+    for (i, k) in owed.iter().enumerate() {
+        assert!(!served.contains(k), "{k:?} is both served and awaiting deletion");
+        assert!(!owed[i + 1..].contains(k), "{k:?} is recorded as awaiting deletion twice");
+    }
+}
+
+/// A refused over-the-cap send from this key, which counts as a strike against it.
+fn attack_as(m: &mut Mamori, k: &PublicKey, at: u64) -> SendOutcome {
+    as_daily(k, at);
+    refused(m.send_small(None, U128(NEAR * 5), accounts(2)))
+}
+
+#[test]
+fn a_burned_key_is_recorded_exactly_once_whichever_path_touches_it_next() {
+    let mut m = setup();
+    attack(&mut m, 2_000 * SEC);
+    attack(&mut m, 2_001 * SEC);
+    assert!(m.revoked_keys().is_empty(), "two strikes burn nothing, so they record nothing");
+    assert!(!receipts_text().contains("DeleteKey"));
+    assert!(attack(&mut m, 2_002 * SEC).burned);
+    assert_eq!(receipts_text().matches("DeleteKey").count(), 1);
+    assert_eq!(m.revoked_keys(), vec![key(1)]);
+    assert_eq!(m.strikes_of(key(1)), 0, "the strike record went with the key");
+    assert_books_are_consistent(&m);
+
+    // The admin retries the delete: the same single entry, and one delete of its own.
+    as_admin(2_010 * SEC);
+    let _ = m.remove_daily_key(key(1));
+    assert_eq!(m.revoked_keys(), vec![key(1)]);
+    assert_eq!(receipts_text().matches("DeleteKey").count(), 1);
+    // Failed delete callbacks, one after another: still the single entry.
+    for n in 0..2 {
+        callback_after_failure((2_011 + n) * SEC);
+        m.on_revoked_key_deleted(key(1));
+        assert_eq!(m.revoked_keys(), vec![key(1)], "failure {n}");
+    }
+    // Kaigen: lockdown tries it once more and does not record it again.
+    as_callback(2_100 * SEC);
+    m.on_era(Ok(Era::Kaigen));
+    lock_down_at(&mut m, 2_101 * SEC);
+    assert_eq!(receipts_text().matches("DeleteKey").count(), 1);
+    assert_eq!(m.revoked_keys(), vec![key(1)]);
+    assert!(m.daily_keys().is_empty());
+    assert_books_are_consistent(&m);
+
+    // The account confirms. A late failure for the same key must not bring it back.
+    callback_after_success(2_102 * SEC);
+    m.on_revoked_key_deleted(key(1));
     assert!(m.revoked_keys().is_empty());
+    callback_after_failure(2_103 * SEC);
+    m.on_revoked_key_deleted(key(1));
+    assert!(m.revoked_keys().is_empty(), "a late callback leaves no phantom entry");
+    assert_books_are_consistent(&m);
+}
+
+#[test]
+fn burning_one_key_records_and_deletes_only_that_key() {
+    let mut m = setup();
+    as_admin(1_100 * SEC);
+    let _ = m.add_daily_key(key(2), None);
+    attack_as(&mut m, &key(2), 2_000 * SEC);
+    attack_as(&mut m, &key(2), 2_001 * SEC);
+    for n in 0..3 {
+        attack_as(&mut m, &key(1), (2_002 + n) * SEC);
+    }
+    assert_eq!(receipts_text().matches("DeleteKey").count(), 1, "one burn, one delete");
+    assert_eq!(m.revoked_keys(), vec![key(1)], "key 2 is not recorded for deletion");
+    assert_eq!((m.daily_keys(), m.strikes_of(key(2))), (vec![key(2)], 2), "key 2 is still served, with its own two strikes");
+    assert_books_are_consistent(&m);
+    // Key 2 is burned on its own third strike, and both are then recorded once each.
+    assert!(attack_as(&mut m, &key(2), 2_010 * SEC).burned);
+    assert_eq!(m.revoked_keys().len(), 2);
+    assert!(m.revoked_keys().contains(&key(1)) && m.revoked_keys().contains(&key(2)));
+    assert!(m.daily_keys().is_empty());
+    assert_books_are_consistent(&m);
+}
+
+#[test]
+fn a_key_added_again_after_its_deletion_is_confirmed_starts_clean_and_is_burned_and_recorded_once_more() {
+    let mut m = setup();
+    for n in 0..3 {
+        attack(&mut m, (2_000 + n) * SEC);
+    }
+    callback_after_success(2_010 * SEC);
+    m.on_revoked_key_deleted(key(1));
+    as_admin(2_011 * SEC);
+    let _ = m.add_daily_key(key(1), None);
+    assert_eq!((m.strikes_of(key(1)), m.revoked_keys().len()), (0, 0), "nothing carried over from the burn");
+    assert_books_are_consistent(&m);
+    // Two refusals are not enough: the old three do not count towards the new key's burn.
+    assert!(!attack(&mut m, 3_000 * SEC).burned);
+    assert!(!attack(&mut m, 3_001 * SEC).burned);
+    assert!(m.revoked_keys().is_empty());
+    assert!(attack(&mut m, 3_002 * SEC).burned);
+    assert_eq!(m.revoked_keys(), vec![key(1)]);
+    assert_books_are_consistent(&m);
+}
+
+#[test]
+fn callbacks_about_keys_the_vault_never_revoked_record_nothing() {
+    let mut m = setup();
+    callback_after_failure(2_000 * SEC);
+    m.on_revoked_key_deleted(key(9)); // never seen
+    callback_after_success(2_001 * SEC);
+    m.on_revoked_key_deleted(key(9));
+    callback_after_failure(2_002 * SEC);
+    m.on_revoked_key_deleted(key(1)); // served, not revoked
+    assert!(m.revoked_keys().is_empty());
+    assert_eq!(m.daily_keys(), vec![key(1)], "and the served key stays served");
+    // A key whose AddKey failed is forgotten, not turned into a revoked one.
+    as_admin(2_003 * SEC);
+    let _ = m.add_daily_key(key(7), None);
+    callback_after_failure(2_004 * SEC);
+    m.on_key_added(key(7));
+    assert_eq!(m.daily_keys(), vec![key(1)]);
+    assert!(m.revoked_keys().is_empty());
+    as_admin(2_005 * SEC);
+    assert!(panics_with(|| {
+        let _ = m.remove_daily_key(key(7));
+    })
+    .contains("unknown daily key"), "it records nothing to retry");
+    assert!(m.revoked_keys().is_empty());
+}
+
+#[test]
+fn the_books_stay_consistent_through_a_mixed_sequence() {
+    let mut m = setup();
+    as_admin(1_100 * SEC);
+    let _ = m.add_daily_key(key(2), None);
+    let _ = m.add_daily_key(key(3), None);
+    assert_books_are_consistent(&m);
+    for n in 0..3 {
+        attack_as(&mut m, &key(1), (2_000 + n) * SEC); // key 1 burned
+    }
+    assert_books_are_consistent(&m);
+    as_admin(2_010 * SEC);
+    let _ = m.remove_daily_key(key(2)); // key 2 removed
+    assert_books_are_consistent(&m);
+    assert_eq!(m.revoked_keys().len(), 2);
+    callback_after_success(2_011 * SEC);
+    m.on_revoked_key_deleted(key(1));
+    callback_after_failure(2_012 * SEC);
+    m.on_revoked_key_deleted(key(2));
+    assert_eq!(m.revoked_keys(), vec![key(2)]);
+    assert_books_are_consistent(&m);
+    as_admin(2_013 * SEC);
+    assert!(panics_with(|| {
+        let _ = m.add_daily_key(key(2), None);
+    })
+    .contains("revoked"));
+    let _ = m.add_daily_key(key(1), None); // confirmed, so it may return
+    assert_books_are_consistent(&m);
+    as_callback(2_100 * SEC);
+    m.on_era(Ok(Era::Kaigen));
+    lock_down_at(&mut m, 2_101 * SEC);
+    assert_books_are_consistent(&m);
+    assert!(m.daily_keys().is_empty(), "served keys are gone");
+    assert_eq!(m.revoked_keys(), vec![key(2)], "the unconfirmed one is still owed");
+    // One delete each: keys 1 and 3 as served keys, key 2 as the revoked one it retries.
+    assert_eq!(receipts_text().matches("DeleteKey").count(), 3);
 }
 
 #[test]
@@ -872,6 +1122,188 @@ fn an_allowlist_violation_is_a_strike_too_and_moves_nothing() {
     let o = refused(m.send_small(None, U128(1), accounts(3)));
     assert_eq!(o.refused.as_deref(), Some("recipient is not on the allowlist"));
     assert_eq!((o.strikes, m.spent_24h(None).0), (1, 0));
+}
+
+// ---- M3: a refusal is counted only if it can never succeed for an honest key --------------------------
+
+/// Key 1 spends the whole 1 NEAR cap and key 2 is added; the 24 h window is then used up for everyone.
+fn cap_used_up_by_key_one() -> Mamori {
+    let mut m = setup();
+    as_admin(1_100 * SEC);
+    let _ = m.add_daily_key(key(2), None);
+    as_daily(&key(1), 2_000 * SEC);
+    assert_sent(m.send_small(None, U128(NEAR), accounts(2)));
+    m
+}
+
+#[test]
+fn a_refusal_because_another_key_used_up_the_cap_earns_no_strike() {
+    // The cap window is account-wide: a hijacked or griefing key A that spends it makes honest key B's
+    // legitimate call refused. Counted, B would be burned after three tries.
+    let mut m = cap_used_up_by_key_one();
+    for n in 0..(3 * DEFAULT_MAX_STRIKES as u64) {
+        as_daily(&key(2), (2_001 + n) * SEC);
+        let o = refused(m.send_small(None, U128(NEAR / 10), accounts(2)));
+        assert_eq!((o.refused.as_deref(), o.strikes, o.burned), (Some("over the 24 h limit"), 0, false), "try {n}");
+    }
+    assert_eq!(m.strikes_of(key(2)), 0);
+    assert!(m.daily_keys().contains(&key(2)), "key B is still served");
+    assert!(m.revoked_keys().is_empty(), "and no delete was scheduled for it");
+    let e = event("refused").expect("the refusal is still reported");
+    assert_eq!(e["data"]["counted"], serde_json::json!(false));
+    assert_eq!(m.spent_24h(None).0, NEAR, "nothing moved");
+}
+
+#[test]
+fn an_uncounted_cap_refusal_leaves_the_strike_count_where_it_was() {
+    let mut m = cap_used_up_by_key_one();
+    as_daily(&key(2), 2_001 * SEC);
+    // One real strike, then cap-used-up refusals, then the window clears: the strike count is only the real one.
+    let real = refused(m.send_small(None, U128(NEAR * 5), accounts(2)));
+    assert_eq!((real.strikes, real.burned), (1, false));
+    for n in 0..5u64 {
+        as_daily(&key(2), (2_002 + n) * SEC);
+        let o = refused(m.send_small(None, U128(NEAR / 10), accounts(2)));
+        assert_eq!((o.strikes, o.burned), (1, false), "the strike count is reported, not raised");
+    }
+    assert_eq!(m.strikes_of(key(2)), 1);
+}
+
+#[test]
+fn an_amount_above_the_full_cap_is_still_counted_when_the_window_is_used_up() {
+    let mut m = cap_used_up_by_key_one();
+    as_daily(&key(2), 2_001 * SEC);
+    let o = refused(m.send_small(None, U128(NEAR + 1), accounts(2)));
+    assert_eq!((o.refused.as_deref(), o.strikes), (Some("over the 24 h limit"), 1), "it could never succeed, whatever is spent");
+    let e = event("refused").unwrap();
+    assert_eq!(e["data"]["counted"], serde_json::json!(true));
+}
+
+#[test]
+fn an_amount_equal_to_the_full_cap_is_not_above_it() {
+    // Exactly the cap fits an empty window, so refusing it while the window is used up says nothing about the key.
+    let mut m = cap_used_up_by_key_one();
+    as_daily(&key(2), 2_001 * SEC);
+    assert_eq!(refused(m.send_small(None, U128(NEAR), accounts(2))).strikes, 0);
+}
+
+#[test]
+fn a_payee_not_on_the_allowlist_is_still_counted_when_the_window_is_used_up() {
+    let mut m = cap_used_up_by_key_one();
+    as_admin(1_900 * SEC);
+    m.enforce_allowlist(true);
+    as_daily(&key(2), 2_001 * SEC);
+    let o = refused(m.send_small(None, U128(NEAR / 10), accounts(3)));
+    assert_eq!((o.refused.as_deref(), o.strikes), (Some("recipient is not on the allowlist"), 1));
+}
+
+#[test]
+fn the_same_rule_holds_for_a_token() {
+    let mut m = setup();
+    as_admin(1_100 * SEC);
+    m.set_token_limit(accounts(3), U128(10));
+    let _ = m.add_daily_key(key(2), None);
+    as_daily(&key(1), 2_000 * SEC);
+    assert_sent(m.send_small(Some(accounts(3)), U128(10), accounts(2)));
+    for n in 0..5u64 {
+        as_daily(&key(2), (2_001 + n) * SEC);
+        assert_eq!(refused(m.send_small(Some(accounts(3)), U128(1), accounts(2))).strikes, 0, "used up: uncounted");
+    }
+    as_daily(&key(2), 2_010 * SEC);
+    assert_eq!(refused(m.send_small(Some(accounts(3)), U128(11), accounts(2))).strikes, 1, "above the full cap: counted");
+}
+
+#[test]
+fn one_key_using_up_the_cap_cannot_burn_any_number_of_other_keys() {
+    // The cross-key grief case of ARCHITECTURE.md 2.1: key A spends the cap, and keys B, C and D (all honest)
+    // keep trying legitimate sends. Each tries well past the strike limit; none is burned or even struck.
+    let mut m = setup();
+    as_admin(1_100 * SEC);
+    for n in 2..=4 {
+        let _ = m.add_daily_key(key(n), None);
+    }
+    as_daily(&key(1), 2_000 * SEC);
+    assert_sent(m.send_small(None, U128(NEAR), accounts(2)));
+    for round in 0..(2 * DEFAULT_MAX_STRIKES as u64) {
+        for n in 2..=4u8 {
+            as_daily(&key(n), (2_001 + round * 10 + n as u64) * SEC);
+            let o = refused(m.send_small(None, U128(NEAR / 4), accounts(5)));
+            assert_eq!((o.strikes, o.burned), (0, false), "key {n}, round {round}");
+        }
+    }
+    assert_eq!(m.daily_keys().len(), 4, "every key is still served");
+    assert!(m.revoked_keys().is_empty(), "and no delete was scheduled for any of them");
+    for n in 1..=4 {
+        assert_eq!(m.strikes_of(key(n)), 0, "key {n}");
+    }
+    assert_eq!(m.spent_24h(None).0, NEAR, "nothing but A's send ever moved");
+}
+
+#[test]
+fn uncounted_refusals_between_counted_ones_neither_advance_nor_reset_the_count() {
+    // Burn happens on the third COUNTED refusal, not earlier because refusals were piling up, and not later
+    // because some of them were not counted.
+    let mut m = cap_used_up_by_key_one();
+    let over_the_whole_cap = U128(NEAR + 1); // could never succeed, whatever is spent
+    let fits_the_cap_not_the_rest = U128(NEAR / 10); // only the other key's spend stops it
+    let mut at = 2_001u64;
+    for expected in 1..=DEFAULT_MAX_STRIKES {
+        for _ in 0..3 {
+            as_daily(&key(2), at * SEC);
+            at += 1;
+            assert_eq!(refused(m.send_small(None, fits_the_cap_not_the_rest, accounts(2))).strikes, expected - 1);
+        }
+        as_daily(&key(2), at * SEC);
+        at += 1;
+        let o = refused(m.send_small(None, over_the_whole_cap, accounts(2)));
+        assert_eq!((o.strikes, o.burned), (expected, expected == DEFAULT_MAX_STRIKES), "counted refusal {expected}");
+    }
+    assert!(!m.daily_keys().contains(&key(2)), "burned on the third counted refusal");
+    assert_eq!(m.revoked_keys(), vec![key(2)]);
+    assert!(m.daily_keys().contains(&key(1)), "and only it");
+}
+
+#[test]
+fn request_withdraw_refusals_stay_uncounted_and_leave_the_key_served() {
+    // `request_withdraw` refuses by panic (no ABI change), so none of its refusals can strike the key.
+    let mut m = setup();
+    as_daily(&key(1), 2_000 * SEC);
+    let id = m.request_withdraw(None, U128(10 * NEAR), accounts(2)); // the whole default pending limit
+    assert_eq!(id.0, 0);
+    for n in 0..(2 * DEFAULT_MAX_STRIKES as u64) {
+        as_daily(&key(1), (2_001 + n) * SEC);
+        let text = panics_with(|| {
+            m.request_withdraw(None, U128(NEAR), accounts(2));
+        });
+        assert!(text.contains("pending limit"), "{text}");
+        assert_eq!(m.strikes_of(key(1)), 0, "try {n}");
+    }
+    assert_eq!(m.daily_keys(), vec![key(1)]);
+    assert!(m.revoked_keys().is_empty());
+    assert_eq!(m.queue().len(), 1, "and the refused ones queued nothing");
+}
+
+#[test]
+fn the_strike_window_stays_24_hours() {
+    // Strike 1 at t, strike 2 and 3 a little over 24 h later: the first has expired, so no burn. Two inside 24 h
+    // plus a third just inside 24 h of the first do burn. Pins DAY_NS as the window (ROADMAP Q4: keep it).
+    let mut m = setup();
+    attack(&mut m, 2_000 * SEC);
+    assert!(!attack(&mut m, 2_000 * SEC + DAY_NS).burned, "exactly 24 h later is still inside the window: strike 2");
+    assert!(attack(&mut m, 2_000 * SEC + DAY_NS).burned, "strike 3 inside the same window burns");
+
+    let mut m = setup();
+    attack(&mut m, 3_000 * SEC);
+    assert_eq!(attack(&mut m, 3_000 * SEC + DAY_NS + 1).strikes, 1, "one nanosecond past 24 h the window restarts");
+}
+
+#[test]
+fn once_the_window_clears_the_key_that_was_refused_can_send() {
+    let mut m = cap_used_up_by_key_one();
+    as_daily(&key(2), 2_001 * SEC);
+    assert_eq!(refused(m.send_small(None, U128(NEAR / 10), accounts(2))).strikes, 0);
+    as_daily(&key(2), 2_000 * SEC + DAY_NS + SEC);
+    assert_sent(m.send_small(None, U128(NEAR / 10), accounts(2)));
 }
 
 // ---- helpers for the findings below ---------------------------------------------------------

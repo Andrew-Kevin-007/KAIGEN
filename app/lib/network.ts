@@ -1,7 +1,9 @@
+import { DEPLOYMENTS } from "./config.ts";
+
 export type Network = "mainnet" | "testnet";
 
-/** What this deployment is set up for. Anything but an explicit "testnet" means mainnet. */
-export const NETWORK: Network = process.env.NEXT_PUBLIC_NETWORK === "testnet" ? "testnet" : "mainnet";
+/** What this deployment is set up for (the `network` of the deployments file). Anything but an explicit "testnet" means mainnet. */
+export const NETWORK: Network = DEPLOYMENTS.network;
 
 export function networkOfChainId(chainId: unknown): Network | null {
   return chainId === "mainnet" || chainId === "testnet" ? chainId : null;

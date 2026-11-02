@@ -153,6 +153,10 @@ trait KizashiView {
 /// change. From the first mainnet deploy on, a layout change makes every deployed vault fail to read its
 /// state, `trip` included: it then needs a `migrate` that reads the old layout. The test
 /// `the_state_layout_is_pinned_so_a_change_cannot_brick_a_deployed_vault_unnoticed` fails on any change.
+///
+/// The v3 rules (M2/M3: `add_daily_key` refusing a key still in `revoked_keys`, `lock_down` keeping a key there
+/// until its delete is confirmed, and a refusal because the cap is used up earning no strike) add no field and
+/// change no stored value's meaning, so no `migrate` is needed for them.
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct Mamori {
@@ -226,6 +230,10 @@ impl Mamori {
     pub fn add_daily_key(&mut self, public_key: PublicKey, allowance: Option<U128>) -> Promise {
         self.assert_admin();
         require!(self.era != Era::Kaigen, "lockdown: classical keys can no longer be added");
+        // A key the vault stopped serving (removed or burned) may still be on the account until its delete is
+        // confirmed. Adding it back now would race that delete, and a delete that landed after the add would
+        // take the new key away. The admin can re-add it as soon as the account confirms the delete.
+        require!(!self.revoked_keys.contains(&public_key), "revoked key: its deletion is not confirmed yet");
         require!(self.daily_keys.len() < MAX_DAILY_KEYS, "too many daily keys");
         require!(self.daily_keys.insert(public_key.clone()), "daily key already recorded");
         let allowance = allowance.map_or(DEFAULT_ALLOWANCE, |a| NearToken::from_yoctonear(a.0));
@@ -324,16 +332,21 @@ impl Mamori {
 
     /// Sends within the 24 h limit, to allowed recipients. Paused once the era is warning.
     ///
-    /// A request that breaks the policy (a recipient not on the allowlist, or more than the limit) is
-    /// REFUSED, not reverted: the call succeeds, nothing moves, and the refusal counts as a strike against
+    /// A request that breaks the policy (a recipient not on the allowlist, or more than the WHOLE 24 h limit)
+    /// is REFUSED, not reverted: the call succeeds, nothing moves, and the refusal counts as a strike against
     /// the key that made it. At `max_strikes` inside 24 hours the vault deletes that key. A hijacked agent
     /// therefore gets a handful of attempts, not an unlimited number of tries or an unlimited gas bill.
     ///
-    /// Two refusals are returned the same way but earn NO strike, because they say nothing about the key:
-    /// a token with no 24 h limit (an honest first send of a new token must not burn a key) and a NEAR
-    /// amount below the minimum send (dust). Neither moves anything; the key's gas allowance bounds them.
+    /// Three refusals are returned the same way but earn NO strike, because they say nothing about the key:
+    /// a token with no 24 h limit (an honest first send of a new token must not burn a key), a NEAR amount
+    /// below the minimum send (dust), and an amount that fits the limit but not what is left of it. The 24 h
+    /// window is account-wide, so a hijacked or griefing key that spends the cap makes an honest key's
+    /// legitimate send fail; counting that would burn the honest key after a few tries. A refusal counts only
+    /// if it could never succeed for any key: a recipient off the allowlist, or an amount above the whole
+    /// limit, which no window can ever hold. None of the three moves anything; the key's gas allowance
+    /// bounds them.
     ///
-    /// What earns no strike, all of it on purpose, so nobody has to re-derive it: those two refusals; every
+    /// What earns no strike, all of it on purpose, so nobody has to re-derive it: those three refusals; every
     /// panic (a zero amount, an era that is not calm, a caller that is not a recorded daily key), because a
     /// panic rolls its own strike back; and every refusal of `request_withdraw` (see there). Each still costs
     /// the caller gas from the key's allowance, and the runtime deletes a function-call key whose allowance
@@ -356,7 +369,9 @@ impl Mamori {
         }
         let now = env::block_timestamp();
         if let Err(reason) = self.spend(&token, amount.0, now) {
-            return PromiseOrValue::Value(self.refuse(&key, reason));
+            // Above the whole limit it can never fit; otherwise the window is only used up for now.
+            let outcome = if amount.0 > self.limit_for(&token) { self.refuse(&key, reason) } else { self.refuse_uncounted(&key, reason) };
+            return PromiseOrValue::Value(outcome);
         }
         emit("send_small", serde_json::json!({ "token": token, "amount": amount, "to": to }));
         PromiseOrValue::Promise(transfer(&token, amount.0, to).then(
@@ -473,7 +488,8 @@ impl Mamori {
     ///
     /// All 8 + 8 keys cost more gas than one transaction carries, so a pass stops when the gas it was given
     /// runs low. Whatever is left stays recorded, `lockdown_partial` says what, and the next `trip`
-    /// carries on. A keeper is done when `intents_keys()` and `daily_keys()` are both empty.
+    /// carries on. A keeper is done when `intents_keys()` and `daily_keys()` are both empty (and, to be sure the
+    /// account no longer holds a key the vault stopped serving, `revoked_keys()` too).
     #[private]
     pub fn lock_down(&mut self) {
         require!(self.era == Era::Kaigen, "lockdown only runs at kaigen");
@@ -498,12 +514,13 @@ impl Mamori {
                 .delete_key(k.clone())
                 .then(Self::ext(me.clone()).with_static_gas(SMALL_CALLBACK_GAS).on_key_removed(k));
         }
-        // Last: keys the vault stopped serving earlier whose delete was never confirmed. Each gets one more try
-        // and is then let go (a failure is logged by its callback, not recorded again): such a key can sign
-        // nothing the contract accepts, and recording it again would keep lockdown from ever finishing.
+        // Last: keys the vault stopped serving earlier whose delete was never confirmed. Each gets another try, and
+        // stays in `revoked_keys` until the account confirms the delete (`on_revoked_key_deleted`), so a try that
+        // fails, or whose callback never runs, is not forgotten: the next `trip` tries it again. Such a key can
+        // sign nothing the contract accepts, so one that never deletes costs only a delete per pass; it shows in
+        // `revoked_keys_left`, and `daily_keys()` and `intents_keys()` alone say whether the keys that can act are gone.
         let revoked: Vec<PublicKey> = self.revoked_keys.iter().cloned().collect();
         for k in revoked.into_iter().take_while(|_| has_fanout_gas()) {
-            self.revoked_keys.remove(&k);
             let _ = Promise::new(me.clone())
                 .delete_key(k.clone())
                 .then(Self::ext(me.clone()).with_static_gas(SMALL_CALLBACK_GAS).on_revoked_key_deleted(k));
@@ -576,10 +593,10 @@ impl Mamori {
 
     /// The account answered for the delete of a key the vault had stopped serving (removed or burned). Success
     /// clears it from `revoked_keys`. A failure leaves it there, still not served, and logs it: the admin can
-    /// retry with `remove_daily_key`, and `lock_down` tries once more at kaigen. A delete most likely fails
-    /// because the account no longer holds the key (unverified: the runtime also drops a function-call key
-    /// whose gas allowance is used up). A retry then fails the same way, which is why `lock_down` tries each
-    /// leftover once and lets it go rather than recording it again.
+    /// retry with `remove_daily_key`, and `lock_down` tries it again at every kaigen pass. A delete most likely
+    /// fails because the account no longer holds the key (unverified: the runtime also drops a function-call
+    /// key whose gas allowance is used up). A retry then fails the same way and the key stays on record:
+    /// harmless, since the contract serves it no more, and visible rather than silently dropped.
     #[private]
     pub fn on_revoked_key_deleted(&mut self, public_key: PublicKey) {
         if is_promise_success() {

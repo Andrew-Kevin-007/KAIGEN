@@ -289,7 +289,7 @@ if token.is_none() && amount.0 < self.min_send {
 - Mainnet deployment, the mainnet drill pair, and the production Kizashi lock (plan sections B and C).
 - Global contracts for Mamori (gate G2).
 - A production withdrawal delay (owner decision).
-- The Create vault page is in `app/app/vault/create/` behind `NEXT_PUBLIC_VAULT_CREATE`; it is off by default and has not been run against a chain.
+- The Create vault page is in `app/app/vault/create/`; it is enabled on testnet only (mainnet stays off) and has not been run against a chain.
 - A signed gate file for `make verify`.
 - The landing page in `site/` is being redesigned; it is described here only as the landing page.
 

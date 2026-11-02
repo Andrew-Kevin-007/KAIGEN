@@ -1,11 +1,13 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { NotDeployed } from "@/components/NotDeployed";
 import { WalletError } from "@/components/WalletError";
 import { describedBy } from "@/lib/aria";
 import { loadBountyPanel, type BountyPanel } from "@/lib/bounty";
 import { errorText } from "@/lib/errors";
 import { KIZASHI_ID, view, yoctoToNear } from "@/lib/near";
+import { NETWORK } from "@/lib/network";
 import { refundAddressError } from "@/lib/refund";
 import { toUnits } from "@/lib/units";
 import { useWallet } from "@/lib/wallet";
@@ -165,10 +167,7 @@ export default function BountyPage() {
       </header>
 
       {!KIZASHI_ID ? (
-        <div className="callout reading" data-tone="warning">
-          <strong>Not deployed yet.</strong>
-          <span>Kizashi is not deployed yet, so there is no bounty to add to.</span>
-        </div>
+        <NotDeployed>Kizashi is not deployed yet on {NETWORK}, so there is no bounty to add to.</NotDeployed>
       ) : (
         <section aria-labelledby="now-h" className="stack">
           <h2 id="now-h">In the bounty now</h2>

@@ -405,13 +405,46 @@ fn gas_constants_fit_the_chain_they_pay_for() {
     assert!(FT_BALANCE_GAS >= Gas::from_tgas(10), "ft_balance_of was starved at 5 Tgas");
     let children = FT_STORAGE_DEPOSIT_GAS.as_gas() + FT_TRANSFER_GAS.as_gas() + RESOLVE_GAS.as_gas();
     assert!(ON_USDC_BALANCE_GAS.as_gas() >= children + Gas::from_tgas(5).as_gas(), "callback cannot afford its own chain");
-    // jobs/src/chain.mjs submits claim with 100 Tgas; claim's own work needs the rest.
+    // What `claim` reserves for its callbacks; whether the whole call fits is measured, not added up, in
+    // `claim_with_usdc_fits_the_gas_a_caller_attaches`.
     let claim_static = RESOLVE_GAS.as_gas() + FT_BALANCE_GAS.as_gas() + ON_USDC_BALANCE_GAS.as_gas();
-    assert!(claim_static <= Gas::from_tgas(80).as_gas(), "claim would not fit 100 Tgas");
+    assert!(claim_static < CLAIM_GAS_ATTACHED.as_gas(), "the callbacks alone would use up the claim");
     // retry_payout with every leg owed schedules the NEAR resolve, the three USDC calls, the balance
     // read and its callback; whoever calls it must be able to attach that on top of its own work.
     let retry_static = RESOLVE_GAS.as_gas() + children + FT_BALANCE_GAS.as_gas() + ON_USDC_BALANCE_GAS.as_gas();
     assert!(retry_static <= Gas::from_tgas(200).as_gas(), "a full retry would not fit the 300 Tgas cap");
+}
+
+/// What a caller must attach to `claim` (`CLAIM_GAS_TGAS` in jobs/src/chain.mjs): the measured need below, plus
+/// 10% for the wasm the unit-test VM does not run, rounded up.
+const CLAIM_GAS_ATTACHED: Gas = Gas::from_tgas(170);
+
+#[test]
+fn claim_with_usdc_fits_the_gas_a_caller_attaches() {
+    // `used_gas` is what the call has used up, counting the gas it attaches to the calls it schedules, which is
+    // the figure the runtime holds against the prepaid gas. Measured with the USDC leg, the longest `claim` there is.
+    let mut k = usdc_registry();
+    ctx();
+    let sig = ed_sig(&k, "ed25519-omen", &accounts(2), &ed_key());
+    let before = env::used_gas().as_gas();
+    let _ = k.claim("ed25519-omen".into(), accounts(2), sig);
+    let used = env::used_gas().as_gas() - before;
+    assert!(used * 11 / 10 <= CLAIM_GAS_ATTACHED.as_gas(), "claim used {used} gas, plus 10% must fit {}", CLAIM_GAS_ATTACHED.as_gas());
+    assert!(CLAIM_GAS_ATTACHED <= Gas::from_tgas(300), "a transaction carries at most 300 Tgas");
+}
+
+#[test]
+fn the_longest_retry_fits_a_transaction() {
+    // NEAR and a balance read together are the longest chain `retry_payout` schedules (a verified USDC amount is
+    // shorter: it skips the read and its 90 Tgas callback). Whoever calls it has to attach this much.
+    let mut k = usdc_registry();
+    k.record_owed(&accounts(2), NearToken::from_near(1).as_yoctonear(), PAID);
+    k.record_unread(&accounts(2));
+    ctx();
+    let before = env::used_gas().as_gas();
+    let _ = k.retry_payout(accounts(2));
+    let used = env::used_gas().as_gas() - before;
+    assert!(used * 11 / 10 <= Gas::from_tgas(300).as_gas(), "retry used {used} gas, plus 10% must fit a transaction");
 }
 
 #[test]
@@ -788,7 +821,7 @@ fn secp256k1_signature_over_keccak_is_rejected() {
 // --- K8: two claims close together cannot be paid the same balance, and a failed transfer is no debt until verified ---
 //
 // `claim` reads the token balance and a LATER callback pays it, so two claims whose reads land before the first
-// transfer does both see the full balance. The contract reserves what it has scheduled (`usdc_in_flight`), and a
+// transfer does both see the full balance. The contract reserves what it has scheduled (`in_flight`), and a
 // transfer that fails is held as an UNVERIFIED amount: the retry reads the balance again and pays what the token
 // really holds, so a phantom debt (tokens already paid to someone else) clears instead of hiding later top-ups.
 
@@ -807,7 +840,7 @@ fn two_payouts_close_together_cannot_both_be_paid_the_same_balance() {
     let r = receipts_text();
     assert_eq!(r.matches("ft_transfer").count(), 1, "only one transfer may be scheduled: {r}");
     assert!(receiver_is(&r, &accounts(2)) && !r.contains(&accounts(3).to_string()), "{r}");
-    assert_eq!(k.usdc_in_flight, PAID);
+    assert_eq!(k.in_flight_total(), PAID);
 }
 
 #[test]
@@ -820,7 +853,7 @@ fn owed_and_in_flight_usdc_both_stay_out_of_reach_of_a_later_claim() {
     let r = receipts_text();
     assert_eq!(r.matches("ft_transfer").count(), 1, "{r}");
     assert!(r.contains("\"amount\":\"2000000\"") && !r.contains(&accounts(4).to_string()), "{r}");
-    assert_eq!(k.usdc_in_flight, 2_000_000);
+    assert_eq!(k.in_flight_total(), 2_000_000);
 }
 
 #[test]
@@ -828,16 +861,16 @@ fn a_settled_payout_releases_its_reservation_whether_it_succeeded_or_not() {
     let mut k = usdc_registry();
     ctx_init();
     k.on_usdc_balance(accounts(2), Ok(U128(PAID)));
-    assert_eq!(k.usdc_in_flight, PAID);
+    assert_eq!(k.in_flight_total(), PAID);
     ctx_callback(PromiseResult::Successful(vec![]));
     k.on_usdc_paid(accounts(2), U128(PAID));
-    assert_eq!(k.usdc_in_flight, 0, "paid");
+    assert_eq!(k.in_flight_total(), 0, "paid");
     ctx_init();
     k.on_usdc_balance(accounts(3), Ok(U128(PAID)));
-    assert_eq!(k.usdc_in_flight, PAID);
+    assert_eq!(k.in_flight_total(), PAID);
     ctx_callback(PromiseResult::Failed);
     k.on_usdc_paid(accounts(3), U128(PAID));
-    assert_eq!(k.usdc_in_flight, 0, "failed: it is owed now, not in flight");
+    assert_eq!(k.in_flight_total(), 0, "failed: it is owed now, not in flight");
 }
 
 #[test]
@@ -882,7 +915,7 @@ fn a_transfer_that_failed_for_a_real_reason_is_paid_after_the_re_read() {
     assert!(r.contains("\"amount\":\"5000000\"") && receiver_is(&r, &accounts(2)), "{r}");
     let owed = k.owed(accounts(2));
     assert_eq!((owed.usdc.0, owed.usdc_unread), (0, false), "the record is spent by the payout it triggered");
-    assert_eq!(k.usdc_in_flight, PAID);
+    assert_eq!(k.in_flight_total(), PAID);
 }
 
 #[test]
@@ -935,7 +968,7 @@ fn a_verified_retry_reserves_its_amount_while_it_is_in_flight() {
     k.record_owed(&accounts(2), 0, PAID); // recorded from a balance read, not from a failed transfer
     ctx();
     let _ = k.retry_payout(accounts(2));
-    assert_eq!(k.usdc_in_flight, PAID);
+    assert_eq!(k.in_flight_total(), PAID);
     ctx_init();
     k.on_usdc_balance(accounts(3), Ok(U128(PAID)));
     assert!(get_created_receipts().is_empty(), "the amount being retried is not free for another claim");
@@ -944,13 +977,18 @@ fn a_verified_retry_reserves_its_amount_while_it_is_in_flight() {
 #[test]
 fn the_balance_callback_costs_the_same_gas_however_many_records_are_owed() {
     // The callback sums the owed records (at most 8, one per claimant) and spends the claimant's own. Measured
-    // in the unit-test VM, which charges the real fees: the cost must not grow with the records, so the gas
-    // `ON_USDC_BALANCE_GAS` was sized for still covers it. (`used_gas` also counts the gas attached to the
-    // calls it schedules, so the absolute figure is not what `ON_USDC_BALANCE_GAS` is compared with.)
+    // in the unit-test VM, which charges the real fees: the cost must not grow with the records, and it must
+    // fit the gas `claim` reserves for it. `used_gas` counts the gas attached to the calls the callback
+    // schedules (45 Tgas of them), which that budget also has to cover, so the absolute figure IS what
+    // `ON_USDC_BALANCE_GAS` is compared with.
     let mut k = usdc_registry();
     let one_call = |k: &mut Kizashi, claimant: AccountId| {
         let before = env::used_gas().as_gas();
         k.on_usdc_balance(claimant, Ok(U128(PAID * 100)));
+        assert!(
+            get_created_receipts().iter().any(|r| format!("{:?}", r.actions).contains("FunctionCall")),
+            "a transfer was scheduled, so the figure includes the calls it attaches gas to"
+        );
         env::used_gas().as_gas() - before
     };
     ctx_init();
@@ -958,8 +996,63 @@ fn the_balance_callback_costs_the_same_gas_however_many_records_are_owed() {
     for n in 3..=5 {
         k.record_owed(&accounts(n), 1, 1_000);
     }
+    k.in_flight.clear(); // the first call's reservation would leave nothing free for the second
+    ctx_init();
     let with_records = one_call(&mut k, accounts(2));
     assert!(with_records < alone + Gas::from_tgas(1).as_gas(), "{alone} gas alone, {with_records} with three records owed");
+    assert!(alone <= ON_USDC_BALANCE_GAS.as_gas(), "used {alone} gas, given {}", ON_USDC_BALANCE_GAS.as_gas());
+    assert!(with_records <= ON_USDC_BALANCE_GAS.as_gas(), "used {with_records} gas, given {}", ON_USDC_BALANCE_GAS.as_gas());
+    // The VM does not run the wasm, so what it reports is a floor: keep 10% of the budget free for that.
+    assert!(with_records * 11 / 10 <= ON_USDC_BALANCE_GAS.as_gas(), "{with_records} gas leaves no room for the wasm");
+}
+
+#[test]
+fn the_balance_callback_fits_its_gas_in_the_fullest_state_it_can_meet() {
+    // Eight claimants owed (the most there can be), the in-flight list one short of full with every entry
+    // stale (the most the callback has to release and log), and the claimant's own record to spend.
+    let mut k = usdc_registry();
+    for n in 3..=9 {
+        let other: AccountId = format!("claimant{n}.near").parse().unwrap();
+        k.record_owed(&other, 1, 1_000);
+    }
+    k.record_owed(&accounts(2), 1, PAID);
+    for _ in 0..MAX_IN_FLIGHT - 1 {
+        k.in_flight.push(InFlight { claimant: accounts(4), amount: 1, at: 0 });
+    }
+    ctx_init_at(IN_FLIGHT_TIMEOUT_NS);
+    let before = env::used_gas().as_gas();
+    k.on_usdc_balance(accounts(2), Ok(U128(PAID * 100)));
+    let used = env::used_gas().as_gas() - before;
+    assert!(logged("in_flight_released"), "the stale entries were released in this call");
+    assert!(get_created_receipts().iter().any(|r| format!("{:?}", r.actions).contains("FunctionCall")), "and the payout was scheduled");
+    assert!(used <= ON_USDC_BALANCE_GAS.as_gas(), "used {used} gas, given {}", ON_USDC_BALANCE_GAS.as_gas());
+    assert!(used * 11 / 10 <= ON_USDC_BALANCE_GAS.as_gas(), "{used} gas leaves no room for the wasm");
+}
+
+#[test]
+fn the_resolve_callback_fits_its_gas_in_the_fullest_state_it_can_meet() {
+    // `on_usdc_paid` is what releases a reservation. A callback that cannot afford itself fails, rolls its state
+    // back, and leaves the reservation held until the timeout, so its gas is part of "never stuck". Fullest
+    // state: the list full with the payout's own entry last (the longest scan and shift), seven other claimants
+    // owed, and a failed transfer (the path that books a debt and logs it). The VM does not run the wasm or
+    // load the state, so what it reports is a floor: keep 10% of the budget free for that.
+    let mut k = usdc_registry();
+    for n in 3..=9 {
+        let other: AccountId = format!("claimant{n}.near").parse().unwrap();
+        k.record_owed(&other, 1, 1_000);
+    }
+    for _ in 0..MAX_IN_FLIGHT - 1 {
+        k.in_flight.push(InFlight { claimant: accounts(4), amount: 1, at: 0 });
+    }
+    k.in_flight.push(InFlight { claimant: accounts(2), amount: PAID, at: 0 });
+    ctx_callback_at(1, PromiseResult::Failed);
+    let before = env::used_gas().as_gas();
+    k.on_usdc_paid(accounts(2), U128(PAID));
+    let used = env::used_gas().as_gas() - before;
+    assert_eq!(k.in_flight.len(), MAX_IN_FLIGHT - 1, "its own entry went, the others stayed");
+    assert!(logged("payout_failed"), "the failure path ran");
+    assert!(used <= RESOLVE_GAS.as_gas(), "used {used} gas, given {}", RESOLVE_GAS.as_gas());
+    assert!(used * 11 / 10 <= RESOLVE_GAS.as_gas(), "{used} gas leaves no room for the wasm");
 }
 
 #[test]
@@ -979,3 +1072,156 @@ fn a_second_claim_right_after_the_first_cannot_pay_out_the_same_near() {
     assert_eq!(pays(accounts(3)), 0, "the second claim has nothing left to pay out");
 }
 
+
+// --- K9: a payout whose callback never reports cannot hide USDC for ever ---
+//
+// `on_usdc_paid` is the only thing that releases a reservation. If it never runs (out of gas, a shard that
+// dropped it) the reservation used to stay, and `saturating_sub` hid the drift. Now every reservation is its own
+// entry with the time it was scheduled; anyone can release the ones older than `IN_FLIGHT_TIMEOUT_NS`, every
+// payout does so first, and a callback that finds no entry says so instead of freeing something else's share.
+
+/// The contract calling itself at `ts` ns, as its own callbacks do.
+fn ctx_init_at(ts: u64) {
+    let mut b = VMContextBuilder::new();
+    b.current_account_id(accounts(0)).predecessor_account_id(accounts(0)).block_height(100).block_timestamp(ts);
+    testing_env!(b.build());
+}
+
+/// A stranger calling at `ts` ns.
+fn ctx_at(ts: u64) {
+    let mut b = VMContextBuilder::new();
+    b.current_account_id(accounts(0)).predecessor_account_id(accounts(1)).block_height(100).block_timestamp(ts);
+    testing_env!(b.build());
+}
+
+/// The contract calling itself at `ts` ns, with `result` as what the promise it waited on returned.
+fn ctx_callback_at(ts: u64, result: PromiseResult) {
+    let mut b = VMContextBuilder::new();
+    b.current_account_id(accounts(0)).predecessor_account_id(accounts(0)).block_timestamp(ts);
+    testing_env!(b.build(), test_vm_config(), RuntimeFeesConfig::test(), Default::default(), vec![result]);
+}
+
+#[test]
+fn a_reservation_whose_callback_never_came_back_is_released_after_the_timeout() {
+    let mut k = usdc_registry();
+    ctx_init_at(0);
+    k.on_usdc_balance(accounts(2), Ok(U128(PAID))); // scheduled; its on_usdc_paid never runs
+    assert_eq!(k.in_flight_total(), PAID);
+
+    ctx_init_at(IN_FLIGHT_TIMEOUT_NS - 1);
+    k.on_usdc_balance(accounts(3), Ok(U128(PAID)));
+    assert!(get_created_receipts().is_empty(), "inside the timeout the reservation holds, so nothing is free");
+    assert_eq!(k.in_flight_total(), PAID);
+
+    ctx_init_at(IN_FLIGHT_TIMEOUT_NS);
+    k.on_usdc_balance(accounts(3), Ok(U128(PAID)));
+    let r = receipts_text();
+    assert!(r.contains("\"amount\":\"5000000\"") && receiver_is(&r, &accounts(3)), "at the timeout it is let go and the USDC is paid out: {r}");
+    assert!(logged("in_flight_released"), "{:?}", get_logs());
+    assert_eq!(k.in_flight_total(), PAID, "only the new payout is reserved now");
+}
+
+#[test]
+fn anyone_can_release_a_stale_reservation_and_a_fresh_one_is_left_alone() {
+    let mut k = usdc_registry();
+    ctx_init_at(1_000);
+    k.on_usdc_balance(accounts(2), Ok(U128(PAID)));
+    assert_eq!((k.usdc_in_flight().usdc.0, k.usdc_in_flight().payouts), (PAID, 1));
+
+    ctx_at(1_000 + IN_FLIGHT_TIMEOUT_NS - 1);
+    assert_eq!(k.release_stale_in_flight().0, 0);
+    assert_eq!(k.in_flight_total(), PAID);
+    assert!(!logged("in_flight_released"));
+
+    ctx_at(1_000 + IN_FLIGHT_TIMEOUT_NS);
+    assert_eq!(k.release_stale_in_flight().0, PAID);
+    assert_eq!((k.usdc_in_flight().usdc.0, k.usdc_in_flight().payouts), (0, 0));
+    assert!(logged("in_flight_released"));
+    let event = get_logs().into_iter().find(|l| l.contains("in_flight_released")).unwrap();
+    assert!(event.contains("\"released\":\"5000000\"") && event.contains(&accounts(2).to_string()), "{event}");
+}
+
+#[test]
+fn a_late_callback_after_the_release_frees_nothing_that_belongs_to_a_newer_payout() {
+    let mut k = usdc_registry();
+    ctx_init_at(0);
+    k.on_usdc_balance(accounts(2), Ok(U128(PAID))); // payout A, whose callback is very late
+    ctx_init_at(IN_FLIGHT_TIMEOUT_NS);
+    k.on_usdc_balance(accounts(3), Ok(U128(PAID))); // A is released, and payout B takes the same amount
+    assert_eq!(k.in_flight_total(), PAID);
+
+    ctx_callback_at(IN_FLIGHT_TIMEOUT_NS + 1, PromiseResult::Successful(vec![]));
+    k.on_usdc_paid(accounts(2), U128(PAID)); // A's callback finally arrives
+    assert_eq!(k.in_flight_total(), PAID, "B's reservation is not A's to release");
+    assert!(logged("in_flight_unknown"), "the drift is reported, not hidden: {:?}", get_logs());
+
+    ctx_callback_at(IN_FLIGHT_TIMEOUT_NS + 2, PromiseResult::Successful(vec![]));
+    k.on_usdc_paid(accounts(3), U128(PAID));
+    assert_eq!(k.in_flight_total(), 0, "B's own callback releases B");
+    assert!(!logged("in_flight_unknown"));
+}
+
+#[test]
+fn a_late_failure_after_the_release_is_still_held_as_unverified_debt() {
+    let mut k = usdc_registry();
+    ctx_init_at(0);
+    k.on_usdc_balance(accounts(2), Ok(U128(PAID)));
+    ctx_at(IN_FLIGHT_TIMEOUT_NS);
+    let _ = k.release_stale_in_flight();
+    ctx_callback_at(IN_FLIGHT_TIMEOUT_NS + 1, PromiseResult::Failed);
+    k.on_usdc_paid(accounts(2), U128(PAID)); // the transfer did fail: the tokens are still on the contract
+    let owed = k.owed(accounts(2));
+    assert_eq!((owed.usdc.0, owed.usdc_unread), (PAID, true), "so retry_payout re-reads the balance and pays it");
+    assert_eq!(k.in_flight_total(), 0);
+}
+
+#[test]
+fn a_late_success_after_the_release_leaves_the_books_as_they_are() {
+    let mut k = usdc_registry();
+    ctx_init_at(0);
+    k.on_usdc_balance(accounts(2), Ok(U128(PAID)));
+    ctx_at(IN_FLIGHT_TIMEOUT_NS);
+    let _ = k.release_stale_in_flight();
+    ctx_callback_at(IN_FLIGHT_TIMEOUT_NS + 1, PromiseResult::Successful(vec![]));
+    k.on_usdc_paid(accounts(2), U128(PAID));
+    assert_eq!(k.owed(accounts(2)).usdc.0, 0);
+    assert!(logged("payout_ok") && logged("in_flight_unknown"), "{:?}", get_logs());
+}
+
+#[test]
+fn with_the_in_flight_list_full_a_payout_is_held_as_owed_instead_of_scheduled() {
+    let mut k = usdc_registry();
+    for _ in 0..MAX_IN_FLIGHT {
+        k.in_flight.push(InFlight { claimant: accounts(4), amount: 1, at: 0 });
+    }
+    ctx_init_at(1);
+    k.on_usdc_balance(accounts(2), Ok(U128(PAID)));
+    assert!(get_created_receipts().is_empty(), "nothing is scheduled while MAX_IN_FLIGHT payouts are unreported");
+    let owed = k.owed(accounts(2));
+    assert_eq!(owed.usdc.0, PAID - MAX_IN_FLIGHT as u128, "what the claimant is owed is held for them, minus what is reserved");
+    assert!(logged("payout_failed"), "{:?}", get_logs());
+    ctx_at(1);
+    let text = panic_text(|| {
+        let _ = k.retry_payout(accounts(2));
+    });
+    assert!(text.contains("in flight"), "a retry says why it cannot start yet: {text}");
+    assert_eq!(k.owed(accounts(2)).usdc.0, PAID - MAX_IN_FLIGHT as u128, "and the refused retry changed nothing");
+    // Once the old entries age out, the same retry goes through.
+    ctx_at(IN_FLIGHT_TIMEOUT_NS + 1);
+    let _ = k.retry_payout(accounts(2));
+    assert!(receipts_text().contains("ft_transfer"));
+    assert_eq!(k.in_flight.len(), 1);
+}
+
+#[test]
+fn a_successful_callback_removes_exactly_one_entry() {
+    let mut k = usdc_registry();
+    k.in_flight.push(InFlight { claimant: accounts(2), amount: PAID, at: 5 });
+    k.in_flight.push(InFlight { claimant: accounts(3), amount: PAID, at: 5 });
+    k.in_flight.push(InFlight { claimant: accounts(2), amount: PAID, at: 6 }); // an identical twin of the first
+    ctx_callback_at(7, PromiseResult::Successful(vec![]));
+    k.on_usdc_paid(accounts(2), U128(PAID));
+    assert_eq!(k.in_flight.len(), 2, "one of the two identical entries went, the other claimant's stayed");
+    assert!(k.in_flight.iter().any(|p| p.claimant == accounts(3)));
+    assert!(k.in_flight.iter().any(|p| p.claimant == accounts(2) && p.at == 6), "the oldest of the twins went first");
+}

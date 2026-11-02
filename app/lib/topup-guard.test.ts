@@ -127,11 +127,12 @@ test("APP-2: a node that cannot be reached fails closed", async () => {
   assert.match(e.message, /no deposit address/);
 });
 
-test("APP-2: the config reads the network and the override from the environment", () => {
-  const base = { NEXT_PUBLIC_KIZASHI_ID: KIZASHI, KIZASHI_CODE_HASH: HASH };
-  assert.deepEqual(guardConfigFromEnv(base), { network: "mainnet", allowTestnet: false, recipient: KIZASHI, expectedCodeHash: HASH });
-  assert.equal(guardConfigFromEnv({ ...base, NEXT_PUBLIC_NETWORK: "testnet", TOPUP_ALLOW_TESTNET: "1" }).allowTestnet, true);
-  assert.equal(guardConfigFromEnv({ ...base, NEXT_PUBLIC_NETWORK: "testnet" }).network, "testnet");
-  assert.equal(guardConfigFromEnv({ ...base, TOPUP_ALLOW_TESTNET: "true" }).allowTestnet, false, "only 1 switches it on");
-  assert.equal(guardConfigFromEnv({}).recipient, "");
+test("APP-2: the config takes the network and recipient from the deployment settings, and the switches from the environment", () => {
+  const env = { KIZASHI_CODE_HASH: HASH };
+  const mainnet = { network: "mainnet", kizashi: KIZASHI } as const;
+  assert.deepEqual(guardConfigFromEnv(env, mainnet), { network: "mainnet", allowTestnet: false, recipient: KIZASHI, expectedCodeHash: HASH });
+  assert.equal(guardConfigFromEnv({ ...env, TOPUP_ALLOW_TESTNET: "1" }, { network: "testnet", kizashi: KIZASHI }).allowTestnet, true);
+  assert.equal(guardConfigFromEnv(env, { network: "testnet", kizashi: KIZASHI }).network, "testnet");
+  assert.equal(guardConfigFromEnv({ ...env, TOPUP_ALLOW_TESTNET: "true" }, mainnet).allowTestnet, false, "only 1 switches it on");
+  assert.equal(guardConfigFromEnv({}, { network: "mainnet", kizashi: null }).recipient, "", "no Kizashi in the deployment settings means no recipient");
 });

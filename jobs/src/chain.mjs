@@ -110,7 +110,7 @@ export const TRIP_GAS_TGAS = 250;
 export const makeSendTrip = (submit) => (vault) => submit({ receiver: vault, method: "trip", gas: TGAS(TRIP_GAS_TGAS) });
 
 /** `claim` reserves about 70 Tgas for its callbacks (the USDC balance read and the payout chain), so the transaction carries 100. */
-export const CLAIM_GAS_TGAS = 100;
+export const CLAIM_GAS_TGAS = 170;
 
 /** Chain interface for `runFireTest`, backed by real transactions and views. */
 export function makeDrillChain({ rpc, submit, network = "mainnet", cfg, drillSecretsPath, adminSeedsPath, dailyKeys: dailyKeyByVault, omens }) {

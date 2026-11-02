@@ -1,10 +1,20 @@
 // The pure parts of Create vault: the fallback that works without a post-quantum wallet. The connected wallet
 // creates and funds the vault account and gives it a temporary key that lives only in this browser tab; that
 // key adds the ML-DSA admin key and then deletes itself. Only the admin's PUBLIC key is ever needed here.
+import type { Network } from "./network.ts";
 import { toUnits } from "./units.ts";
 
-/** Off unless NEXT_PUBLIC_VAULT_CREATE=1, until gates G1 and G3 have passed on mainnet. */
-export const VAULT_CREATE_ENABLED = process.env.NEXT_PUBLIC_VAULT_CREATE === "1";
+export type CreateGuard = { enabled: true } | { enabled: false; reason: string };
+
+/** The sentence shown wherever Create vault is switched off, so every page says the same thing. */
+export const CREATE_OFF_ON_MAINNET =
+  "Creating the vault is switched off on mainnet until the on-chain checks for post-quantum keys (gates G1 and G3) have passed there. It works on testnet only.";
+
+/**
+ * Create vault runs on testnet only. Mainnet stays off, whatever else is set, until gates G1 and G3 have passed there.
+ * A pure function of the network, so what a page shows and what its handler allows cannot disagree.
+ */
+export const createVaultGuard = (network: Network): CreateGuard => (network === "testnet" ? { enabled: true } : { enabled: false, reason: CREATE_OFF_ON_MAINNET });
 
 export type StepId = "create" | "admin" | "cleanup" | "check";
 export const STEP_ORDER: readonly StepId[] = ["create", "admin", "cleanup", "check"];

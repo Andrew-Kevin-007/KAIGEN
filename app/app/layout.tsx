@@ -1,6 +1,8 @@
 import type { Metadata, Viewport } from "next";
+import { ConfigNotice } from "@/components/ConfigNotice";
 import { Footer } from "@/components/Footer";
 import { Nav } from "@/components/Nav";
+import { NetworkBanner } from "@/components/NetworkBanner";
 import { WalletProvider } from "@/lib/wallet";
 import "./globals.css";
 
@@ -22,6 +24,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body>
         <WalletProvider>
           <Nav />
+          <ConfigNotice />
+          <NetworkBanner />
           <main>{children}</main>
         </WalletProvider>
         <Footer />

@@ -1,16 +1,20 @@
 "use client";
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { NotDeployed } from "@/components/NotDeployed";
 import { WalletError } from "@/components/WalletError";
+import { isAccountId } from "@/lib/account";
 import { describedBy } from "@/lib/aria";
+import { DEPLOYMENTS } from "@/lib/config";
+import { kizashiRole } from "@/lib/deployments";
 import { errorText } from "@/lib/errors";
 import { latestOnly } from "@/lib/latest";
-import { hasContract, isEra, view, yoctoToNear, type Era, type QueuedWithdrawal, type VaultConfig } from "@/lib/near";
-import { vaultShapeProblem } from "@/lib/vault-shape";
+import { KIZASHI_ID, hasContract, isEra, rpcNetworkProblem, view, yoctoToNear, type Era, type QueuedWithdrawal, type VaultConfig } from "@/lib/near";
+import { NETWORK } from "@/lib/network";
+import { isMissingView, lockdownOf, vaultShapeProblem } from "@/lib/vault-shape";
 import { useWallet } from "@/lib/wallet";
 
 const RANK: Record<Era, number> = { Calm: 0, Warning: 1, Kaigen: 2 };
-const ERA_TONE: Record<Era, "valid" | "warning" | "invalid"> = { Calm: "valid", Warning: "warning", Kaigen: "invalid" };
 
 /** Share of the 24 hour limit already used, as 0 to 100. A zero or unreadable limit reads as nothing used. */
 function usedPercent(spent: string, limit: string): number {
@@ -28,13 +32,25 @@ interface Loaded {
   account: string;
   config: VaultConfig;
   keys: string[];
+  /** Daily keys the vault no longer serves whose deletion from the account is not confirmed; null when this vault's build has no such view. */
+  revoked: string[] | null;
+  /** Keys this vault put on intents.near, which lockdown must also remove; null when the vault has no such view. */
+  intents: string[] | null;
   queue: QueuedWithdrawal[];
   spent: string;
   /** What Kizashi says now. The vault only learns it when someone calls `trip`. */
   kizashiEra: Era;
 }
 
-const ACCOUNT = /^(?=.{2,64}$)([a-z\d]+([-_][a-z\d]+)*\.)*[a-z\d]+([-_][a-z\d]+)*$/;
+/** A view an older vault build may not have: its answer, or null when the vault says the method does not exist. Any other failure is thrown. */
+async function optionalKeyList(id: string, method: string, signal: AbortSignal): Promise<unknown> {
+  try {
+    return await view<unknown>(id, method, {}, signal);
+  } catch (e) {
+    if (isMissingView(e)) return null;
+    throw e;
+  }
+}
 
 const fmtDelay = (secs: number) => {
   if (secs < 60) return `${secs} s`;
@@ -92,7 +108,7 @@ export default function VaultPage() {
     setVault(null);
     setTripState("idle");
     setTripError("");
-    if (!ACCOUNT.test(id)) {
+    if (!isAccountId(id)) {
       setBusy(false);
       return setError("That is not a valid NEAR account name.");
     }
@@ -100,21 +116,35 @@ export default function VaultPage() {
     const ctrl = new AbortController();
     inFlight.current = ctrl;
     try {
+      // Ask the RPC which network it serves before reading anything from it: a testnet node must never be shown as production.
+      const wrongNetwork = await rpcNetworkProblem(ctrl.signal);
+      if (wrongNetwork) throw new Error(wrongNetwork);
       if (!(await hasContract(id, ctrl.signal))) throw new Error("No contract is deployed on that account, so it is not a vault.");
-      const [config, keys, queue, spent] = await Promise.all([
+      const [config, keys, queue, spent, revoked, intents] = await Promise.all([
         view<unknown>(id, "config", {}, ctrl.signal),
         view<unknown>(id, "daily_keys", {}, ctrl.signal),
         view<unknown>(id, "queue", {}, ctrl.signal),
         view<unknown>(id, "spent_24h", { token: null }, ctrl.signal),
+        optionalKeyList(id, "revoked_keys", ctrl.signal),
+        optionalKeyList(id, "intents_keys", ctrl.signal),
       ]);
       // A contract that answers these views with something else is not a KAIGEN vault. Checked before any field is read.
-      const problem = vaultShapeProblem({ config, keys, queue, spent });
+      const problem = vaultShapeProblem({ config, keys, queue, spent, revoked, intents });
       if (problem) throw new Error(problem);
       const vaultConfig = config as VaultConfig;
       const kizashiEra = await view<unknown>(vaultConfig.kizashi, "era", {}, ctrl.signal);
       if (!isEra(kizashiEra)) throw new Error("Kizashi returned an era this page does not know.");
       if (!current()) return;
-      setVault({ account: id, config: vaultConfig, keys: keys as string[], queue: queue as QueuedWithdrawal[], spent: spent as string, kizashiEra });
+      setVault({
+        account: id,
+        config: vaultConfig,
+        keys: keys as string[],
+        revoked: (revoked ?? null) as string[] | null,
+        intents: (intents ?? null) as string[] | null,
+        queue: queue as QueuedWithdrawal[],
+        spent: spent as string,
+        kizashiEra,
+      });
     } catch (err) {
       if (current()) setError(errorText(err, "That vault could not be read."));
     } finally {
@@ -122,7 +152,8 @@ export default function VaultPage() {
     }
   }
 
-  const pqOnly = vault ? vault.config.era === "Kaigen" && vault.keys.length === 0 : false;
+  const lockdown = vault ? lockdownOf({ era: vault.config.era, daily: vault.keys.length, revoked: vault.revoked?.length ?? null, intents: vault.intents?.length ?? null }) : null;
+  const role = vault ? kizashiRole(vault.config.kizashi, DEPLOYMENTS) : "other";
   const used = vault ? usedPercent(vault.spent, vault.config.daily_limit) : 0;
 
   return (
@@ -131,6 +162,12 @@ export default function VaultPage() {
         <h1>Look up a vault</h1>
         <p className="lead">Read-only. Enter a vault account to see its era, limits, keys and queued withdrawals.</p>
       </header>
+
+      {!KIZASHI_ID && (
+        <div style={{ marginBottom: "1.5rem" }}>
+          <NotDeployed>Kizashi is not deployed yet on {NETWORK}. You can still read any vault, but none of them can be checked against this site&apos;s Kizashi.</NotDeployed>
+        </div>
+      )}
 
       <p className="sr-only" role="status">
         {vault ? `Loaded ${vault.account}. Era ${vault.config.era}. ${vault.keys.length} daily keys, ${vault.queue.length} queued withdrawals.` : ""}
@@ -146,7 +183,7 @@ export default function VaultPage() {
             className="field"
             value={account}
             onChange={(e) => setAccount(e.target.value)}
-            placeholder="name.near"
+            placeholder={NETWORK === "testnet" ? "name.testnet" : "name.near"}
             autoCapitalize="none"
             autoCorrect="off"
             spellCheck={false}
@@ -180,11 +217,26 @@ export default function VaultPage() {
           <div className="panel" aria-label="Vault summary" role="group">
             <div className="split">
               <span className="mono">{vault.account}</span>
-              <span className="chip" data-tone={pqOnly ? "valid" : ERA_TONE[vault.config.era]}>
-                {pqOnly ? "Post-quantum only" : `Era: ${vault.config.era}`}
+              <span className="chip" data-tone={lockdown?.tone}>
+                {lockdown?.label}
               </span>
             </div>
             <dl className="kv">
+              <div className="wide">
+                <dt>Follows Kizashi</dt>
+                <dd>
+                  <span className="mono">{vault.config.kizashi}</span>
+                  <span className="small body" style={{ display: "block", fontWeight: 400 }}>
+                    {role === "production"
+                      ? "This site's Kizashi."
+                      : role === "drill"
+                        ? "The drill Kizashi: a rehearsal, not production."
+                        : KIZASHI_ID
+                          ? `Not the Kizashi this site watches (${KIZASHI_ID}). The era above comes from a contract this site cannot vouch for.`
+                          : "This site has no Kizashi to check it against yet, so the era above comes from a contract this site cannot vouch for."}
+                  </span>
+                </dd>
+              </div>
               <div>
                 <dt>Classical daily keys</dt>
                 <dd>{vault.keys.length}</dd>

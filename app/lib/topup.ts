@@ -2,6 +2,7 @@
 // whose output is USDC delivered to Kizashi on NEAR. Runs only in route handlers, because the 1Click API
 // needs a JWT and that must never reach the browser.
 import { OneClickService, OpenAPI, QuoteRequest, type TokenResponse } from "@defuse-protocol/one-click-sdk-typescript";
+import { DEPLOYMENTS } from "./config.ts";
 import { refundAddressError } from "./refund.ts";
 import { TopupError, assertTopupSafe, guardConfigFromEnv } from "./topup-guard.ts";
 
@@ -25,7 +26,7 @@ function configure() {
 }
 
 function recipient(): string {
-  const id = process.env.NEXT_PUBLIC_KIZASHI_ID;
+  const id = DEPLOYMENTS.kizashi;
   if (!id) throw new TopupError("Kizashi is not deployed yet, so there is nowhere to send a top-up.", 503);
   return id;
 }

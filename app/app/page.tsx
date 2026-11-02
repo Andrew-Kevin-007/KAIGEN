@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { DrillTable } from "@/components/DrillTable";
+import { DEPLOYMENTS } from "@/lib/config";
 import { DRILL_KIZASHI_ID, KIZASHI_ID, chainId, isEra, view, yoctoToNear, type Bounty, type Era, type Omen } from "@/lib/near";
 import { NETWORK, networkProblem, type Network } from "@/lib/network";
 
@@ -22,7 +23,7 @@ const COPY: Record<Era, { line: string; detail: string }> = {
   },
   Warning: {
     line: "An early-warning omen has broken.",
-    detail: "Vault sends are paused and withdrawal delays are doubled. Post-quantum admin keys are unaffected.",
+    detail: "Vault sends and withdrawal requests are paused, and queued withdrawals stay frozen. The admin can still cancel them. Post-quantum admin keys are unaffected.",
   },
   Kaigen: {
     line: "An omen key has broken.",
@@ -120,8 +121,8 @@ export default function EraPage() {
           </>
         ) : state.status === "unconfigured" ? (
           <p className="lead">
-            When a key breaks, your vault adapts. Kizashi is not deployed yet, so there is no live era to show. This page reads it from the chain once it is live. Until then, the
-            recorded drill below is a real run.
+            When a key breaks, your vault adapts. Kizashi is not deployed yet on {NETWORK}, so there is no live era to show. This page reads it from the chain once it is live.
+            {DEPLOYMENTS.drillRecord ? " Until then, the recorded drill below is a real run." : ""}
           </p>
         ) : state.status === "error" ? (
           <p className="lead error">Could not read Kizashi: {state.message}</p>
@@ -153,12 +154,6 @@ export default function EraPage() {
         <div className="callout reading" data-tone="warning" style={{ marginBottom: "1.25rem" }}>
           <strong>Drill.</strong>
           <span>These omens belong to us and are used for the weekly fire test. Nothing here means the production omen has broken.</span>
-        </div>
-      )}
-      {NETWORK === "testnet" && (
-        <div className="callout reading" data-tone="warning">
-          <strong>Testnet.</strong>
-          <span>Everything here is test data. Nothing on this page means a production omen has broken.</span>
         </div>
       )}
 

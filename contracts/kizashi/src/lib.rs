@@ -23,9 +23,23 @@ const FT_TRANSFER_GAS: Gas = Gas::from_tgas(30);
 const RESOLVE_GAS: Gas = Gas::from_tgas(5);
 /// `on_usdc_balance` plus the chain it schedules (storage_deposit, ft_transfer, resolve). The prepaid
 /// gas `claim` leaves unused is shared between its callbacks on top of this, so it is a floor.
-const ON_USDC_BALANCE_GAS: Gas = Gas::from_tgas(55);
+///
+/// Measured in the unit-test VM, which charges the real fees: the callback uses 78.7 Tgas in the fullest state it
+/// can meet, 45 of them the gas it attaches to the three calls it schedules and the rest the fees of creating them
+/// (the receipts, the function-call actions, and a data receipt for each `then`). The VM does not run the wasm,
+/// which adds a little, so 90 Tgas leaves about 14% for it. It was 55, which the callback could not have afforded.
+const ON_USDC_BALANCE_GAS: Gas = Gas::from_tgas(90);
 /// The most omens one registry holds.
 const MAX_OMENS: usize = 8;
+/// The most USDC payouts that may be scheduled and not yet reported at once. At most 8 claims can pay out, and a
+/// verified retry only moves an amount already owed, so 16 is room to spare; it bounds the state and the work of
+/// the callback that has to look through the list.
+const MAX_IN_FLIGHT: usize = 16;
+/// How long (ns) a scheduled USDC payout may stay unreported before anyone may release its reservation: 10
+/// minutes, many times the few blocks the chain needs. Too short is safe (a payout that was only slow is booked
+/// when its callback does arrive, and a second transfer of the same tokens fails into an unverified record);
+/// too long hides that much USDC from claims for that long.
+const IN_FLIGHT_TIMEOUT_NS: u64 = 600 * 1_000_000_000;
 /// Attached to the token's `storage_deposit` for a claimant: 0.01 NEAR, many times any real token's
 /// minimum. A registration-only deposit refunds the excess, or all of it if already registered.
 const MIN_REGISTRATION_DEPOSIT: NearToken = NearToken::from_millinear(10);
@@ -91,6 +105,16 @@ struct Owed {
     usdc_unread: bool,
 }
 
+/// One USDC `ft_transfer` that has been scheduled and has not reported back. Reserved against later claims from
+/// `at` (block time, ns) until its resolve callback arrives or `IN_FLIGHT_TIMEOUT_NS` passes.
+#[near(serializers = [borsh])]
+#[derive(Clone)]
+struct InFlight {
+    claimant: AccountId,
+    amount: u128,
+    at: u64,
+}
+
 /// One omen at init. `public_key` is hex.
 #[near(serializers = [json])]
 pub struct OmenInit {
@@ -136,6 +160,40 @@ pub struct OwedView {
     pub usdc_unread: bool,
 }
 
+#[near(serializers = [json])]
+pub struct InFlightView {
+    /// USDC reserved for payouts that have not reported back, in token units.
+    pub usdc: U128,
+    pub payouts: u32,
+}
+
+/// Why a USDC payout could not be started.
+enum PayoutBlock {
+    NoToken,
+    NoSpareNear,
+    TooManyInFlight,
+}
+
+impl PayoutBlock {
+    /// For the `payout_failed` event of a payout held as owed.
+    fn reason(&self) -> &'static str {
+        match self {
+            Self::NoToken => "no USDC token configured",
+            Self::NoSpareNear => "no spare NEAR for the registration deposit",
+            Self::TooManyInFlight => "too many USDC payouts in flight",
+        }
+    }
+
+    /// What `retry_payout` panics with: a retry that cannot start tells its caller why.
+    fn refusal(&self) -> &'static str {
+        match self {
+            Self::NoToken => "no USDC token configured",
+            Self::NoSpareNear => "the contract needs spare NEAR to register the claimant with the token",
+            Self::TooManyInFlight => "too many USDC payouts in flight; retry once they report or time out",
+        }
+    }
+}
+
 #[ext_contract(ext_ft)]
 #[allow(dead_code)]
 trait FungibleToken {
@@ -152,13 +210,18 @@ pub struct Kizashi {
     usdc: Option<AccountId>,
     /// Failed payouts by claimant. One entry per claimant, so at most one per claim: 8 at most.
     owed: IterableMap<AccountId, Owed>,
-    /// USDC committed to `ft_transfer`s that have been scheduled and have not reported back yet. The token
-    /// balance still includes it until the transfer lands, so a second claim that reads the balance in that
-    /// window must not pay it again: it takes the balance minus this, minus what is owed to others.
-    /// Every scheduled transfer has a resolve callback (`RESOLVE_GAS`) that releases its share, whether the
-    /// transfer worked or not; a callback that could not run would leave its share held, hiding that much
-    /// USDC from later claims (the failed transfer would not have been recorded as owed either).
-    usdc_in_flight: u128,
+    /// USDC committed to `ft_transfer`s that have been scheduled and have not reported back yet, one entry per
+    /// payout, oldest first. The token balance still includes it until the transfer lands, so a second claim
+    /// that reads the balance in that window must not pay it again: it takes the balance minus this, minus what
+    /// is owed to others. Every scheduled transfer has a resolve callback (`RESOLVE_GAS`) that removes its entry,
+    /// whether the transfer worked or not. If that callback never runs, the entry is not kept for ever: after
+    /// `IN_FLIGHT_TIMEOUT_NS` anyone may release it (`release_stale_in_flight`) and every payout does so first,
+    /// so no key, no admin and no one caller is needed to un-hide the USDC. A callback that finds no entry says
+    /// so (`in_flight_unknown`) instead of freeing someone else's share.
+    ///
+    /// No `migrate` exists or is needed: this field replaced a plain counter before any deploy, and the contract
+    /// has no key to upgrade it with afterwards (see the module doc).
+    in_flight: Vec<InFlight>,
 }
 
 #[near]
@@ -196,7 +259,7 @@ impl Kizashi {
             require!(prev.is_none(), "duplicate omen id");
             require!(!duplicate_key, "duplicate omen key");
         }
-        Self { omens: map, era: Era::Calm, usdc, owed: IterableMap::new(b"w"), usdc_in_flight: 0 }
+        Self { omens: map, era: Era::Calm, usdc, owed: IterableMap::new(b"w"), in_flight: Vec::new() }
     }
 
     /// Prove an omen is dead. Anyone may call; the signature is the only authority.
@@ -211,8 +274,9 @@ impl Kizashi {
     ///
     /// Two claims close together cannot be paid the same money. NEAR: the runtime takes a transfer out of
     /// the balance when it creates the receipt, so the next claim sees what is left. USDC: the balance is
-    /// only known in a later callback, so that callback reserves what it schedules (`usdc_in_flight`) and
-    /// the next one takes the balance minus that, minus what is owed to others. A transfer that fails
+    /// only known in a later callback, so that callback reserves what it schedules (`in_flight`, released by
+    /// the payout's own callback or, if that never comes, by `release_stale_in_flight`) and the next one takes the
+    /// balance minus that, minus what is owed to others. A transfer that fails
     /// anyway (a read that was already stale) is held as an unverified amount that the retry re-reads, so it
     /// cannot become a debt that nothing can pay or hide a later top-up.
     pub fn claim(&mut self, omen_id: String, claimant: AccountId, signature: Base64VecU8) -> Promise {
@@ -285,10 +349,11 @@ impl Kizashi {
         // This read settles whatever USDC this claimant had on record, so the record is spent here, whatever
         // happens below: the balance includes those tokens if they are still held, and the claimant is paid
         // from it. What the read may take is the balance minus what is held for OTHER claimants (their owed
-        // records) and minus what other payouts have already scheduled (`usdc_in_flight`): a second claim
+        // records) and minus what other payouts have already scheduled (`in_flight`): a second claim
         // whose read landed before the first transfer did sees the same balance and must not pay it again.
+        self.release_stale(); // a reservation whose callback never came back must not hide this claimant's USDC
         let recorded = self.take_usdc_record(&claimant);
-        let held_back = self.owed_total().usdc.saturating_add(self.usdc_in_flight);
+        let held_back = self.owed_total().usdc.saturating_add(self.in_flight_total());
         let amount = balance.0.saturating_sub(held_back);
         if recorded > amount {
             // A recorded amount the token no longer holds is no debt (it was paid to someone else, or lost to
@@ -302,17 +367,28 @@ impl Kizashi {
             return;
         }
         match self.start_usdc_payout(&claimant, amount) {
-            Some(steps) => drop(chain(steps)), // dropping a promise schedules it
-            None => {
+            Ok(steps) => drop(chain(steps)), // dropping a promise schedules it
+            Err(block) => {
+                // Held as owed, with the amount a balance read put there, so `retry_payout` pays it as recorded.
                 self.record_owed(&claimant, 0, amount);
-                emit_payout_failed("usdc", &claimant, Some(amount), "no spare NEAR for the registration deposit");
+                emit_payout_failed("usdc", &claimant, Some(amount), block.reason());
             }
         }
     }
 
     #[private]
     pub fn on_usdc_paid(&mut self, claimant: AccountId, amount: U128) {
-        self.usdc_in_flight = self.usdc_in_flight.saturating_sub(amount.0);
+        // Remove this payout's own entry (the oldest one that matches). If the timeout already released it, there is
+        // none: that is reported, and nothing else's reservation is touched. Either way the outcome is booked below.
+        match self.in_flight.iter().position(|p| p.claimant == claimant && p.amount == amount.0) {
+            Some(i) => {
+                self.in_flight.remove(i);
+            }
+            None => emit(
+                "in_flight_unknown",
+                serde_json::json!({ "asset": "usdc", "claimant": claimant, "amount": amount }),
+            ),
+        }
         if previous_promise_succeeded() {
             emit_payout_ok("usdc", &claimant, amount.0);
         } else {
@@ -340,16 +416,16 @@ impl Kizashi {
     /// amount the token no longer holds (a payout that raced another one) is dropped there and logged as
     /// `owed_reconciled`.
     pub fn retry_payout(&mut self, claimant: AccountId) -> Promise {
+        self.release_stale();
         let owed = self.owed.get(&claimant).cloned().unwrap_or_else(|| env::panic_str("nothing owed to this account"));
         let near = owed.near.min(self.payable_near());
         require!(near > 0 || owed.usdc > 0 || owed.usdc_unread, "owed NEAR has not returned to the contract yet");
         let read_usdc = self.usdc.clone().filter(|_| owed.usdc_unread);
         let usdc_calls = (owed.usdc > 0 && !owed.usdc_unread).then(|| {
-            self.start_usdc_payout(&claimant, owed.usdc)
-                .unwrap_or_else(|| env::panic_str("the contract needs spare NEAR to register the claimant with the token"))
+            self.start_usdc_payout(&claimant, owed.usdc).unwrap_or_else(|block| env::panic_str(block.refusal()))
         });
 
-        // A verified USDC amount has moved into `usdc_in_flight` above and leaves the record. An unverified
+        // A verified USDC amount has moved into `in_flight` above and leaves the record. An unverified
         // one stays, as the hold that keeps another claimant from sweeping it, until the balance callback
         // settles it. A second call before then repeats the read; it cannot pay, so it cannot pay twice.
         let (held, still_unread) = if owed.usdc > 0 && owed.usdc_unread { (owed.usdc, true) } else { (0, false) };
@@ -382,6 +458,18 @@ impl Kizashi {
             .with_attached_deposit(deposit)
             .with_static_gas(FT_STORAGE_DEPOSIT_GAS)
             .storage_deposit(Some(env::current_account_id()), Some(true))
+    }
+
+    /// Lets go of every USDC reservation older than `IN_FLIGHT_TIMEOUT_NS` whose payout never reported back, so
+    /// that USDC is free for claims again. No key and no caller check: it only ever removes entries that are
+    /// already stale, and every payout does the same first. Returns what was released.
+    pub fn release_stale_in_flight(&mut self) -> U128 {
+        self.release_stale().into()
+    }
+
+    /// USDC reserved for payouts that have not reported back, and how many there are. Read-only.
+    pub fn usdc_in_flight(&self) -> InFlightView {
+        InFlightView { usdc: self.in_flight_total().into(), payouts: self.in_flight.len() as u32 }
     }
 
     pub fn era(&self) -> Era {
@@ -460,6 +548,32 @@ impl Kizashi {
         env::account_balance().as_yoctonear().saturating_sub(storage_reserve()).saturating_sub(STORAGE_MARGIN.as_yoctonear())
     }
 
+    /// USDC reserved for payouts that have not reported back.
+    fn in_flight_total(&self) -> u128 {
+        self.in_flight.iter().fold(0, |sum, p| sum.saturating_add(p.amount))
+    }
+
+    /// Drops the reservations that have outlived `IN_FLIGHT_TIMEOUT_NS`, logs them in one event, and returns
+    /// their sum. Silent when there are none.
+    fn release_stale(&mut self) -> u128 {
+        let now = env::block_timestamp();
+        let (stale, fresh): (Vec<InFlight>, Vec<InFlight>) = std::mem::take(&mut self.in_flight)
+            .into_iter()
+            .partition(|p| now.saturating_sub(p.at) >= IN_FLIGHT_TIMEOUT_NS);
+        self.in_flight = fresh;
+        if stale.is_empty() {
+            return 0;
+        }
+        let released = stale.iter().fold(0u128, |sum, p| sum.saturating_add(p.amount));
+        let entries: Vec<_> =
+            stale.iter().map(|p| serde_json::json!({ "claimant": p.claimant, "amount": U128(p.amount), "at": U64(p.at) })).collect();
+        emit(
+            "in_flight_released",
+            serde_json::json!({ "asset": "usdc", "released": U128(released), "payouts": stale.len(), "entries": entries }),
+        );
+        released
+    }
+
     fn owed_total(&self) -> Owed {
         self.owed.values().fold(Owed::default(), |sum, o| Owed {
             near: sum.near.saturating_add(o.near),
@@ -500,18 +614,23 @@ impl Kizashi {
 
     /// The three calls that pay `amount` USDC to `claimant`: register them with the token (a NEP-141
     /// token refuses an unregistered receiver), transfer, then resolve. Chain them in this order.
-    /// None when the contract has no spare NEAR, beyond what it owes, to attach as the deposit.
+    /// Refused when the contract has no spare NEAR, beyond what it owes, to attach as the deposit, and while
+    /// `MAX_IN_FLIGHT` payouts are waiting to report (callers release the stale ones before they ask).
     ///
-    /// Reserves `amount` in `usdc_in_flight` until `on_usdc_paid` reports, so that no other payout is computed
-    /// from tokens this one is already sending. Only call it when the steps are going to be scheduled.
-    fn start_usdc_payout(&mut self, claimant: &AccountId, amount: u128) -> Option<Vec<Promise>> {
-        let usdc = self.usdc.clone()?;
+    /// Reserves `amount` in `in_flight` until `on_usdc_paid` reports (or the timeout releases it), so that no
+    /// other payout is computed from tokens this one is already sending. Only call it when the steps are going
+    /// to be scheduled.
+    fn start_usdc_payout(&mut self, claimant: &AccountId, amount: u128) -> Result<Vec<Promise>, PayoutBlock> {
+        let usdc = self.usdc.clone().ok_or(PayoutBlock::NoToken)?;
         let spare = env::account_balance().as_yoctonear().saturating_sub(storage_reserve()).saturating_sub(self.owed_total().near);
         if spare <= MIN_REGISTRATION_DEPOSIT.as_yoctonear() {
-            return None; // the deposit plus the 1 yoctoNEAR of ft_transfer
+            return Err(PayoutBlock::NoSpareNear); // the deposit plus the 1 yoctoNEAR of ft_transfer
         }
-        self.usdc_in_flight = self.usdc_in_flight.saturating_add(amount);
-        Some(vec![
+        if self.in_flight.len() >= MAX_IN_FLIGHT {
+            return Err(PayoutBlock::TooManyInFlight);
+        }
+        self.in_flight.push(InFlight { claimant: claimant.clone(), amount, at: env::block_timestamp() });
+        Ok(vec![
             ext_ft::ext(usdc.clone())
                 .with_attached_deposit(MIN_REGISTRATION_DEPOSIT)
                 .with_static_gas(FT_STORAGE_DEPOSIT_GAS)

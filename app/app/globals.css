@@ -16,11 +16,15 @@
   /* Derived from the site's own values. Text-safe state colours are darker so they pass 4.5:1. */
   --page-ink: #474645; --rule: #EDEDED; --header-rule: rgba(0, 0, 0, 0.05);
   --ink: #171717; --ink-hover: #121212; --pill-bg: #F6F4EF; --pill-bg-hover: #EAE6DD;
-  --nav-ink: #282624; --link: #1A88F8; --selection-bg: #D8ECFC; --selection-ink: #008cff;
-  --faint: rgba(34, 34, 34, 0.62); --faint-hover: rgba(34, 34, 34, 0.8);
+  --nav-ink: #282624; --selection-bg: #D8ECFC; --selection-ink: #0B5FBF;
+  /* Text links. The site's link blue #1A88F8 is 3.55:1 on white, under the 4.5:1 AA floor for body text, so links use this darker blue of the same hue: 5.55:1 on white, 5.32:1 on --beige, 4.88:1 on --gray-light. */
+  --link: #0B66CC;
+  /* Footer links: 0.7 gives 5.92:1 on white (the old 0.62 was 4.54:1, 0.04 above the AA floor, and fell under it on any tinted ground). */
+  --faint: rgba(34, 34, 34, 0.7); --faint-hover: rgba(34, 34, 34, 0.8);
   /* Quiet text that people read and act on (labels, table heads, placeholders, notes): 4.86:1 on the grey chip, 5.5:1 on white. --body-muted (3.8:1) is for nothing that has to be read. */
   --muted-ink: #6B6866;
-  --link-line: rgba(26, 136, 248, 0.3); --ink-wash: rgba(52, 52, 51, 0.1);
+  /* The underline is what marks a link in running text (link blue vs body ink is only 1.70:1), so it must itself reach 3:1: 0.75 gives 3.19:1 or better on every ground it sits on (the old 0.3 was 1.57:1). */
+  --link-line: rgba(11, 102, 204, 0.75); --ink-wash: rgba(52, 52, 51, 0.1);
   --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10' fill='none'%3E%3Cpath d='M1.5 3.5L5 7L8.5 3.5' stroke='%23343433' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   --text-valid: #007A37; --text-invalid: #C42B2B; --text-warning: #7A5F00;
   --overlay: rgba(18, 18, 18, 0.4); --scroll-thumb: rgba(0, 0, 0, 0.15);

@@ -1,11 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  CREATE_OFF_ON_MAINNET,
   STEP_ORDER,
   TEMP_KEY_GONE_AT,
   adminKeyFromBackupText,
   adminKeyFromHash,
   begin,
+  createVaultGuard,
   fail,
   finalKeysError,
   finish,
@@ -146,4 +148,37 @@ test("APP-C1: step captions are read from the real step list, so the count on sc
 test("APP-C1: 'keep this tab open until step N is done' names the step that deletes the temporary key", () => {
   assert.equal(STEP_ORDER[TEMP_KEY_GONE_AT - 1], "cleanup");
   assert.equal(TEMP_KEY_GONE_AT, 3);
+});
+
+test("APP-G1: Create vault is on for testnet", () => {
+  assert.deepEqual(createVaultGuard("testnet"), { enabled: true });
+});
+
+test("APP-G1: Create vault is off for mainnet, with a sentence that says why and where it does work", () => {
+  const g = createVaultGuard("mainnet");
+  assert.equal(g.enabled, false);
+  if (!g.enabled) {
+    assert.equal(g.reason, CREATE_OFF_ON_MAINNET);
+    assert.match(g.reason, /mainnet/);
+    assert.match(g.reason, /gates G1 and G3/);
+    assert.match(g.reason, /testnet only/);
+  }
+});
+
+test("APP-G1: the guard is a function of the network alone, so a stray env flag cannot turn mainnet on", () => {
+  const before = process.env.NEXT_PUBLIC_VAULT_CREATE;
+  process.env.NEXT_PUBLIC_VAULT_CREATE = "1";
+  try {
+    assert.equal(createVaultGuard("mainnet").enabled, false, "the old NEXT_PUBLIC_VAULT_CREATE=1 no longer opens mainnet");
+  } finally {
+    if (before === undefined) delete process.env.NEXT_PUBLIC_VAULT_CREATE;
+    else process.env.NEXT_PUBLIC_VAULT_CREATE = before;
+  }
+});
+
+test("APP-G1: any network but an explicit testnet is refused (nothing is inferred)", () => {
+  // The app only ever passes "mainnet" | "testnet", but a value that slipped through must not enable the flow.
+  for (const odd of ["", "Testnet", "localnet", undefined, null]) {
+    assert.equal(createVaultGuard(odd as never).enabled, false, `refused for ${JSON.stringify(odd)}`);
+  }
 });

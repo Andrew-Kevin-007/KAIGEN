@@ -4,8 +4,11 @@ import { useEffect, useRef, useState } from "react";
 import { Modal } from "@/components/Modal";
 import { describedBy } from "@/lib/aria";
 import { BackupError, decryptSeed, downloadBackup, encryptSeed, type BackupFile } from "@/lib/backup";
+import { NETWORK } from "@/lib/network";
 import { MIN_PASSPHRASE, checkPassphrase } from "@/lib/passphrase";
-import { VAULT_CREATE_ENABLED } from "@/lib/vault-create";
+import { createVaultGuard } from "@/lib/vault-create";
+
+const createGuard = createVaultGuard(NETWORK);
 
 type Step = 0 | 1 | 2 | 3;
 const STEPS = ["Key", "Backup", "Verify", "Vault"];
@@ -293,7 +296,7 @@ export function MigrateClient() {
                 Create the vault
               </h2>
               <p className="body">Your backup is verified.</p>
-              {VAULT_CREATE_ENABLED ? (
+              {createGuard.enabled ? (
                 <>
                   <p className="body">
                     The vault is created from your wallet on its own page, so the wallet never runs next to your key. Only the public key goes in the link; the secret is not in it.
@@ -308,8 +311,8 @@ export function MigrateClient() {
               ) : (
                 <>
                   <div className="callout" data-tone="warning">
-                    <strong>Not wired up yet.</strong>
-                    <span>Creating the vault needs the on-chain checks for post-quantum keys (gates G1 and G3) to pass on mainnet first, so this step is switched off instead of pretending.</span>
+                    <strong>Not available on mainnet yet.</strong>
+                    <span>{createGuard.reason}</span>
                   </div>
                   <div className="actions">
                     <button type="button" className="btn" disabled>

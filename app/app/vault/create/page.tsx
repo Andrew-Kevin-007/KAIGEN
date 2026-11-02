@@ -2,16 +2,18 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Modal } from "@/components/Modal";
+import { NotDeployed } from "@/components/NotDeployed";
 import { WalletError } from "@/components/WalletError";
 import { describedBy } from "@/lib/aria";
+import { DEPLOYMENTS } from "@/lib/config";
 import { accessKeys } from "@/lib/near";
 import { NETWORK } from "@/lib/network";
 import {
   TEMP_KEY_GONE_AT,
-  VAULT_CREATE_ENABLED,
   adminKeyFromBackupText,
   adminKeyFromHash,
   begin,
+  createVaultGuard,
   fail,
   finalKeysError,
   finish,
@@ -43,6 +45,8 @@ const STATUS_TEXT: Record<StepStatus, string> = { todo: "Waiting", running: "Run
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+const createGuard = createVaultGuard(NETWORK);
+
 // The three panels on this page. Their captions are counted from this list, and the steps inside the last one from the real step list.
 const PARTS = ["admin", "account", "steps"] as const;
 const partCaption = (part: (typeof PARTS)[number]) => placeCaption("Part", PARTS.indexOf(part), PARTS.length);
@@ -57,14 +61,21 @@ export default function CreateVaultPage() {
           Your wallet creates the account. A temporary key made in this tab adds your post-quantum admin key and then deletes itself, so the vault ends up with that one key.
         </p>
       </header>
-      {VAULT_CREATE_ENABLED ? (
-        <Flow />
+      {createGuard.enabled ? (
+        <>
+          {!DEPLOYMENTS.mamoriReference && (
+            <div style={{ marginBottom: "1.5rem" }}>
+              <NotDeployed>
+                The audited Mamori contract is not deployed yet on {NETWORK}, so there is no code to put on the account afterwards. You can still create the account.
+              </NotDeployed>
+            </div>
+          )}
+          <Flow />
+        </>
       ) : (
         <div className="callout" data-tone="warning">
-          <strong>Not wired up yet.</strong>
-          <span>
-            Creating the vault needs the on-chain checks for post-quantum keys (gates G1 and G3) to pass on mainnet first, so this is switched off instead of pretending.
-          </span>
+          <strong>Not available on mainnet yet.</strong>
+          <span>{createGuard.reason}</span>
         </div>
       )}
       </div>
@@ -172,6 +183,8 @@ function Flow() {
   }
 
   async function runStep(id: StepId, vaultId: string): Promise<string | null> {
+    // The page only renders this flow when the guard allows it; checked again here so no step can move funds on mainnet.
+    if (!createGuard.enabled) throw new Error(createGuard.reason);
     if (!admin) throw new Error("Choose your admin key first.");
     const api = await import("@fastnear/api");
     if (id === "create") {

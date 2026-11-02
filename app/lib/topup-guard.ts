@@ -1,6 +1,8 @@
 // The checks a top-up must pass before the server hands out a deposit address. Funds sent to Kizashi can never
 // be recovered once its keys are gone, and a top-up that Kizashi does not count is simply lost, so every check
 // fails closed: a refusal, never a guess. Nothing here talks to 1Click.
+import { DEPLOYMENTS } from "./config.ts";
+import type { Deployments } from "./deployments.ts";
 import { chainId, isEra, view, viewAccount, type Bounty } from "./near.ts";
 import { networkProblem, type Network } from "./network.ts";
 
@@ -22,11 +24,15 @@ export interface GuardConfig {
   expectedCodeHash: string;
 }
 
-export function guardConfigFromEnv(env: Record<string, string | undefined> = process.env): GuardConfig {
+/** The network and the recipient come from the deployment settings (lib/config.ts); the two switches stay in the server's environment. */
+export function guardConfigFromEnv(
+  env: Record<string, string | undefined> = process.env,
+  deployments: Pick<Deployments, "network" | "kizashi"> = DEPLOYMENTS,
+): GuardConfig {
   return {
-    network: env.NEXT_PUBLIC_NETWORK === "testnet" ? "testnet" : "mainnet",
+    network: deployments.network,
     allowTestnet: env.TOPUP_ALLOW_TESTNET === "1",
-    recipient: env.NEXT_PUBLIC_KIZASHI_ID ?? "",
+    recipient: deployments.kizashi ?? "",
     expectedCodeHash: env.KIZASHI_CODE_HASH ?? "",
   };
 }

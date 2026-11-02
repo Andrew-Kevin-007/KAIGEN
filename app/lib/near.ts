@@ -1,8 +1,12 @@
 // Read-only NEAR access: view calls over JSON-RPC. No keys, no signing, no third-party SDK.
+import { DEPLOYMENTS } from "./config.ts";
+import { NETWORK, networkProblem } from "./network.ts";
 
-export const RPC_URL = process.env.NEXT_PUBLIC_RPC_URL ?? "https://rpc.mainnet.near.org";
-export const KIZASHI_ID = process.env.NEXT_PUBLIC_KIZASHI_ID ?? "";
-export const DRILL_KIZASHI_ID = process.env.NEXT_PUBLIC_DRILL_KIZASHI_ID ?? "";
+export const RPC_URL = DEPLOYMENTS.rpc;
+/** Empty while the production Kizashi is not deployed. */
+export const KIZASHI_ID = DEPLOYMENTS.kizashi ?? "";
+/** Empty while there is no drill Kizashi. */
+export const DRILL_KIZASHI_ID = DEPLOYMENTS.drillKizashi ?? "";
 
 export type Era = "Calm" | "Warning" | "Kaigen";
 
@@ -79,6 +83,11 @@ export const viewAccount = (accountId: string, signal?: AbortSignal) =>
 /** The chain id the RPC serves ("mainnet", "testnet"), so a page can tell which network it is really reading. */
 export async function chainId(signal?: AbortSignal): Promise<string> {
   return (await rpc<{ chain_id: string }>("status", [], signal)).chain_id;
+}
+
+/** A sentence when the RPC does not serve the network this deployment is set up for, or null when it does. Checked before a page shows anything it read. */
+export async function rpcNetworkProblem(signal?: AbortSignal): Promise<string | null> {
+  return networkProblem(NETWORK, await chainId(signal));
 }
 
 export interface AccessKey {
