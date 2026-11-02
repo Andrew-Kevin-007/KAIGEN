@@ -41,7 +41,7 @@ A NEAR account keeps accepting a key after that key is broken or stolen, and an 
 | Why not just rotate to ML-DSA keys? | Rotation is the right long-term step, and KAIGEN uses an ML-DSA-65 key as the admin key. It does not cover hot keys: an ML-DSA key held by an agent can still be hijacked, so the caps and the burn are still needed. Rotation also needs someone to notice and act. KAIGEN's omen path does not need a person online. The ML-DSA admin flow is proven on testnet protocol 88 only; mainnet protocol 86 has not run it (gate G1). |
 | What is an omen? | An optional public key that nobody holds. Whoever breaks it can sign a claim; the contract verifies the signature and moves the era. It is a circuit breaker for a break someone discloses. It is not a quantum early warning. |
 | What does an omen not do? | It does not catch a silent attacker who never publishes a break. It does not catch a first-to-break state actor who keeps the break private. An omen key is not a canary: nothing says it breaks before the keys it sits beside. An omen proves a curve can be broken, not who broke it or how widely. |
-| What stops a hijacked hot key? | Per key: a 24 h rolling cap on direct sends, an allowlist, a queue for larger sends, and a strike count that deletes the key (see Fairness and Integrity Safeguards). |
+| What stops a hijacked hot key? | Per token and account-wide (not per key): a 24 h rolling cap on direct sends, an allowlist, a queue for larger sends, and a strike count that deletes the key (see Fairness and Integrity Safeguards). |
 | Is a refusal a failure? | No. A refusal returns a recorded result and counts as a strike. The key burns at the strike limit (default 3 inside 24 h). |
 
 ---
