@@ -23,6 +23,23 @@ const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export const NO_VAULTS = "no vaults configured: the keeper is watching nothing, so a clean pass would mean nothing (set `vaults` in deployments.json)";
 
 /**
+ * Keys the vault has marked for removal but not yet deleted (`revoked_keys`, added with Mamori's key-removal fix).
+ * A vault built before that view has no such list: only "method not found" reads as empty; any other failure stops the pass.
+ */
+async function revokedKeys(rpc, vault) {
+  let revoked;
+  try {
+    revoked = await rpc.view(vault, "revoked_keys");
+  } catch (e) {
+    if (/MethodNotFound|MethodResolveError|method .*not found/i.test(String(e.message ?? e))) return [];
+    throw e;
+  }
+  if (revoked === undefined) return [];
+  if (!Array.isArray(revoked)) throw new Error(`${vault} did not answer revoked_keys with a list`);
+  return revoked;
+}
+
+/**
  * Why a vault still needs a trip at `target`, or null when it is up to date. Trusts the chain, not the
  * contract's own list: a failed key deletion can leave a live function-call key that the recorded set no
  * longer mentions.
@@ -36,8 +53,10 @@ async function stillNeedsTrip(rpc, vault, target) {
   if (!Array.isArray(daily)) throw new Error(`${vault} did not answer daily_keys with a list`);
   const intents = await rpc.view(vault, "intents_keys");
   if (!Array.isArray(intents)) throw new Error(`${vault} did not answer intents_keys with a list`);
+  const revoked = await revokedKeys(rpc, vault);
   if (daily.length > 0) return "it still records daily keys";
   if (intents.length > 0) return "it still records intents keys";
+  if (revoked.length > 0) return "it still records revoked keys";
   if (keys !== null && classifyKeys(keys).functionCall.length > 0) return "a function-call key is still live on the account";
   return null;
 }

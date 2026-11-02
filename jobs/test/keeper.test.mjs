@@ -149,3 +149,20 @@ test("keeper: owed payouts that cannot be read are reported on the pass, and the
   assert.equal(r.results[0].action, "up to date");
   assert.match(r.error, /owed payouts/);
 });
+
+// ---- revoked keys (Mamori's key-removal fix adds the revoked_keys view) ----
+
+test("keeper: a lockdown is not done while revoked_keys is non-empty, and an older vault without the view still confirms", async () => {
+  const accounts = {
+    k: { views: { era: "Kaigen", omens: [] } },
+    v: { views: { era: "Kaigen", daily_keys: [], intents_keys: [], revoked_keys: ["ed25519:R"] }, keys: [PQ] },
+  };
+  let trips = 0;
+  const r = await tripOnce({ rpc: chain(accounts), kizashi: "k", vaults: ["v"], sleep: noSleep, sendTrip: async () => ((accounts.v.views.revoked_keys = trips ? [] : ["ed25519:R"]), `h${++trips}`) });
+  assert.equal(trips, 2, "tripped again while a revoked key was still recorded");
+  assert.equal(r.results[0].action, "tripped");
+  const old = { k: { views: { era: "Kaigen", omens: [] } }, v: { views: { era: "Kaigen", daily_keys: [], intents_keys: [] }, keys: [PQ] } };
+  assert.equal((await tripOnce({ rpc: chain(old), kizashi: "k", vaults: ["v"], sleep: noSleep, sendTrip: async () => "h" })).results[0].action, "up to date");
+  const bad = { k: old.k, v: { views: { era: "Kaigen", daily_keys: [], intents_keys: [], revoked_keys: "x" }, keys: [PQ] } };
+  assert.equal((await tripOnce({ rpc: chain(bad), kizashi: "k", vaults: ["v"], sleep: noSleep, sendTrip: async () => "h" })).results[0].action, "error");
+});
