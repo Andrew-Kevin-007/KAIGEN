@@ -1,0 +1,24 @@
+[package]
+name = "kaigen-integration"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "KAIGEN v3 M1: on-chain (near-workspaces sandbox) tests of Mamori's key burn."
+
+# Deliberately NOT a member of the contracts workspace in ../Cargo.toml. The empty table below makes this
+# its own workspace root, so `cargo test --workspace` at the repo root neither builds nor depends on
+# near-workspaces, and nothing here touches the root Cargo.lock. The sandbox needs a Linux or macOS host
+# (nearcore has no Windows build): run it in WSL, see the header of tests/burn_key.rs.
+[workspace]
+
+[dev-dependencies]
+# Without the default `install` feature the build script does not download a sandbox binary (it would fail on
+# Windows). A binary is then fetched at run time only when a test spawns its own node (Linux, macOS).
+near-workspaces = { version = "0.24", default-features = false, features = ["rustls"] }
+near-crypto = "0.38"
+near-primitives = "0.38"
+borsh = "1"
+base64 = "0.22"
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
