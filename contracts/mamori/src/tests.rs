@@ -647,6 +647,26 @@ fn a_burned_key_cannot_be_added_again_until_its_deletion_is_confirmed() {
     assert_eq!(m.daily_keys(), vec![key(1)]);
 }
 
+/// M4a: the refusal happens before anything is recorded or scheduled. An AddKey that went out next to the pending
+/// DeleteKey is the race the rule exists to prevent, so the proof is on the receipts, not only on the return.
+#[test]
+fn a_refused_add_of_a_revoked_key_records_nothing_schedules_no_addkey_and_says_why() {
+    let mut m = setup();
+    as_admin(1_100 * SEC);
+    let _ = m.remove_daily_key(key(1));
+    as_admin(1_101 * SEC);
+    let reason = panics_with(|| {
+        let _ = m.add_daily_key(key(1), None);
+    });
+    assert_eq!(reason, "revoked key: its deletion is not confirmed yet");
+    assert!(m.daily_keys().is_empty());
+    assert_eq!(m.revoked_keys(), vec![key(1)], "still owed its deletion, recorded once");
+    let r = receipts_text();
+    assert!(!r.contains("AddKey"), "no AddKey may be scheduled next to the pending DeleteKey: {r}");
+    assert!(event("add_daily_key").is_none(), "no add event for a refused add");
+    assert_books_are_consistent(&m);
+}
+
 #[test]
 fn another_key_can_be_added_while_a_revoked_one_waits() {
     let mut m = setup();
@@ -2439,3 +2459,13 @@ fn the_state_layout_is_pinned_so_a_change_cannot_brick_a_deployed_vault_unnotice
 // ---- M3: the loss bound as a property (tests/loss_bound.rs) -----------------------------------------
 
 mod loss_bound;
+
+// ---- M4b: the admin surface and the ML-DSA admin key (tests/admin_surface.rs) -----------------------------
+
+mod admin_surface;
+
+// ---- M4c, M5: attest() (attest_check.rs), check and reason codes (check_view.rs), events (events.rs) --------
+
+mod attest_check;
+mod check_view;
+mod events;

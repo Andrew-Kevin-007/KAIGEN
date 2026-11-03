@@ -196,7 +196,7 @@ Refusal and burn, excerpt from `contracts/mamori/src/lib.rs` (indentation trimme
 
 ```rust
 record.count += 1;
-emit("refused", serde_json::json!({ "public_key": key, "reason": reason, "strikes": record.count, "counted": true }));
+self.emit_refused(&key, reason, record.count, true, &call); // logs public_key, reason, reason_code, strikes, counted, token, amount, to, spent_after
 let burned = record.count >= self.max_strikes;
 if burned {
     self.strikes.remove(key);

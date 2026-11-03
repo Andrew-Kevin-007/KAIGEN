@@ -38,6 +38,10 @@ const BELOW_MIN_REASON: &str = "below the minimum send";
 const DEFAULT_ALLOWANCE: NearToken = NearToken::from_millinear(250);
 const DAILY_METHODS: &str = "send_small,request_withdraw";
 const INTENTS: &str = "intents.near";
+/// Shape version of `attest()`'s answer (see `Attestation::attest_version`).
+const ATTEST_VERSION: u32 = 1;
+/// Carried in every `attest()` answer, so a raw reader sees what it is looking at.
+const ATTEST_NOTE: &str = "informational: the state this contract records, not proof about the account. A full-access key can deploy a contract whose attest() says anything. Read the code hash and the key list from RPC (view_account, view_access_key_list).";
 
 const ERA_GAS: Gas = Gas::from_tgas(5);
 const FT_GAS: Gas = Gas::from_tgas(30);
@@ -154,10 +158,160 @@ pub struct ConfigView {
     pub min_send: U128,
 }
 
+/// One recorded daily key in `attest()`.
+#[near(serializers = [json])]
+pub struct KeyAttestation {
+    pub public_key: PublicKey,
+    /// Refusals counted against it in the current window (what `strikes_of` returns).
+    pub strikes: u32,
+}
+
+/// What `attest()` reports: the state this contract RECORDS, for cage-check to compare with the chain. It is
+/// information from the contract's own books, not proof about the account: see `attest`.
+#[near(serializers = [json])]
+pub struct Attestation {
+    /// Shape of this object. Raised when a field is removed or changes meaning; adding a field does not raise it.
+    pub attest_version: u32,
+    /// Always `"mamori"`, so a reader can tell it is not looking at some other contract's `attest`.
+    pub contract: String,
+    /// True in a drill build (`--features drill`): shorter delays are allowed and the era follows Kizashi down.
+    /// A drill build does not keep the loss bound's delay condition (`docs/v3/LOSS-BOUND.md`).
+    pub drill_build: bool,
+    /// The account this contract answered as, for cage-check to compare with the account it asked about.
+    pub account_id: AccountId,
+    pub block_height: U64,
+    /// Block time (ns) the answer is as of.
+    pub block_timestamp: U64,
+    /// Era, caps, delay and strike limit as configured now (NEAR only: per-token caps are read with `token_limit`).
+    pub config: ConfigView,
+    /// The least `delay_secs` a production `init` accepts. Reported so a reader does not hard-code it.
+    pub min_delay_secs: u64,
+    pub allowlist_enforced: bool,
+    pub allowlist_len: u32,
+    /// The daily keys the vault serves, with their strikes. Any function-call key on the account that is not
+    /// listed here is outside the strike and cap accounting.
+    pub daily_keys: Vec<KeyAttestation>,
+    /// Keys recorded on `intents.near`. Each signs there with no cap from this contract.
+    pub intents_keys: Vec<PublicKey>,
+    /// Daily keys the vault stopped serving whose deletion from the account is not confirmed yet.
+    pub revoked_keys: Vec<PublicKey>,
+    /// Withdrawal requests waiting in the queue (expired ones included until purged).
+    pub queue_len: u32,
+    /// Fixed text: what this answer is and is not.
+    pub note: String,
+}
+
 #[near(serializers = [json])]
 pub struct AllowlistView {
     pub enforced: bool,
     pub accounts: Vec<AccountId>,
+}
+
+/// Why a proposed `send_small` goes through, is refused or is rejected. The snake_case name (`code`) is the stable
+/// machine-readable code, in `check`'s answer and in the `reason_code` of the events; the text (`text`) is what
+/// `send_small` has always returned in `SendOutcome::refused` and in panics. Table: docs/v3/ATTEST-CHECK.md.
+#[near(serializers = [json])]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum Reason {
+    /// `send_small` would go through now.
+    Ok,
+    /// Refused, counted: the recipient is not on the enforced allowlist.
+    NotAllowlisted,
+    /// Refused, counted: more than the WHOLE 24 h limit, which no window can ever hold.
+    OverCapTotal,
+    /// Refused, not counted: fits the limit but not what is left of it (the window is account-wide).
+    CapExhausted,
+    /// Refused, not counted: the token has no 24 h limit (NEAR with limit zero too).
+    NoLimit,
+    /// Refused, not counted: a NEAR amount below the minimum send.
+    BelowMinSend,
+    /// Rejected (a panic): the key is not a recorded daily key (never added, removed or burned).
+    NotADailyKey,
+    /// Rejected (a panic): the era is not calm.
+    EraNotCalm,
+    /// Rejected (a panic): a zero amount.
+    ZeroAmount,
+    /// Not a decision about a call: the transfer `send_small` made failed and its spend was given back.
+    TransferFailed,
+}
+
+impl Reason {
+    /// The stable code. Written out rather than taken from serde, and a test ties the two together.
+    pub fn code(self) -> &'static str {
+        match self {
+            Reason::Ok => "ok",
+            Reason::NotAllowlisted => "not_allowlisted",
+            Reason::OverCapTotal => "over_cap_total",
+            Reason::CapExhausted => "cap_exhausted",
+            Reason::NoLimit => "no_limit",
+            Reason::BelowMinSend => "below_min_send",
+            Reason::NotADailyKey => "not_a_daily_key",
+            Reason::EraNotCalm => "era_not_calm",
+            Reason::ZeroAmount => "zero_amount",
+            Reason::TransferFailed => "transfer_failed",
+        }
+    }
+
+    /// The human text, unchanged from before the codes existed (callers and tests match on it).
+    pub fn text(self) -> &'static str {
+        match self {
+            Reason::Ok => "ok",
+            Reason::NotAllowlisted => "recipient is not on the allowlist",
+            Reason::OverCapTotal | Reason::CapExhausted => "over the 24 h limit",
+            Reason::NoLimit => NO_LIMIT_REASON,
+            Reason::BelowMinSend => BELOW_MIN_REASON,
+            Reason::NotADailyKey => "not a recorded daily key",
+            Reason::EraNotCalm => "paused: era is not calm",
+            Reason::ZeroAmount => "amount must be > 0",
+            Reason::TransferFailed => "the transfer failed and was refunded to the daily limit",
+        }
+    }
+}
+
+/// What `send_small` would do with a call, as `check` reports it.
+#[near(serializers = [json])]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum Verdict {
+    /// It would go through.
+    Allow,
+    /// It would be refused: the call succeeds, nothing moves, and it may count as a strike.
+    Refuse,
+    /// It would abort (a panic): nothing is recorded, no strike.
+    Reject,
+}
+
+/// `check`'s answer. Advisory only: see `Mamori::check`.
+#[near(serializers = [json])]
+#[derive(Clone, Debug)]
+pub struct CheckView {
+    pub verdict: Verdict,
+    pub reason: Reason,
+    /// True when `send_small` would count the refusal as a strike against the key.
+    pub counted: bool,
+    /// True when that strike would be the key's last one: the vault would burn (delete) the key.
+    pub would_burn: bool,
+    /// What is left of the asset's 24 h limit now, in its smallest unit (zero for an asset without a limit).
+    pub headroom: U128,
+}
+
+/// The call a refusal is about, carried to the event that logs it.
+struct Attempt<'a> {
+    token: &'a Option<AccountId>,
+    amount: u128,
+    to: &'a AccountId,
+}
+
+/// The decision about one `send_small` call. One function makes it (`judge_send`) and both `send_small` and
+/// `check` use it, so the advice cannot drift from the enforcement.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Judgement {
+    Allow,
+    /// Refused as a recorded outcome; the flag says whether it counts as a strike.
+    Refuse(Reason, bool),
+    /// Aborts the call.
+    Reject(Reason),
 }
 
 #[ext_contract(ext_kizashi)]
@@ -362,7 +516,10 @@ impl Mamori {
         let ids: Vec<u64> = self.queue.keys().copied().collect();
         let cancelled = self.take_from_queue(ids);
         if !cancelled.is_empty() {
-            emit("queue_cancelled", serde_json::json!({ "reason": "cancel_all", "withdrawals": cancelled }));
+            emit(
+                "queue_cancelled",
+                serde_json::json!({ "reason": "cancel_all", "count": cancelled.len(), "withdrawals": cancelled }),
+            );
         }
         cancelled.len() as u32
     }
@@ -394,25 +551,27 @@ impl Mamori {
     /// return type for that method.
     pub fn send_small(&mut self, token: Option<AccountId>, amount: U128, to: AccountId) -> PromiseOrValue<SendOutcome> {
         self.assert_daily_key();
-        require!(self.era == Era::Calm, "paused: era is not calm");
-        require!(amount.0 > 0, "amount must be > 0");
         let key = env::signer_account_pk();
-        if self.allowlist_enforced && !self.allowed.contains(&to) {
-            return PromiseOrValue::Value(self.refuse(&key, "recipient is not on the allowlist"));
-        }
-        if self.limit_for(&token) == 0 {
-            return PromiseOrValue::Value(self.refuse_uncounted(&key, NO_LIMIT_REASON));
-        }
-        if token.is_none() && amount.0 < self.min_send {
-            return PromiseOrValue::Value(self.refuse_uncounted(&key, BELOW_MIN_REASON));
-        }
         let now = env::block_timestamp();
-        if let Err(reason) = self.spend(&token, amount.0, now) {
-            // Above the whole limit it can never fit; otherwise the window is only used up for now.
-            let outcome = if amount.0 > self.limit_for(&token) { self.refuse(&key, reason) } else { self.refuse_uncounted(&key, reason) };
-            return PromiseOrValue::Value(outcome);
+        // The decision is `judge_send`'s, the same one `check` reports. Here it is acted on.
+        match self.judge_send(&key, &token, amount.0, &to, now) {
+            Judgement::Reject(reason) => env::panic_str(reason.text()),
+            Judgement::Refuse(reason, true) => {
+                return PromiseOrValue::Value(self.refuse(&key, reason, &Attempt { token: &token, amount: amount.0, to: &to }))
+            }
+            Judgement::Refuse(reason, false) => {
+                return PromiseOrValue::Value(self.refuse_uncounted(&key, reason, &Attempt { token: &token, amount: amount.0, to: &to }))
+            }
+            Judgement::Allow => {}
         }
-        emit("send_small", serde_json::json!({ "token": token, "amount": amount, "to": to }));
+        self.record_spend(&token, amount.0, now);
+        emit(
+            "send_small",
+            serde_json::json!({
+                "public_key": key, "token": token, "amount": amount, "to": to,
+                "spent_after": U128(self.spent_in_window(&token, now)),
+            }),
+        );
         PromiseOrValue::Promise(transfer(&token, amount.0, to).then(
             Self::ext(env::current_account_id())
                 .with_static_gas(CALLBACK_GAS)
@@ -449,7 +608,7 @@ impl Mamori {
         require!(amount.0 > 0, "amount must be > 0");
         // Expired requests are not in the way: clear them first, so the count and the pending sum below see only
         // live ones and the queue never holds more than `MAX_QUEUE` entries, however long nobody purged it.
-        self.remove_expired();
+        self.remove_expired("request_withdraw");
         let requested_by = env::signer_account_pk();
         let requested_at = env::block_timestamp();
         self.queue_room(&requested_by, &token, amount.0).unwrap_or_else(|reason| env::panic_str(reason));
@@ -498,7 +657,7 @@ impl Mamori {
     /// has not expired is touched. (By the time a request expires, its 24 h of request budget has aged out on its
     /// own, so purging neither gives budget back nor needs to.)
     pub fn purge_expired(&mut self) -> u32 {
-        self.remove_expired()
+        self.remove_expired("purge_expired")
     }
 
     /// Reads `kizashi.era()`. At kaigen: removes recorded keys from `intents.near`, deletes every recorded
@@ -560,7 +719,10 @@ impl Mamori {
         let queued: Vec<u64> = self.queue.keys().copied().collect();
         let discarded = self.take_from_queue(queued);
         if !discarded.is_empty() {
-            emit("queue_discarded", serde_json::json!({ "reason": "lockdown", "withdrawals": discarded }));
+            emit(
+                "queue_discarded",
+                serde_json::json!({ "reason": "lockdown", "count": discarded.len(), "withdrawals": discarded }),
+            );
         }
         let intents: Vec<PublicKey> = self.intents_keys.iter().cloned().collect();
         for k in intents.into_iter().take_while(|_| has_fanout_gas()) {
@@ -604,6 +766,7 @@ impl Mamori {
         }
         // The send failed, so the funds never left: give the spend back. A send folded into a full log has
         // no entry of its own: take it back from the first entry at or after its time, which holds it.
+        let mut refunded = false;
         if let Some(log) = self.window.get_mut(&token) {
             let at = log
                 .iter()
@@ -614,9 +777,18 @@ impl Mamori {
                 if log[i].1 == 0 {
                     log.remove(i);
                 }
+                refunded = true;
             }
         }
-        SendOutcome { sent: false, refused: Some("the transfer failed and was refunded to the daily limit".to_string()), strikes: 0, burned: false }
+        // `refunded` false means no entry held the send any more (it had aged out of the window): nothing to give back.
+        emit(
+            "send_failed",
+            serde_json::json!({
+                "reason_code": Reason::TransferFailed.code(), "token": token, "amount": amount, "refunded": refunded,
+                "spent_after": U128(self.spent_in_window(&token, env::block_timestamp())),
+            }),
+        );
+        SendOutcome { sent: false, refused: Some(Reason::TransferFailed.text().to_string()), strikes: 0, burned: false }
     }
 
     #[private]
@@ -629,10 +801,27 @@ impl Mamori {
         // requests were cancelled on purpose), it expired meanwhile (a stale request does not come back), or
         // newer requests took the slot or the pending headroom. Expired entries do not count as taking either.
         let expired = env::block_timestamp() >= withdrawal.expires_at.0;
-        self.remove_expired();
+        self.remove_expired("execute_failed");
         let room = self.queue_room(&withdrawal.requested_by, &withdrawal.token, withdrawal.amount.0).is_ok();
-        if self.era == Era::Kaigen || expired || !room || !self.daily_keys.contains(&withdrawal.requested_by) {
-            emit("execute_dropped", serde_json::json!({ "id": id, "to": withdrawal.to, "token": withdrawal.token, "amount": withdrawal.amount }));
+        // Why it is not coming back, in the order the reasons are weighed: the first that applies is the one logged.
+        let dropped_because = if self.era == Era::Kaigen {
+            Some("lockdown")
+        } else if expired {
+            Some("expired")
+        } else if !self.daily_keys.contains(&withdrawal.requested_by) {
+            Some("key_gone")
+        } else if !room {
+            Some("no_room")
+        } else {
+            None
+        };
+        if let Some(reason) = dropped_because {
+            emit(
+                "execute_dropped",
+                serde_json::json!({
+                    "id": id, "reason": reason, "to": withdrawal.to, "token": withdrawal.token, "amount": withdrawal.amount
+                }),
+            );
         } else {
             self.queue.insert(id.0, withdrawal);
         }
@@ -698,6 +887,62 @@ impl Mamori {
             pending_limit: self.pending_limit_for(&None).into(),
             min_send: self.min_send.into(),
         }
+    }
+
+    /// Informational. What this contract RECORDS about itself: its configuration, the daily keys it serves with
+    /// their strikes, the keys it recorded on `intents.near`, and the revoked keys whose deletion is not confirmed.
+    /// For cage-check to compare with the chain; it is never the source of truth about the account.
+    ///
+    /// It does NOT return the code hash or the account's key list, and nothing here can: the contract never reads
+    /// its admin key (see the module note), and the host gives a contract no way to read its own code hash or
+    /// the keys on its account (no such function in `near-sys` 0.4.0). A full-access key can also deploy code
+    /// whose `attest()` returns whatever it likes. So the code hash and the key list come from RPC
+    /// (`view_account`, `view_access_key_list`), and this answer is a cross-check, not a proof.
+    pub fn attest(&self) -> Attestation {
+        Attestation {
+            attest_version: ATTEST_VERSION,
+            contract: "mamori".to_string(),
+            drill_build: cfg!(feature = "drill"),
+            account_id: env::current_account_id(),
+            block_height: U64(env::block_height()),
+            block_timestamp: U64(env::block_timestamp()),
+            config: self.config(),
+            min_delay_secs: MIN_DELAY_SECS,
+            allowlist_enforced: self.allowlist_enforced,
+            allowlist_len: self.allowed.len(),
+            daily_keys: self
+                .daily_keys
+                .iter()
+                .map(|k| KeyAttestation { public_key: k.clone(), strikes: self.strikes_of(k.clone()) })
+                .collect(),
+            intents_keys: self.intents_keys.iter().cloned().collect(),
+            revoked_keys: self.revoked_keys.iter().cloned().collect(),
+            queue_len: self.queue.len(),
+            note: ATTEST_NOTE.to_string(),
+        }
+    }
+
+    /// ADVISORY ONLY. What `send_small(asset, amount, to)` would do if `key` called it in the block this view runs
+    /// in: go through, be refused (and whether that would be a strike, and the key's last), or abort. A view has
+    /// no signer, so the key is a parameter. `asset` is `send_small`'s `token` (`None` is NEAR).
+    ///
+    /// It is not a promise and not a control. The real enforcement is in `send_small` and `execute`, which decide
+    /// again when they run, on the state of that block: another call can use the cap up between this view and the
+    /// send. It uses the same decision function as `send_small`, so it is right for the state it reads, but it
+    /// reads state that can change. It does not model `request_withdraw` (its refusals are panics) or `execute`.
+    ///
+    /// It also hands anyone, a hijacked key included, the exact headroom for free, so a caller that stays inside it
+    /// is never refused and never struck: the refusal counter catches only a clumsy attacker (ARCHITECTURE.md 2.7).
+    pub fn check(&self, key: PublicKey, asset: Option<AccountId>, amount: U128, to: AccountId) -> CheckView {
+        let now = env::block_timestamp();
+        let (verdict, reason, counted) = match self.judge_send(&key, &asset, amount.0, &to, now) {
+            Judgement::Allow => (Verdict::Allow, Reason::Ok, false),
+            Judgement::Refuse(reason, counted) => (Verdict::Refuse, reason, counted),
+            Judgement::Reject(reason) => (Verdict::Reject, reason, false),
+        };
+        // The same arithmetic `refuse` ends with: this strike is the last when it reaches `max_strikes`.
+        let would_burn = counted && self.open_strikes(&key, now).count.saturating_add(1) >= self.max_strikes;
+        CheckView { verdict, reason, counted, would_burn, headroom: self.headroom(&asset, now).into() }
     }
 
     pub fn daily_keys(&self) -> Vec<PublicKey> {
@@ -771,32 +1016,60 @@ impl Mamori {
         }
     }
 
-    /// Rolling 24 h cap: the sum of sends in the last 24 h plus this one must stay within the limit.
-    fn spend(&mut self, token: &Option<AccountId>, amount: u128, now: u64) -> Result<(), &'static str> {
-        let limit = self.limit_for(token);
-        if Self::add_to_window(&mut self.window, token, amount, now, limit) {
-            Ok(())
-        } else {
-            Err("over the 24 h limit")
+    /// What `send_small` does with this call, decided without changing anything. The order is the order the
+    /// checks have always had: the key, the era, the amount, the allowlist, the limit, the minimum, the window.
+    /// `key` is the signer (a view has none, so `check` passes it in).
+    fn judge_send(&self, key: &PublicKey, token: &Option<AccountId>, amount: u128, to: &AccountId, now: u64) -> Judgement {
+        if !self.daily_keys.contains(key) {
+            return Judgement::Reject(Reason::NotADailyKey);
         }
+        if self.era != Era::Calm {
+            return Judgement::Reject(Reason::EraNotCalm);
+        }
+        if amount == 0 {
+            return Judgement::Reject(Reason::ZeroAmount);
+        }
+        if self.allowlist_enforced && !self.allowed.contains(to) {
+            return Judgement::Refuse(Reason::NotAllowlisted, true);
+        }
+        let limit = self.limit_for(token);
+        if limit == 0 {
+            return Judgement::Refuse(Reason::NoLimit, false);
+        }
+        if token.is_none() && amount < self.min_send {
+            return Judgement::Refuse(Reason::BelowMinSend, false);
+        }
+        if !self.fits_window(token, amount, now) {
+            // Above the whole limit it can never fit; otherwise the window is only used up for now.
+            return if amount > limit {
+                Judgement::Refuse(Reason::OverCapTotal, true)
+            } else {
+                Judgement::Refuse(Reason::CapExhausted, false)
+            };
+        }
+        Judgement::Allow
     }
 
-    /// Adds `amount` to the token's log of (time, amount) and returns true when the last 24 h plus it stay
-    /// within `limit`. Otherwise nothing is stored.
-    fn add_to_window<K: BorshSerialize + Ord + Clone>(
-        windows: &mut LookupMap<K, Vec<(u64, u128)>>,
-        key: &K,
-        amount: u128,
-        now: u64,
-        limit: u128,
-    ) -> bool {
-        let mut log = Self::live_log(windows, key, now);
-        if !Self::fits_in(&log, amount, limit) {
-            return false;
-        }
+    /// Rolling 24 h cap: whether the sum of sends in the last 24 h plus this one stays within the limit.
+    fn fits_window(&self, token: &Option<AccountId>, amount: u128, now: u64) -> bool {
+        Self::fits_in(&Self::live_log(&self.window, token, now), amount, self.limit_for(token))
+    }
+
+    /// What is left of the token's 24 h limit.
+    fn headroom(&self, token: &Option<AccountId>, now: u64) -> u128 {
+        self.limit_for(token).saturating_sub(self.spent_in_window(token, now))
+    }
+
+    /// What `send_small` has sent of the token in the 24 h before `now` (what `spent_24h` shows).
+    fn spent_in_window(&self, token: &Option<AccountId>, now: u64) -> u128 {
+        Self::live_log(&self.window, token, now).iter().map(|(_, a)| a).sum()
+    }
+
+    /// Adds a send to the token's log of (time, amount). The caller has just judged that it fits.
+    fn record_spend(&mut self, token: &Option<AccountId>, amount: u128, now: u64) {
+        let mut log = Self::live_log(&self.window, token, now);
         Self::push_amount(&mut log, amount, now);
-        windows.insert(key.clone(), log);
-        true
+        self.window.insert(token.clone(), log);
     }
 
     /// What `windows` holds under `key` that is still inside the 24 h before `now`.
@@ -898,13 +1171,18 @@ impl Mamori {
     }
 
     /// Removes the expired requests among the first `PURGE_SCAN_LIMIT` entries, logs them and returns how many.
-    fn remove_expired(&mut self) -> u32 {
+    /// `trigger` says which call cleared them (`purge_expired`, `request_withdraw`, or `execute_failed` for the
+    /// failed-execute callback), so the log shows whether anyone tidied up or a new request did.
+    fn remove_expired(&mut self, trigger: &str) -> u32 {
         let now = env::block_timestamp();
         let ids: Vec<u64> =
             self.queue.iter().take(PURGE_SCAN_LIMIT).filter(|(_, w)| now >= w.expires_at.0).map(|(id, _)| *id).collect();
         let expired = self.take_from_queue(ids);
         if !expired.is_empty() {
-            emit("queue_expired", serde_json::json!({ "withdrawals": expired }));
+            emit(
+                "queue_expired",
+                serde_json::json!({ "reason": "expired", "trigger": trigger, "count": expired.len(), "withdrawals": expired }),
+            );
         }
         expired.len() as u32
     }
@@ -927,7 +1205,10 @@ impl Mamori {
         let ids: Vec<u64> = self.queue.iter().filter(|(_, w)| &w.requested_by == key).map(|(id, _)| *id).collect();
         let cancelled = self.take_from_queue(ids);
         if !cancelled.is_empty() {
-            emit("queue_cancelled", serde_json::json!({ "public_key": key, "reason": reason, "withdrawals": cancelled }));
+            emit(
+                "queue_cancelled",
+                serde_json::json!({ "public_key": key, "reason": reason, "count": cancelled.len(), "withdrawals": cancelled }),
+            );
         }
     }
 
@@ -945,24 +1226,43 @@ impl Mamori {
             .then(Self::ext(me).with_static_gas(SMALL_CALLBACK_GAS).on_revoked_key_deleted(key.clone()))
     }
 
+    /// The `refused` event. `reason` is the text callers have always seen; `reason_code` is the stable code
+    /// (docs/v3/ATTEST-CHECK.md). It names the call and says what the window holds, so the log alone shows what was
+    /// asked, why it was refused and where the cap stood. Nothing moved, so `spent_after` is what was spent already.
+    fn emit_refused(&self, key: &PublicKey, reason: Reason, strikes: u32, counted: bool, call: &Attempt) {
+        emit(
+            "refused",
+            serde_json::json!({
+                "public_key": key, "reason": reason.text(), "reason_code": reason.code(), "strikes": strikes, "counted": counted,
+                "token": call.token, "amount": U128(call.amount), "to": call.to,
+                "spent_after": U128(self.spent_in_window(call.token, env::block_timestamp())),
+            }),
+        );
+    }
+
     /// A refusal that is not the key's fault (see `send_small`): reported, but not counted.
-    fn refuse_uncounted(&self, key: &PublicKey, reason: &str) -> SendOutcome {
+    fn refuse_uncounted(&self, key: &PublicKey, reason: Reason, call: &Attempt) -> SendOutcome {
         let strikes = self.strikes_of(key.clone());
-        emit("refused", serde_json::json!({ "public_key": key, "reason": reason, "strikes": strikes, "counted": false }));
-        SendOutcome { sent: false, refused: Some(reason.to_string()), strikes, burned: false }
+        self.emit_refused(key, reason, strikes, false, call);
+        SendOutcome { sent: false, refused: Some(reason.text().to_string()), strikes, burned: false }
+    }
+
+    /// The key's strike record as the next refusal builds on it: a key with no record, or whose window has run
+    /// out, starts a fresh window at `now`.
+    fn open_strikes(&self, key: &PublicKey, now: u64) -> Strikes {
+        match self.strikes.get(key) {
+            Some(r) if now.saturating_sub(r.since) <= DAY_NS => *r,
+            _ => Strikes { count: 0, since: now },
+        }
     }
 
     /// Records a refusal against `key`. At `max_strikes` inside the window the key is removed from the
     /// recorded set (so the contract stops serving it at once) and deleted from the account.
-    fn refuse(&mut self, key: &PublicKey, reason: &str) -> SendOutcome {
+    fn refuse(&mut self, key: &PublicKey, reason: Reason, call: &Attempt) -> SendOutcome {
         let now = env::block_timestamp();
-        // A key with no record, or whose window has run out, starts a fresh window at this refusal.
-        let mut record = match self.strikes.get(key) {
-            Some(r) if now.saturating_sub(r.since) <= DAY_NS => *r,
-            _ => Strikes { count: 0, since: now },
-        };
+        let mut record = self.open_strikes(key, now);
         record.count += 1;
-        emit("refused", serde_json::json!({ "public_key": key, "reason": reason, "strikes": record.count, "counted": true }));
+        self.emit_refused(key, reason, record.count, true, call);
         let burned = record.count >= self.max_strikes;
         if burned {
             self.strikes.remove(key);
@@ -972,11 +1272,17 @@ impl Mamori {
             // at once whether or not the delete lands; `revoked_keys` keeps it on record until the account
             // confirms the delete, so a failed one is retried at kaigen rather than forgotten.
             let _ = self.delete_revoked_key(key);
-            emit("key_burned", serde_json::json!({ "public_key": key, "reason": reason }));
+            emit(
+                "key_burned",
+                serde_json::json!({
+                    "public_key": key, "reason": reason.text(), "reason_code": reason.code(),
+                    "strikes": record.count, "max_strikes": self.max_strikes,
+                }),
+            );
         } else {
             self.strikes.insert(key.clone(), record);
         }
-        SendOutcome { sent: false, refused: Some(reason.to_string()), strikes: record.count, burned }
+        SendOutcome { sent: false, refused: Some(reason.text().to_string()), strikes: record.count, burned }
     }
 
     fn unlocks_at(&self, w: &Withdrawal) -> u64 {
