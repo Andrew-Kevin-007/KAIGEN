@@ -10,6 +10,20 @@
 // of these hold" in docs/v3/ARCHITECTURE.md section 2.8: ARCH-2.8-1 .. ARCH-2.8-8, in that order. LOSS-BOUND.md
 // derives the same list as assumptions A1 (rows 1, 2, 6), A2 (row 7) and A3 (row 3).
 //
+// attest() (docs/v3/ATTEST-CHECK.md) is read as a cross-check and can only ADD red or unchecked, never turn either
+// green: a full-access key can deploy an attest() that lies, so the eight rows still stand on RPC (and, for rows 6
+// and 7, on the vault's own views). It adds evidence to two of the eight rows, and two rows of its own that the
+// ARCHITECTURE.md table has no row for. Those two are NOT part of the doc's eight and are named ATTEST-1 and
+// ATTEST-2 so nobody reads them as such:
+//   ARCH-2.8-6  also red for a function-call key on the account that attest().daily_keys does not record
+//   ARCH-2.8-7  also red for any key in attest().intents_keys
+//   ATTEST-1    attest() agrees with the account and with the vault's own views: it has the shape of section 2.1,
+//               answered as the account asked about, and its config, daily_keys, intents_keys and revoked_keys equal
+//               what config(), daily_keys(), intents_keys() and revoked_keys() return at the same block
+//   ATTEST-2    the vault is a production build: attest().drill_build is false and config.delay_secs is not under
+//               min_delay_secs (docs/v3/LOSS-BOUND.md E4: a delay under a day breaks the cap bound)
+// With no attest() (a v2 build) ATTEST-1 and ATTEST-2 are UNKNOWN, so such a vault is never GREEN (exit 3).
+//
 // Exit: 0 all GREEN, 1 at least one RED, 3 nothing RED but something could not be checked (not a clean bill, the
 // same meaning as `watch`), 2 bad usage (bin.mjs).
 import fs from "node:fs";
@@ -32,13 +46,17 @@ export const IDS = {
   unrecorded: "ARCH-2.8-6",
   intentsKey: "ARCH-2.8-7",
   codeHash: "ARCH-2.8-8",
+  // Not rows of the ARCHITECTURE.md table: what attest() brings that the table has no row for.
+  attestAgrees: "ATTEST-1",
+  productionBuild: "ATTEST-2",
 };
 
 /** What this check cannot see; printed with every report so a GREEN is not read as more than it is. */
 export const LIMITS = [
   "point in time: one final block; a key added after it is not seen",
   "a key added on intents.near without register_intents_key is not visible here (only recorded intents keys are)",
-  "the admin is compared by its on-chain spelling; deriving ml-dsa-65-hash from a full public key is not implemented",
+  "attest() is only as honest as the code that answers it: it can add a red, never clear one, and the code hash row is what ties it to the pinned code",
+  "the admin is compared by its on-chain spelling; deriving ml-dsa-65-hash from a full public key is not implemented (ARCHITECTURE.md 2.8 gives no hashing rule)",
 ];
 
 const ZERO_HASH = "11111111111111111111111111111111";
@@ -58,9 +76,9 @@ async function tryView(rpc, account, method, blockId) {
 }
 
 /**
- * ADAPTER, NOT FINAL. `attest()` is being added to contracts/mamori and its output shape is not settled. Until it is,
- * this only records whether the view answers and keeps its raw answer; nothing parses it and no verdict depends on it
- * (ARCHITECTURE.md 2.8: attest() is a cross-check only, the code hash and the key list come from RPC).
+ * Calls the `attest()` view and keeps its raw answer; `crossCheckAttest` reads it (ARCHITECTURE.md 2.8: attest() is a
+ * cross-check only, the code hash and the key list come from RPC).
+ * "absent" is a view that does not exist: a v2 build, or an account without Mamori. Any other failure is "error".
  * @returns {Promise<{ status: "present" | "absent" | "error", raw?: unknown, error?: string }>}
  */
 export async function readAttest({ rpc, account, blockId }) {
@@ -71,18 +89,106 @@ export async function readAttest({ rpc, account, blockId }) {
   return { status: "error", error: r.error };
 }
 
+/** The `attest_version` this code reads (ATTEST_VERSION in contracts/mamori/src/lib.rs). A higher one means a field was removed or changed meaning. */
+export const ATTEST_VERSION = 1;
+
+const isObject = (x) => x !== null && typeof x === "object" && !Array.isArray(x);
+const isCount = (x) => Number.isInteger(x) && x >= 0;
+const isKey = (x) => typeof x === "string" && x !== "";
+
 /**
- * ADAPTER, NOT FINAL (finish when attest()'s output shape is fixed). Compares what `attest()` reports (configured caps,
- * strike counts, recorded daily and intents keys) with what the chain shows, and returns disagreements as findings.
- * A disagreement is a cross-check finding, not one of the eight red conditions: the account's own full-access key can
- * deploy an `attest()` that lies, which is why the red conditions read RPC and never this.
- * @returns {{ status: "pending" | "agree" | "disagree", findings: string[] }}
+ * Checks what `readAttest` kept against the shape of docs/v3/ATTEST-CHECK.md section 2.1, and keeps only the fields the
+ * cross-check uses. `state` is one of:
+ *   "absent"      no attest() view (a v2 build, or no Mamori on the account)
+ *   "unreadable"  the view failed for another reason
+ *   "malformed"   it answered, but not as Mamori's attest of the version this code reads
+ *   "unsupported" a newer attest_version: a field may be gone or mean something else, so it is not read
+ *   "ok"          `a` holds the fields
+ * @returns {{ state: string, problems: string[], a?: object }}
  */
-export function crossCheckAttest(_attest, _facts) {
-  // TODO(attest): compare attest.raw's recorded daily/intents/revoked keys with facts.recorded.*.value and facts.keys.
-  // The in-progress contract edit (seen 2026-11-03, NOT final) has attest_version, config, daily_keys [{ public_key, strikes }],
-  // intents_keys, revoked_keys, queue_len; read its real shape from contracts/mamori before filling this in.
-  return { status: "pending", findings: [] };
+export function parseAttestation(attest) {
+  if (!attest || attest.status === "absent") return { state: "absent", problems: ["no attest() view: a v2 build, or no Mamori on the account"] };
+  if (attest.status === "error") return { state: "unreadable", problems: [`attest() could not be read: ${attest.error}`] };
+  const raw = attest.raw;
+  if (!isObject(raw)) return { state: "malformed", problems: ["the answer is not an object"] };
+  if (raw.contract !== "mamori") return { state: "malformed", problems: [`contract is ${JSON.stringify(raw.contract)}, not "mamori"`] };
+  if (!Number.isInteger(raw.attest_version) || raw.attest_version < 1) return { state: "malformed", problems: [`attest_version ${JSON.stringify(raw.attest_version)} is not a version number`] };
+  if (raw.attest_version > ATTEST_VERSION) return { state: "unsupported", problems: [`attest_version ${raw.attest_version}, this check reads ${ATTEST_VERSION}`] };
+  const problems = [];
+  const need = (ok, what) => ok || problems.push(what);
+  need(isKey(raw.account_id), "account_id is not a string");
+  need(typeof raw.drill_build === "boolean", "drill_build is not a boolean");
+  need(isCount(raw.min_delay_secs), "min_delay_secs is not a count");
+  need(isObject(raw.config) && isCount(raw.config.delay_secs), "config.delay_secs is not a count");
+  need(Array.isArray(raw.daily_keys) && raw.daily_keys.every((k) => isObject(k) && isKey(k.public_key)), "daily_keys is not a list of { public_key, strikes }");
+  need(Array.isArray(raw.intents_keys) && raw.intents_keys.every(isKey), "intents_keys is not a list of keys");
+  need(Array.isArray(raw.revoked_keys) && raw.revoked_keys.every(isKey), "revoked_keys is not a list of keys");
+  if (problems.length) return { state: "malformed", problems };
+  const a = {
+    account_id: raw.account_id,
+    drill_build: raw.drill_build,
+    min_delay_secs: raw.min_delay_secs,
+    config: raw.config,
+    daily: raw.daily_keys.map((k) => k.public_key),
+    intents: raw.intents_keys,
+    revoked: raw.revoked_keys,
+    allowlist_enforced: typeof raw.allowlist_enforced === "boolean" ? raw.allowlist_enforced : null,
+  };
+  return { state: "ok", problems: [], a };
+}
+
+/**
+ * Compares what `attest()` records with what the chain and the vault's own views show, at the one block the facts were
+ * read at. Pure. `findings` are disagreements, each `{ id, detail, offenders }` under the condition it belongs to (a
+ * red); `unchecked` are parts that could not be compared (an unreadable view), each `{ id, detail }`. attest() adds
+ * evidence only: the account's own full-access key can deploy an `attest()` that lies, so nothing here clears a row.
+ * status: "agree", "partial" (nothing disagrees, something could not be compared), "disagree", or the unreadable
+ * states of `parseAttestation` ("absent", "unreadable", "malformed", "unsupported"), where nothing was compared.
+ * @returns {{ status: string, problems: string[], findings: object[], unchecked: object[], attest: object | null }}
+ */
+export function crossCheckAttest(attest, facts) {
+  const p = parseAttestation(attest);
+  if (p.state !== "ok") return { status: p.state, problems: p.problems, findings: [], unchecked: [], attest: null };
+  const a = p.a;
+  const findings = [];
+  const unchecked = [];
+  const found = (id, detail, offenders = []) => findings.push({ id, detail, offenders });
+
+  // ARCH-2.8-6: a function-call key on the account that the vault does not record, by attest()'s books.
+  const notRecorded = facts.keys.filter(isFc).map((k) => k.public_key).filter((k) => !a.daily.includes(k));
+  if (notRecorded.length) found(IDS.unrecorded, `not in attest().daily_keys: ${list(notRecorded)}`, notRecorded);
+
+  // ARCH-2.8-7: a recorded intents key. It is not visible in RPC, so attest() is the only source besides intents_keys().
+  if (a.intents.length) found(IDS.intentsKey, `attest().intents_keys records: ${list(a.intents)}`, a.intents);
+
+  // ATTEST-1: attest() against the account asked about and against the views that read the same state.
+  if (a.account_id !== facts.account) found(IDS.attestAgrees, `attest() answered as ${a.account_id}, the account asked about is ${facts.account}`, [a.account_id]);
+  const config = facts.config?.value;
+  if (!isObject(config)) unchecked.push({ id: IDS.attestAgrees, detail: `config() could not be read: ${facts.config?.error ?? "not an object"}` });
+  else {
+    const names = [...new Set([...Object.keys(a.config), ...Object.keys(config)])].sort();
+    const differ = names.filter((n) => JSON.stringify(a.config[n]) !== JSON.stringify(config[n]));
+    if (differ.length) found(IDS.attestAgrees, `attest().config differs from config(): ${differ.map((n) => `${n} ${JSON.stringify(a.config[n])} against ${JSON.stringify(config[n])}`).join(", ")}`, differ.map((n) => `config.${n}`));
+  }
+  for (const [name, fromAttest, view] of [["daily_keys", a.daily, facts.recorded?.daily], ["intents_keys", a.intents, facts.recorded?.intents], ["revoked_keys", a.revoked, facts.recorded?.revoked]]) {
+    const fromView = asList(view);
+    if (fromView === null) {
+      unchecked.push({ id: IDS.attestAgrees, detail: `${name}() could not be read: ${view?.error ?? "not a list"}` });
+      continue;
+    }
+    const onlyAttest = fromAttest.filter((k) => !fromView.includes(k));
+    const onlyView = fromView.filter((k) => !fromAttest.includes(k));
+    if (onlyAttest.length || onlyView.length) {
+      const parts = [onlyAttest.length && `only in attest(): ${list(onlyAttest)}`, onlyView.length && `only in ${name}(): ${list(onlyView)}`];
+      found(IDS.attestAgrees, `${name} differ, ${parts.filter(Boolean).join("; ")}`, [...onlyAttest, ...onlyView]);
+    }
+  }
+
+  // ATTEST-2: the conditions of the loss bound that live in the contract's own build and config (ATTEST-CHECK.md 2.3).
+  if (a.drill_build) found(IDS.productionBuild, "attest().drill_build is true: a drill build allows a delay under the production floor and lets the cached era fall again", ["drill_build"]);
+  if (a.config.delay_secs < a.min_delay_secs) found(IDS.productionBuild, `config.delay_secs ${a.config.delay_secs} is under min_delay_secs ${a.min_delay_secs}`, ["config.delay_secs"]);
+
+  return { status: findings.length ? "disagree" : unchecked.length ? "partial" : "agree", problems: [], findings, unchecked, attest: a };
 }
 
 /**
@@ -109,6 +215,8 @@ const cond = (id, name, status, detail, offenders = []) => ({ id, name, status, 
 const red = (id, name, offenders, detail) => cond(id, name, RED, detail, offenders);
 const list = (xs) => xs.join(", ");
 const asList = (r) => (r && Array.isArray(r.value) ? r.value : null);
+const isFull = (k) => k.access_key.permission === "FullAccess";
+const isFc = (k) => !isFull(k) && Boolean(k.access_key.permission?.FunctionCall);
 
 /** A function-call permission's fields, with the omissions the RPC allows made explicit. */
 const fcOf = (k) => {
@@ -118,8 +226,6 @@ const fcOf = (k) => {
 
 /** What the rows share: the keys sorted by permission, and the policy with its defaults. */
 function contextOf(facts, policy) {
-  const isFull = (k) => k.access_key.permission === "FullAccess";
-  const isFc = (k) => !isFull(k) && Boolean(k.access_key.permission?.FunctionCall);
   return {
     ...facts,
     policy,
@@ -217,12 +323,41 @@ function codeHash({ acc, policy }) {
   return red(IDS.codeHash, name, [onChain], `on chain ${onChain === ZERO_HASH ? `${onChain} (no code)` : onChain}, pinned ${policy.pinnedCodeHash}`);
 }
 
+const ATTEST_NAMES = {
+  [IDS.attestAgrees]: "attest() agrees with the account and with the vault's own views",
+  [IDS.productionBuild]: "the vault is a production build with the delay floor",
+};
+
+/** ATTEST-1 and ATTEST-2: red on a finding, unchecked when attest() or a view it is compared with could not be read. */
+function attestRow(id, cross) {
+  const name = ATTEST_NAMES[id];
+  const mine = cross.findings.filter((f) => f.id === id);
+  if (cross.status === "malformed" && id === IDS.attestAgrees) return red(id, name, cross.problems, `attest() is not Mamori's attest: ${list(cross.problems)}`);
+  if (cross.status === "malformed") return cond(id, name, UNKNOWN, "attest() is malformed (see ATTEST-1), so this was not checked");
+  if (["absent", "unreadable", "unsupported"].includes(cross.status)) return cond(id, name, UNKNOWN, `${cross.problems[0]}; this was not checked`);
+  if (mine.length) return red(id, name, mine.flatMap((f) => f.offenders), mine.map((f) => f.detail).join("; "));
+  const open = cross.unchecked.filter((u) => u.id === id);
+  if (open.length) return cond(id, name, UNKNOWN, `nothing disagrees, but ${open.map((u) => u.detail).join("; ")}`);
+  return cond(id, name, GREEN, id === IDS.attestAgrees ? "account_id, config, daily_keys, intents_keys and revoked_keys equal the vault's views" : "drill_build is false and delay_secs is not under min_delay_secs");
+}
+
+/** attest() evidence for one of the eight rows: it turns any status into RED, never the other way. */
+function withFindings(c, findings) {
+  const mine = findings.filter((f) => f.id === c.id);
+  if (!mine.length) return c;
+  const keyOf = (o) => o.split(" ")[0];
+  const seen = new Set(c.offenders.map(keyOf));
+  const extra = mine.flatMap((f) => f.offenders).filter((o) => !seen.has(keyOf(o)));
+  const detail = [...(c.status === RED ? [c.detail] : []), ...mine.map((f) => f.detail)].join("; ");
+  return red(c.id, c.name, [...c.offenders, ...extra], detail);
+}
+
 /** Rows 1 to 6 read the key list, so a list cut off at the paging limit cannot certify them: their GREEN becomes UNKNOWN. */
 const KEY_LIST_ROWS = new Set([IDS.classicalFullAccess, IDS.oneMlDsaAdmin, IDS.allowance, IDS.methodNames, IDS.scope, IDS.unrecorded]);
 const uncertified = (c, n) => (c.status === GREEN && KEY_LIST_ROWS.has(c.id) ? { ...c, status: UNKNOWN, detail: `the account has more keys than were read (list cut at ${n}); ${c.detail}` } : c);
 
 /**
- * The eight red conditions of ARCHITECTURE.md 2.8, as a pure function of what was read.
+ * The eight red conditions of ARCHITECTURE.md 2.8, then ATTEST-1 and ATTEST-2, as a pure function of what was read.
  * policy: { admin?, standInAdmin?, pinnedCodeHash?, maxAllowanceYocto?, extraMethods? }
  *   admin           the admin's key as the chain lists it; when given, the one ML-DSA full-access key must be it
  *   standInAdmin    SANDBOX ONLY: a classical key accepted in place of the ML-DSA admin (the sandbox admin is ed25519)
@@ -232,10 +367,12 @@ const uncertified = (c, n) => (c.status === GREEN && KEY_LIST_ROWS.has(c.id) ? {
  */
 export function evaluateCage(facts, policy) {
   const ctx = contextOf(facts, policy);
-  const rows = [classicalFullAccess, oneAdmin, allowance, methodNames, scope, unrecorded, intentsKey, codeHash].map((row) => row(ctx));
+  const attest = facts.attest ?? { status: "absent" };
+  const cross = crossCheckAttest(attest, facts);
+  const eight = [classicalFullAccess, oneAdmin, allowance, methodNames, scope, unrecorded, intentsKey, codeHash].map((row) => withFindings(row(ctx), cross.findings));
+  const rows = [...eight, attestRow(IDS.attestAgrees, cross), attestRow(IDS.productionBuild, cross)];
   const conditions = facts.keys.truncated === true ? rows.map((c) => uncertified(c, facts.keys.length)) : rows;
   const verdict = conditions.some((c) => c.status === RED) ? RED : conditions.some((c) => c.status === UNKNOWN) ? UNKNOWN : GREEN;
-  const attest = facts.attest ?? { status: "absent" };
   return {
     account: facts.account,
     block: facts.block,
@@ -248,7 +385,10 @@ export function evaluateCage(facts, policy) {
       daily_keys: asList(facts.recorded.daily),
       revoked_keys: asList(facts.recorded.revoked),
       attest: attest.status,
-      attest_cross_check: crossCheckAttest(attest, facts).status,
+      attest_cross_check: cross.status,
+      // Reported, not graded: neither is a condition of the loss bound (LOSS-BOUND.md A10 for the allowlist).
+      allowlist_enforced: cross.attest?.allowlist_enforced ?? null,
+      max_strikes: cross.attest?.config.max_strikes ?? null,
     },
     limits: LIMITS,
   };
@@ -270,7 +410,7 @@ export function renderCage(result) {
   const i = result.info;
   lines.push(
     "",
-    `info (not a verdict): era ${i.era ?? "unreadable"}, delay ${i.delay_secs ?? "unreadable"} s, attest() ${i.attest}${i.attest_cross_check === "pending" ? ", attest cross-check not wired yet" : ""}`,
+    `info (not a verdict): era ${i.era ?? "unreadable"}, delay ${i.delay_secs ?? "unreadable"} s, attest() ${i.attest}, attest cross-check ${i.attest_cross_check}${i.allowlist_enforced === null ? "" : `, allowlist ${i.allowlist_enforced ? "enforced" : "off"}`}${i.max_strikes === null ? "" : `, max strikes ${i.max_strikes}`}`,
     ...result.limits.map((l) => `limit: ${l}`),
   );
   const nRed = result.conditions.filter((c) => c.status === RED).length;

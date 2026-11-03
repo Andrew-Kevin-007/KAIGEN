@@ -10,7 +10,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
-  CageUsage, DEFAULT_MAX_ALLOWANCE_YOCTO, IDS, cageCheck, crossCheckAttest, evaluateCage, exitCodeOf, normalizeCodeHash, parseCageArgs, readAttest, renderCage,
+  ATTEST_VERSION, CageUsage, DEFAULT_MAX_ALLOWANCE_YOCTO, IDS, cageCheck, crossCheckAttest, evaluateCage, exitCodeOf, normalizeCodeHash, parseAttestation, parseCageArgs, readAttest, readCageFacts, renderCage,
 } from "../src/cage.mjs";
 import { makeRpc } from "../src/rpc.mjs";
 import { codeHashOf } from "../src/verify.mjs";
@@ -28,14 +28,42 @@ const fc = (over = {}) => ({ FunctionCall: { allowance: MAX, receiver_id: VAULT,
 const D1 = key("ed25519:D1", fc());
 const D2 = key("ed25519:D2", fc());
 
-/** A clean cage: the ML-DSA admin, two recorded daily keys, no intents key, the pinned code. Views are values or Errors. */
-const cleanWorld = (over = {}) => ({
-  height: 100,
-  acc: { amount: "1", code_hash: PIN },
-  keys: [key(ADMIN), D1, D2],
-  views: { daily_keys: ["ed25519:D1", "ed25519:D2"], intents_keys: [], revoked_keys: [], config: { era: "Calm", delay_secs: 86_400 } },
+const DEFAULT_VIEWS = { daily_keys: ["ed25519:D1", "ed25519:D2"], intents_keys: [], revoked_keys: [], config: { era: "Calm", delay_secs: 86_400 } };
+
+/**
+ * What attest() answers for these views, in the shape of docs/v3/ATTEST-CHECK.md 2.1 (u64 as strings, a view that is
+ * unreadable in the test falls back to the clean value). `over` replaces fields, to build a lying or odd answer.
+ */
+const attestOf = (views, over = {}) => ({
+  attest_version: ATTEST_VERSION,
+  contract: "mamori",
+  drill_build: false,
+  account_id: VAULT,
+  block_height: "100",
+  block_timestamp: "1700000000000000000",
+  config: views.config ?? DEFAULT_VIEWS.config,
+  min_delay_secs: 86_400,
+  allowlist_enforced: false,
+  allowlist_len: 0,
+  daily_keys: (views.daily_keys ?? DEFAULT_VIEWS.daily_keys).map((public_key) => ({ public_key, strikes: 0 })),
+  intents_keys: views.intents_keys ?? DEFAULT_VIEWS.intents_keys,
+  revoked_keys: views.revoked_keys ?? DEFAULT_VIEWS.revoked_keys,
+  queue_len: 0,
+  note: "informational",
   ...over,
 });
+
+/**
+ * A clean cage: the ML-DSA admin, two recorded daily keys, no intents key, the pinned code, and an attest() that says
+ * the same as the views. Views are values or Errors; `views: { x: undefined }` makes view x absent (a v2 build has no
+ * attest, so `views: { attest: undefined }`), and an attest the test does not give is built from the other views.
+ */
+const cleanWorld = (over = {}) => {
+  const views = { ...DEFAULT_VIEWS, ...over.views };
+  if (!("attest" in views)) views.attest = attestOf(views);
+  return { height: 100, acc: { amount: "1", code_hash: PIN }, keys: [key(ADMIN), D1, D2], ...over, views };
+};
+const NO_ATTEST = { attest: undefined };
 const policy = (over = {}) => ({ pinnedCodeHash: PIN, ...over });
 
 /** JSON-RPC answers for a world, recording every request so a test can see what was asked. */
@@ -75,11 +103,12 @@ const states = (r) => ({
 
 // ---- the clean cage ------------------------------------------------------------------------------------------------
 
-test("cage-check: a clean cage is GREEN on all eight conditions, in doc order, and exits 0", async () => {
+test("cage-check: a clean cage is GREEN on all ten conditions, in doc order, and exits 0", async () => {
   const r = await run();
   assert.deepEqual(r.conditions.map((c) => [c.id, c.status]), Object.values(IDS).map((id) => [id, "GREEN"]));
-  assert.equal(Object.values(IDS).length, 8, "ARCHITECTURE.md 2.8 lists eight conditions");
+  assert.deepEqual(Object.values(IDS), [1, 2, 3, 4, 5, 6, 7, 8].map((n) => `ARCH-2.8-${n}`).concat(["ATTEST-1", "ATTEST-2"]), "the eight rows of ARCHITECTURE.md 2.8, then the two attest() rows");
   assert.equal(r.verdict, "GREEN");
+  assert.equal(r.info.attest_cross_check, "agree");
   assert.equal(exitCodeOf(r), 0);
   assert.equal(r.mode, "production");
   assert.deepEqual(r.block, { height: 100, hash: "H100" });
@@ -204,9 +233,9 @@ test("cage-check ARCH-2.8-6: a recorded key that is not on the account is not re
   assert.equal(r.verdict, "GREEN");
 });
 
-test("cage-check ARCH-2.8-6: when daily_keys() cannot be read the row is UNKNOWN (exit 3), not green", async () => {
-  const r = await run({ views: { intents_keys: [], config: { era: "Calm", delay_secs: 86_400 } } });
-  assert.deepEqual(states(r), { red: [], unknown: [IDS.unrecorded] });
+test("cage-check ARCH-2.8-6: when daily_keys() cannot be read the row is UNKNOWN (exit 3), not green, even with a clean attest()", async () => {
+  const r = await run({ views: { daily_keys: undefined } });
+  assert.deepEqual(states(r), { red: [], unknown: [IDS.unrecorded, IDS.attestAgrees] }, "attest() cannot stand in for the view it is compared with");
   assert.equal(exitCodeOf(r), 3);
   assert.match(r.conditions[5].detail, /daily_keys\(\) could not be read/);
 });
@@ -217,9 +246,9 @@ test("cage-check ARCH-2.8-7: a recorded intents key is RED (only that row)", asy
   assert.deepEqual(r.conditions[6].offenders, ["ed25519:INTENTS"]);
 });
 
-test("cage-check ARCH-2.8-7: when intents_keys() cannot be read the row is UNKNOWN, not green", async () => {
-  const r = await run({ views: { daily_keys: ["ed25519:D1", "ed25519:D2"] } });
-  assert.deepEqual(states(r), { red: [], unknown: [IDS.intentsKey] });
+test("cage-check ARCH-2.8-7: when intents_keys() cannot be read the row is UNKNOWN, not green, even with a clean attest()", async () => {
+  const r = await run({ views: { intents_keys: undefined } });
+  assert.deepEqual(states(r), { red: [], unknown: [IDS.intentsKey, IDS.attestAgrees] });
 });
 
 test("cage-check ARCH-2.8-8: a code hash that differs from the pinned hash is RED (only that row)", async () => {
@@ -280,7 +309,8 @@ test("cage-check: a key list cut off at the paging limit turns the key-list rows
   const keys = Object.assign([key(ADMIN), D1], { truncated: true });
   const facts = {
     account: VAULT, block: { height: 1, hash: "h" }, acc: { code_hash: PIN }, keys,
-    recorded: { daily: { value: ["ed25519:D1"] }, intents: { value: [] }, revoked: { value: [] } }, config: { error: "x" }, attest: { status: "absent" },
+    recorded: { daily: { value: ["ed25519:D1"] }, intents: { value: [] }, revoked: { value: [] } }, config: { value: DEFAULT_VIEWS.config },
+    attest: { status: "present", raw: attestOf({ daily_keys: ["ed25519:D1"] }) },
   };
   const r = evaluateCage(facts, policy());
   assert.deepEqual(states(r), { red: [], unknown: [IDS.classicalFullAccess, IDS.oneMlDsaAdmin, IDS.allowance, IDS.methodNames, IDS.scope, IDS.unrecorded] });
@@ -304,21 +334,245 @@ test("cage-check is read-only: only block, view_account, view_access_key_list an
   assert.deepEqual([...new Set(reads.filter((c) => c.params.request_type === "call_function").map((c) => c.params.method_name))].sort(), ["attest", "config", "daily_keys", "intents_keys", "revoked_keys"]);
 });
 
-// ---- the attest() adapter (not final) ------------------------------------------------------------------------------
+// ---- attest(): read, parse, cross-check (docs/v3/ATTEST-CHECK.md) ---------------------------------------------------
+// attest() is a cross-check that can only ADD a red or an unchecked. The eight rows of ARCHITECTURE.md 2.8 stand on RPC
+// (and, for rows 6 and 7, on the vault's own views); ATTEST-1 and ATTEST-2 are the two rows attest() brings itself.
 
-test("cage-check attest adapter: absent on a v2 build, present with the raw answer kept, an error is recorded; none of it changes a verdict", async () => {
-  const absent = await readAttest({ rpc: rpcOf(cleanWorld()), account: VAULT });
+const DAILY = (...ks) => ks.map((public_key) => ({ public_key, strikes: 0 }));
+const row = (r, id) => r.conditions.find((c) => c.id === id);
+/** A world whose attest() says `over` on top of what the other views say; `views` and `world` shape those views and the account. */
+const withAttest = (over, views = {}, world = {}) => ({ ...world, views: { ...views, attest: attestOf({ ...DEFAULT_VIEWS, ...views }, over) } });
+
+test("cage-check attest read: absent on a v2 build, present with the raw answer kept, any other failure is an error", async () => {
+  const absent = await readAttest({ rpc: rpcOf(cleanWorld({ views: NO_ATTEST })), account: VAULT });
   assert.equal(absent.status, "absent");
   const present = await readAttest({ rpc: rpcOf(cleanWorld({ views: { attest: { daily_keys: [] } } })), account: VAULT });
   assert.deepEqual(present, { status: "present", raw: { daily_keys: [] } });
   const broken = await readAttest({ rpc: rpcOf(cleanWorld({ views: { attest: new Error("ProhibitedInView") } })), account: VAULT });
   assert.equal(broken.status, "error");
-  // A lying attest() (the account's own full-access key can deploy one) cannot turn a red green or a green red.
-  const lying = await run({ keys: [key(ADMIN), D1, D2, key("ed25519:PLANTED")], views: { daily_keys: ["ed25519:D1", "ed25519:D2"], intents_keys: [], attest: { clean: true } } });
-  assert.deepEqual(states(lying).red, [IDS.classicalFullAccess]);
-  assert.equal(lying.info.attest, "present");
-  assert.equal(lying.info.attest_cross_check, "pending", "the comparison is a marked stub until attest()'s shape is final");
-  assert.deepEqual(crossCheckAttest({ status: "present", raw: {} }, {}), { status: "pending", findings: [] });
+  // A missing method is spelled differently by different node versions, and an account without code has no attest() either.
+  const statusFor = async (msg) => (await readAttest({ rpc: rpcOf(cleanWorld({ views: { attest: new Error(msg) } })), account: VAULT })).status;
+  for (const msg of ["MethodNotFound", "MethodResolveError", "method attest not found", "CompilationError(CodeDoesNotExist { account_id: vault.test })", "no contract code"]) {
+    assert.equal(await statusFor(msg), "absent", msg);
+  }
+  for (const msg of ["ProhibitedInView", "Exceeded the prepaid gas", "HostError(GasExceeded)", "timeout"]) {
+    assert.equal(await statusFor(msg), "error", msg);
+  }
+});
+
+test("cage-check attest: matching attest() is GREEN on ATTEST-1 and ATTEST-2, and its settings are reported, not graded", async () => {
+  const r = await run();
+  assert.deepEqual([row(r, IDS.attestAgrees).status, row(r, IDS.productionBuild).status], ["GREEN", "GREEN"]);
+  assert.equal(r.info.attest, "present");
+  assert.equal(r.info.attest_cross_check, "agree");
+  assert.equal(r.info.allowlist_enforced, false);
+  // An enforced allowlist, a different strike cap and a strike on a key are not red: none is a condition of the loss bound.
+  const odd = await run(withAttest({ allowlist_enforced: true, daily_keys: DAILY("ed25519:D1", "ed25519:D2").map((k) => ({ ...k, strikes: 2 })) }, { config: { era: "Calm", delay_secs: 86_400, max_strikes: 5 } }));
+  assert.equal(odd.verdict, "GREEN");
+  assert.deepEqual([odd.info.allowlist_enforced, odd.info.max_strikes], [true, 5]);
+  assert.match(renderCage(odd), /allowlist enforced, max strikes 5/);
+});
+
+test("cage-check attest: an old v2 vault without attest() is UNCHECKED (UNKNOWN, exit 3), never GREEN; the eight rows still judge it", async () => {
+  const v2 = await run({ views: NO_ATTEST });
+  assert.deepEqual(states(v2), { red: [], unknown: [IDS.attestAgrees, IDS.productionBuild] });
+  assert.equal(v2.verdict, "UNKNOWN");
+  assert.equal(exitCodeOf(v2), 3);
+  assert.deepEqual([v2.info.attest, v2.info.attest_cross_check], ["absent", "absent"]);
+  assert.match(row(v2, IDS.attestAgrees).detail, /no attest\(\) view: a v2 build, or no Mamori on the account; this was not checked/);
+  const text = renderCage(v2);
+  assert.doesNotMatch(text, /GREEN: all/);
+  assert.match(text, /^UNKNOWN +ATTEST-1 /m);
+  assert.match(text, /UNKNOWN: nothing is red but 2 of 10 conditions could not be checked/);
+  // The same v2 vault with a planted key is RED, not merely unchecked: a missing attest() hides nothing the RPC rows can see.
+  const planted = await run({ views: NO_ATTEST, keys: [key(ADMIN), D1, D2, key("ed25519:PLANTED")] });
+  assert.deepEqual(states(planted), { red: [IDS.classicalFullAccess], unknown: [IDS.attestAgrees, IDS.productionBuild] });
+  assert.equal(exitCodeOf(planted), 1);
+});
+
+test("cage-check attest: an attest() that fails for another reason is UNKNOWN, not absent and not green", async () => {
+  const r = await run({ views: { attest: new Error("ProhibitedInView: attest") } });
+  assert.deepEqual(states(r), { red: [], unknown: [IDS.attestAgrees, IDS.productionBuild] });
+  assert.equal(r.info.attest, "error");
+  assert.match(row(r, IDS.attestAgrees).detail, /attest\(\) could not be read: .*ProhibitedInView/);
+  assert.equal(exitCodeOf(r), 3);
+});
+
+test("cage-check attest mismatch ARCH-2.8-6: the vault's view records a key on the account that attest() does not, RED on rows 6 and ATTEST-1", async () => {
+  const r = await run(withAttest({ daily_keys: DAILY("ed25519:D1") }));
+  assert.deepEqual(states(r).red, [IDS.unrecorded, IDS.attestAgrees]);
+  assert.deepEqual(row(r, IDS.unrecorded).offenders, ["ed25519:D2"]);
+  assert.match(row(r, IDS.unrecorded).detail, /not in attest\(\)\.daily_keys: ed25519:D2/);
+  assert.match(row(r, IDS.attestAgrees).detail, /daily_keys differ, only in daily_keys\(\): ed25519:D2/);
+  assert.equal(exitCodeOf(r), 1);
+});
+
+test("cage-check attest mismatch ARCH-2.8-6: a function-call key on the account that neither record knows is named once", async () => {
+  const r = await run({ keys: [key(ADMIN), D1, D2, key("ed25519:STRANGER", fc())] });
+  assert.deepEqual(row(r, IDS.unrecorded).offenders, ["ed25519:STRANGER"], "the view and attest() both miss it: one offender, not two");
+  assert.deepEqual(states(r).red, [IDS.unrecorded]);
+  const burned = await run({ keys: [key(ADMIN), D1, D2, key("ed25519:BURNED", fc())], views: { revoked_keys: ["ed25519:BURNED"] } });
+  assert.deepEqual(row(burned, IDS.unrecorded).offenders, ["ed25519:BURNED (in revoked_keys: its DeleteKey has not landed)"]);
+});
+
+test("cage-check attest mismatch ATTEST-1: attest() records a daily key that neither the view nor the account has (RED on ATTEST-1 only)", async () => {
+  const r = await run(withAttest({ daily_keys: DAILY("ed25519:D1", "ed25519:D2", "ed25519:GHOST") }));
+  assert.deepEqual(states(r).red, [IDS.attestAgrees]);
+  assert.deepEqual(row(r, IDS.attestAgrees).offenders, ["ed25519:GHOST"]);
+  assert.match(row(r, IDS.attestAgrees).detail, /daily_keys differ, only in attest\(\): ed25519:GHOST/);
+});
+
+test("cage-check attest mismatch ARCH-2.8-7: attest() records an intents key that intents_keys() does not, RED on row 7 and ATTEST-1", async () => {
+  const r = await run(withAttest({ intents_keys: ["ed25519:INTENTS"] }));
+  assert.deepEqual(states(r).red, [IDS.intentsKey, IDS.attestAgrees]);
+  assert.deepEqual(row(r, IDS.intentsKey).offenders, ["ed25519:INTENTS"]);
+  assert.match(row(r, IDS.intentsKey).detail, /attest\(\)\.intents_keys records: ed25519:INTENTS/);
+});
+
+test("cage-check attest mismatch ARCH-2.8-7: intents_keys() records a key that attest() does not, RED on row 7 and ATTEST-1", async () => {
+  const r = await run(withAttest({ intents_keys: [] }, { intents_keys: ["ed25519:INTENTS"] }));
+  assert.deepEqual(states(r).red, [IDS.intentsKey, IDS.attestAgrees]);
+  assert.match(row(r, IDS.attestAgrees).detail, /intents_keys differ, only in intents_keys\(\): ed25519:INTENTS/);
+});
+
+test("cage-check attest mismatch ARCH-2.8-7: attest() turns an unreadable intents_keys() from UNKNOWN to RED, never the reverse", async () => {
+  const r = await run({ views: { intents_keys: undefined, attest: attestOf(DEFAULT_VIEWS, { intents_keys: ["ed25519:INTENTS"] }) } });
+  assert.equal(status(r, IDS.intentsKey), "RED");
+  assert.equal(status(r, IDS.attestAgrees), "UNKNOWN");
+  assert.equal(r.verdict, "RED");
+});
+
+test("cage-check attest mismatch ATTEST-1: revoked_keys that differ are RED, in either direction", async () => {
+  const fromAttest = await run(withAttest({ revoked_keys: ["ed25519:OLD"] }));
+  assert.deepEqual(states(fromAttest).red, [IDS.attestAgrees]);
+  assert.match(row(fromAttest, IDS.attestAgrees).detail, /revoked_keys differ, only in attest\(\): ed25519:OLD/);
+  const fromView = await run(withAttest({ revoked_keys: [] }, { revoked_keys: ["ed25519:OLD"] }));
+  assert.deepEqual(states(fromView).red, [IDS.attestAgrees]);
+  assert.match(row(fromView, IDS.attestAgrees).detail, /only in revoked_keys\(\): ed25519:OLD/);
+});
+
+test("cage-check attest mismatch ATTEST-1: config fields that differ from config() are RED and named, including a field only one side has", async () => {
+  const delay = await run(withAttest({ config: { era: "Calm", delay_secs: 90_000 } }));
+  assert.deepEqual(states(delay).red, [IDS.attestAgrees]);
+  assert.deepEqual(row(delay, IDS.attestAgrees).offenders, ["config.delay_secs"]);
+  assert.match(row(delay, IDS.attestAgrees).detail, /delay_secs 90000 against 86400/);
+  assert.deepEqual(states(await run(withAttest({ config: { era: "Kaigen", delay_secs: 86_400 } }))).red, [IDS.attestAgrees]);
+  const extra = await run(withAttest({ config: { era: "Calm", delay_secs: 86_400, max_strikes: 3 } }));
+  assert.deepEqual(row(extra, IDS.attestAgrees).offenders, ["config.max_strikes"]);
+});
+
+test("cage-check attest mismatch ATTEST-1: an attest() that answered as another account is RED", async () => {
+  const r = await run(withAttest({ account_id: "other.test" }));
+  assert.deepEqual(states(r).red, [IDS.attestAgrees]);
+  assert.match(row(r, IDS.attestAgrees).detail, /answered as other\.test, the account asked about is vault\.test/);
+});
+
+test("cage-check attest ATTEST-1: when config() cannot be read nothing disagrees but the comparison is incomplete: UNKNOWN, cross-check partial", async () => {
+  const r = await run({ views: { config: undefined } });
+  assert.deepEqual(states(r), { red: [], unknown: [IDS.attestAgrees] });
+  assert.equal(r.info.attest_cross_check, "partial");
+  assert.match(row(r, IDS.attestAgrees).detail, /config\(\) could not be read/);
+});
+
+test("cage-check attest ATTEST-2: a drill build is RED on ATTEST-2 only", async () => {
+  const r = await run(withAttest({ drill_build: true }));
+  assert.deepEqual(states(r).red, [IDS.productionBuild]);
+  assert.deepEqual(row(r, IDS.productionBuild).offenders, ["drill_build"]);
+  assert.equal(exitCodeOf(r), 1);
+});
+
+test("cage-check attest ATTEST-2: a delay under min_delay_secs is RED, exactly the minimum is not", async () => {
+  const short = { config: { era: "Calm", delay_secs: 3_600 } };
+  const r = await run(withAttest(short, short));
+  assert.deepEqual(states(r).red, [IDS.productionBuild]);
+  assert.match(row(r, IDS.productionBuild).detail, /delay_secs 3600 is under min_delay_secs 86400/);
+  const both = await run(withAttest({ ...short, drill_build: true }, short));
+  assert.match(row(both, IDS.productionBuild).detail, /drill_build is true.*; config\.delay_secs 3600 is under/);
+  const atMin = { config: { era: "Calm", delay_secs: 86_400 } };
+  assert.equal((await run(withAttest(atMin, atMin))).verdict, "GREEN");
+});
+
+test("cage-check attest: an answer that is not Mamori's attest of this version is RED on ATTEST-1 (ATTEST-2 unchecked), never read as clean", async () => {
+  const good = attestOf(DEFAULT_VIEWS);
+  const without = (name) => Object.fromEntries(Object.entries(good).filter(([k]) => k !== name));
+  const bad = {
+    "a string": "ok",
+    "a list": [],
+    "null": null,
+    "another contract": { ...good, contract: "other" },
+    "no version": without("attest_version"),
+    "version 0": { ...good, attest_version: 0 },
+    "no daily_keys": without("daily_keys"),
+    "daily_keys of bare strings": { ...good, daily_keys: ["ed25519:D1"] },
+    "no intents_keys": without("intents_keys"),
+    "no revoked_keys": without("revoked_keys"),
+    "drill_build as text": { ...good, drill_build: "false" },
+    "no config": without("config"),
+    "delay_secs as text": { ...good, config: { era: "Calm", delay_secs: "86400" } },
+    "no min_delay_secs": without("min_delay_secs"),
+    "no account_id": without("account_id"),
+  };
+  for (const [what, raw] of Object.entries(bad)) {
+    const r = await run({ views: { attest: raw } });
+    assert.deepEqual(states(r), { red: [IDS.attestAgrees], unknown: [IDS.productionBuild] }, what);
+    assert.equal(exitCodeOf(r), 1, what);
+    assert.equal(r.info.attest_cross_check, "malformed", what);
+  }
+});
+
+test("cage-check attest: a newer attest_version is UNKNOWN (a field may have changed meaning), a new field at the same version is fine", async () => {
+  const newer = await run({ views: { attest: attestOf(DEFAULT_VIEWS, { attest_version: ATTEST_VERSION + 1 }) } });
+  assert.deepEqual(states(newer), { red: [], unknown: [IDS.attestAgrees, IDS.productionBuild] });
+  assert.match(row(newer, IDS.attestAgrees).detail, /attest_version 2, this check reads 1/);
+  assert.equal(newer.info.attest_cross_check, "unsupported");
+  const extra = await run({ views: { attest: attestOf(DEFAULT_VIEWS, { a_field_added_later: { x: 1 } }) } });
+  assert.equal(extra.verdict, "GREEN");
+});
+
+test("cage-check attest can only add a red or an unchecked: a lying or clean attest() never turns one of the eight rows green", async () => {
+  // The account's own full-access key can deploy an attest() that says anything. Whatever it says, these stay as RPC reads them.
+  const planted = [key(ADMIN), D1, D2, key("ed25519:PLANTED")];
+  assert.deepEqual(states(await run({ keys: planted, views: { attest: attestOf(DEFAULT_VIEWS) } })).red, [IDS.classicalFullAccess], "a clean attest() does not hide a planted full-access key");
+  // It claims the planted function-call key as recorded; the vault's view does not, so row 6 stays red, and the books disagree.
+  const claimed = await run({ keys: [key(ADMIN), D1, D2, key("ed25519:PLANTED", fc())], views: { attest: attestOf(DEFAULT_VIEWS, { daily_keys: DAILY("ed25519:D1", "ed25519:D2", "ed25519:PLANTED") }) } });
+  assert.deepEqual(states(claimed).red, [IDS.unrecorded, IDS.attestAgrees]);
+  // A clean attest() does not make an unpinned code hash,, a clean bill.
+  assert.deepEqual(states(await run({}, { pinnedCodeHash: undefined })), { red: [], unknown: [IDS.codeHash] });
+  // And a clean attest() does not make a swapped code hash green: the code could be one that lies.
+  assert.deepEqual(states(await run({ acc: { amount: "1", code_hash: codeHashOf(Buffer.from("liar")) } })).red, [IDS.codeHash]);
+});
+
+test("cage-check parseAttestation and crossCheckAttest: states and the shape of the result", () => {
+  const facts = (over = {}) => ({
+    account: VAULT, block: { height: 1, hash: "h" }, keys: [key(ADMIN), D1, D2],
+    recorded: { daily: { value: ["ed25519:D1", "ed25519:D2"] }, intents: { value: [] }, revoked: { value: [] } }, config: { value: DEFAULT_VIEWS.config }, ...over,
+  });
+  const present = (raw) => ({ status: "present", raw });
+  assert.equal(parseAttestation(undefined).state, "absent");
+  assert.equal(parseAttestation({ status: "absent" }).state, "absent");
+  assert.equal(parseAttestation({ status: "error", error: "x" }).state, "unreadable");
+  assert.equal(parseAttestation(present({})).state, "malformed");
+  const ok = parseAttestation(present(attestOf(DEFAULT_VIEWS)));
+  assert.equal(ok.state, "ok");
+  assert.deepEqual(ok.a.daily, ["ed25519:D1", "ed25519:D2"], "daily_keys is reduced to the public keys");
+  assert.deepEqual(crossCheckAttest(present(attestOf(DEFAULT_VIEWS)), facts()), { status: "agree", problems: [], findings: [], unchecked: [], attest: ok.a });
+  const disagree = crossCheckAttest(present(attestOf(DEFAULT_VIEWS, { drill_build: true })), facts());
+  assert.equal(disagree.status, "disagree");
+  assert.deepEqual(disagree.findings.map((f) => f.id), [IDS.productionBuild]);
+  const partial = crossCheckAttest(present(attestOf(DEFAULT_VIEWS)), facts({ config: { error: "x" } }));
+  assert.deepEqual([partial.status, partial.findings.length, partial.unchecked.map((u) => u.id)], ["partial", 0, [IDS.attestAgrees]]);
+  const none = crossCheckAttest({ status: "absent" }, facts());
+  assert.deepEqual([none.status, none.findings, none.unchecked, none.attest], ["absent", [], [], null]);
+});
+
+test("cage-check attest: read for real by readCageFacts, pinned to the one block like every other read", async () => {
+  const rpc = rpcOf(cleanWorld());
+  const facts = await readCageFacts({ rpc, account: VAULT });
+  assert.equal(facts.attest.status, "present");
+  assert.equal(facts.attest.raw.contract, "mamori");
+  const calls = rpc.calls.filter((c) => c.method === "query" && c.params.method_name === "attest");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].params.block_id, "H100");
 });
 
 // ---- output --------------------------------------------------------------------------------------------------------
@@ -328,10 +582,10 @@ test("cage-check text report: one line per condition by id, the verdict line, an
   for (const id of Object.values(IDS)) assert.match(text, new RegExp(`(RED|GREEN|UNKNOWN)\\s+${id}  `));
   assert.match(text, /^RED +ARCH-2\.8-1 /m);
   assert.match(text, /^GREEN +ARCH-2\.8-2 /m);
-  assert.match(text, /RED: 1 of 8 conditions fail\./);
+  assert.match(text, /RED: 1 of 10 conditions fail\./);
   assert.match(text, /limit: point in time/);
-  assert.match(renderCage(await run({})), /GREEN: all 8 conditions hold\./);
-  assert.match(renderCage(await run({}, { pinnedCodeHash: undefined })), /UNKNOWN: nothing is red but 1 of 8 conditions could not be checked; this is not a clean bill\./);
+  assert.match(renderCage(await run({})), /GREEN: all 10 conditions hold\./);
+  assert.match(renderCage(await run({}, { pinnedCodeHash: undefined })), /UNKNOWN: nothing is red but 1 of 10 conditions could not be checked; this is not a clean bill\./);
 });
 
 // ---- argument parsing ----------------------------------------------------------------------------------------------
@@ -417,7 +671,7 @@ test("cage-check command: exit 0 on a clean cage, 1 when a full-access key is pl
     await withNode(cleanWorld(), async (url) => {
       const ok = await cli([VAULT, "--rpc", url, "--wasm", wasm]);
       assert.equal(ok.code, 0, ok.stdout + ok.stderr);
-      assert.match(ok.stdout, /GREEN: all 8 conditions hold\./);
+      assert.match(ok.stdout, /GREEN: all 10 conditions hold\./);
       const json = await cli([VAULT, "--rpc", url, "--wasm", wasm, "--json"]);
       assert.equal(JSON.parse(json.stdout).verdict, "GREEN");
       const unpinned = await cli([VAULT, "--rpc", url]);
@@ -454,4 +708,30 @@ test("cage-check command: exit 0 on a clean cage, 1 when a full-access key is pl
 test("cage-check: a node that cannot be reached is an error, never a verdict", async () => {
   const down = makeRpc("http://down.invalid", { retries: 0, fetchImpl: async () => { throw new Error("ECONNREFUSED"); } });
   await assert.rejects(cageCheck({ rpc: down, account: VAULT, policy: policy() }), /ECONNREFUSED/);
+});
+
+// ---- the real shape ------------------------------------------------------------------------------------------------
+
+/** attest() verbatim as the sandbox returned it (wasm sha256 A773D106..., 2026-11-03), so the parser is held to the contract's own output, not only to the doc. */
+const REAL_ATTEST = `{"account_id":"dev-20261103140559-21233164518080.test.near","allowlist_enforced":true,"allowlist_len":1,"attest_version":1,"block_height":"465","block_timestamp":"1793714762890876020","config":{"daily_limit":"1000000000000000000000000","delay_secs":86400,"effective_delay_secs":86400,"era":"Calm","kizashi":"kizashi.test.near","max_strikes":3,"min_send":"1000000000000000000000","pending_limit":"10000000000000000000000000"},"contract":"mamori","daily_keys":[{"public_key":"ed25519:7wV4U82xudVpPNfPZVy4XSLKKnf3hA6P37kJrcWv3Qcd","strikes":0},{"public_key":"ed25519:9ui3t6qCE46MFKQUecA8ibjZ9QU3dsB1qKDTm1R6RWUh","strikes":0}],"drill_build":false,"intents_keys":[],"min_delay_secs":86400,"note":"informational: the state this contract records, not proof about the account. A full-access key can deploy a contract whose attest() says anything. Read the code hash and the key list from RPC (view_account, view_access_key_list).","queue_len":0,"revoked_keys":[]}`;
+
+test("cage-check attest: the contract's real attest() output parses, agrees with matching views, and a change to it is caught", async () => {
+  const raw = JSON.parse(REAL_ATTEST);
+  const account = raw.account_id;
+  const daily = raw.daily_keys.map((k) => k.public_key);
+  const views = { daily_keys: daily, intents_keys: [], revoked_keys: [], config: raw.config, attest: raw };
+  const acct = { height: 100, acc: { amount: "1", code_hash: PIN }, views };
+  const keysOf = (extra = []) => [key(ADMIN), ...daily.map((d) => key(d, fc({ receiver_id: account }))), ...extra];
+  const real = (world, pol) => cageCheck({ rpc: rpcOf({ ...acct, keys: keysOf(), ...world }), account, policy: policy(pol) });
+  const ok = await real({});
+  assert.equal(ok.verdict, "GREEN", JSON.stringify(ok.conditions.filter((c) => c.status !== "GREEN")));
+  assert.deepEqual([ok.info.allowlist_enforced, ok.info.max_strikes, ok.info.attest_cross_check], [true, 3, "agree"]);
+  // The same answer with a field renamed or its type changed (what a contract edit would do) is not read as clean.
+  const renamed = { ...raw, daily_keys: raw.daily_keys.map(({ public_key, strikes }) => ({ key: public_key, strikes })) };
+  assert.deepEqual(states(await real({ views: { ...views, attest: renamed } })).red, [IDS.attestAgrees]);
+  const retyped = { ...raw, config: { ...raw.config, delay_secs: String(raw.config.delay_secs) } };
+  assert.deepEqual(states(await real({ views: { ...views, attest: retyped } })).red, [IDS.attestAgrees]);
+  // A function-call key on the account that the real answer does not list is a row 6 red.
+  const stranger = await real({ keys: keysOf([key("ed25519:STRANGER", fc({ receiver_id: account }))]) });
+  assert.deepEqual(states(stranger).red, [IDS.unrecorded]);
 });
