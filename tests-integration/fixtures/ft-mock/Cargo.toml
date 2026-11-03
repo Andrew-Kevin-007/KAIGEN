@@ -1,0 +1,24 @@
+[package]
+name = "ft-mock"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Test fixture for KAIGEN attack 7 (tests-integration/tests/attacks): a minimal NEP-141 look-alike with a settable decimals field. NOT a token, never deployed anywhere but a throwaway sandbox."
+
+# Its own workspace root, like ../../Cargo.toml: nothing here is built by the contracts workspace.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+near-sdk = { version = "5.30", default-features = false }
+
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"
+codegen-units = 1
+overflow-checks = true
+debug = false
+strip = "symbols"
