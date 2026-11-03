@@ -1,55 +1,72 @@
-# KAIGEN v3 (design draft)
+# KAIGEN v3
 
-Status: design only. Testnet only. No outside audit. No mainnet run. Written 2026-11-02.
+Status: implemented in `contracts/mamori` and `contracts/kizashi`, measured in a single-validator sandbox. Testnet only. No audit. Not run on mainnet. The hash-pinned global contract (M6) is not built. Updated 2026-11-03.
 
-A search for the string "v3" over README.md, docs/ and .claude/drafts found no earlier v3 document. docs/internal contents beyond file names, app/ and site/ were not searched. "Not found" in these documents always means "not found in the sources checked", never "does not exist".
+Code state: HEAD 44227f2. The attack numbers were measured at 1a12d57, where `contracts/mamori` was unchanged since 262d92e [ATTACK-RESULTS.md].
 
 ## Index
 
-| File | What it holds |
-|---|---|
-| README.md | This index, the summary, the v2-versus-v3 table |
-| ARCHITECTURE.md | Mechanisms, interfaces, the real-time response loop, the loss bound |
-| THREAT-MODEL.md | Covered, partly covered, not covered, attacker table |
-| LANDSCAPE.md | Cited comparison against industry and against NEAR peers |
-| ROADMAP.md | v2 release checklist, v3 milestones, evidence gates including mainnet gate G1 |
-| NOVELTY-CLAIMS.md | Each claim, its verdict, its evidence, and what is not claimed |
+| File | What it holds | State |
+|---|---|---|
+| README.md (repository root) | Summary for judges and users, v3 status, caveats | Rewritten 2026-11-03 |
+| CHANGES-V2-TO-V3.md | Every v2 to v3 change, the breaking change, and the claims checked | New 2026-11-03 |
+| LOSS-BOUND.md | The loss bound C + P, its derivation, conditions, property tests, mutation checks | Written 2026-11-03 |
+| ATTEST-CHECK.md | `attest()`, `check()`, reason codes and events (the ABI) | Implemented, unit-tested |
+| ATTACK-RESULTS.md | Nine scripted attacks and the measured table (M7 and M8) | Measured in the sandbox |
+| ARCHITECTURE.md | Mechanisms, interfaces, response loop | Design draft of 2026-11-02, partly stale (see below) |
+| THREAT-MODEL.md | Covered, partly covered, not covered, attacker table | Design draft of 2026-11-02, partly stale |
+| LANDSCAPE.md | Cited comparison against industry and NEAR peers | Desk review of 2026-11-02. No peer code was run. |
+| NOVELTY-CLAIMS.md | Each claim, its verdict, its evidence, what is not claimed | Desk review of 2026-11-02 |
+| ROADMAP.md | v2 release checklist, v3 milestones, evidence gates | Status column dated 2026-11-02, not updated |
+
+Stale parts of the design drafts. The design drafts were written before the code. Where they conflict with the progress logs in `docs/internal/V3-*-PROGRESS.md`, the logs and the code are the newer source:
+
+- ARCHITECTURE.md 2.2 and THREAT-MODEL.md sections 6 and 7 say near-sdk 5.30 has no ML-DSA support. V3-W2-EDITH-PROGRESS.md reports that the locked near-sdk 5.30 has `CurveType::MLDSA65`. What the host returns for an ML-DSA signer is still unverified.
+- THREAT-MODEL.md says "No contract code of v3 exists yet". That is no longer true.
+- ARCHITECTURE.md 2.8 lists eight cage-check rows. `jobs/src/cage.mjs` has ten (ARCH-2.8-1 to 8, ATTEST-1 and ATTEST-2) [V3-W2-CAGE-PROGRESS.md].
+- ARCHITECTURE.md section 3 lists `revoke_all_agent_keys()` as a new admin method. The milestone logs do not mention it. The lockdown that is implemented is `lock_down` (partial, repeat `trip` until empty) [ATTEST-CHECK.md section 5]. `sweep_to_safe` is a stretch item in ROADMAP.md and is not in any milestone log.
+- LOSS-BOUND.md line numbers refer to `lib.rs` at sha256 276A870A, which is before the `attest()` and `check()` work. Use function names, not line numbers, until the file is re-read.
 
 ## Summary
 
-v3 keeps the agent-key guard (the Mamori contract) as the thing worth building and tries to make its limits provable instead of asserted. v3 is a new code version of Mamori, not an in-place upgrade of v2. It changes the stored Withdrawal layout and possibly the return type of `request_withdraw`. v2 vaults are not migrated, and there is no mainnet state to migrate.
+v3 keeps the agent-key guard (the Mamori contract) and makes its limits testable. It is a new code version of Mamori, not an in-place upgrade. The stored state layout changed, so v2 vaults must be redeployed. [CHANGES-V2-TO-V3.md]
 
-The design goal is a stated loss bound for a compromised agent key, per token, per rolling 24 hours, under listed conditions, together with tests that attack that bound and a checker that tells anyone when the conditions no longer hold. Containment is a refusal counter inside the call that is refused. No off-chain detector or vendor-held key is on the critical path. That absence of an external actor is the one design point that differs from the vendor products read (Safe with Hypernative, Forta), and it is a trade, not a free gain: the counter only sees calls that reach the contract and only sees clumsy attackers.
+The design goal is a stated loss bound for a compromised daily key: per token, per rolling 24 hours, under listed conditions. The bound is `C + P` (cap plus pending limit). With the default pending multiple of 10, that is 11 times the cap. [LOSS-BOUND.md section 1]
 
-What v3 does not give: any quantum early warning, any quantum protection beyond capping classical hot keys while the admin key is already ML-DSA, any protection against theft inside the cap, or any protection if a classical full-access key sits on the account. Rotating to ML-DSA keys is native NEAR (a vendor reports doing it in two transactions, https://www.fireblocks.com/blog/post-quantum-key-rotation-ml-dsa-near), and the guard's loss bound is the same against any adversary holding the key, quantum or not.
+The bound is supported by three kinds of evidence:
 
-Kizashi (the omen registry) stays optional. It is a circuit breaker for a break someone discloses. It is not an early warning, and a silent or state-level attacker never claims. v3 adds nothing to it except the double-claim fix.
+- An argument from the code (LOSS-BOUND.md section 2).
+- A seeded property test over multi-key sequences, with 0 violations in a 4,000-seed soak. [LOSS-BOUND.md section 4]
+- Nine scripted sandbox attacks. Each attack's own assertions passed. [ATTACK-RESULTS.md]
 
-On "better than what exists": at least two open-source NEAR testnet guards already enforce caps on-chain (Leash, https://github.com/mesh-pch/leash-near; near-agent-spend-guard, https://github.com/mubudot/near-agent-spend-guard). No comparative claim is made until week-3 numbers are produced by running the same attack scripts against code we actually ran. Their README claims are unverified until then.
+Containment is a refusal counter inside the call that is refused. No off-chain detector is on the critical path. The counter sees only calls that reach the contract, and it sees only clumsy attackers. [ARCHITECTURE.md 2.7]
 
-## v2 versus v3
+## What v3 does not give
 
-v2 column is taken from contracts/mamori/src/lib.rs as read on 2026-11-02, not from older notes. The 5 minute delay floor in docs/ARCHITECTURE-REVIEW.md and in the plan is stale for production builds.
+- Any quantum early warning. The omen (Kizashi) is a circuit breaker for a break someone discloses only. [THREAT-MODEL.md section 6]
+- Protection against theft inside the cap. [THREAT-MODEL.md section 4]
+- Protection while a classical full-access key or an unrecorded function-call key sits on the account. [THREAT-MODEL.md section 1]
+- Protection against a calibrated attacker who reads `check` and sends exactly the cap. This attacker loses one cap per window with zero strikes. [ATTACK-RESULTS.md attack 2]
 
-| Area | v2 (code today) | v3 (proposed) | Kind of change |
+## Measured status by milestone
+
+| Milestone | What | Status | Source |
 |---|---|---|---|
-| Refusal of a send | `send_small` policy refusals return a recorded outcome and persist the strike. `request_withdraw` refusals panic and earn no strike. Unauthenticated callers, zero amount and a non-calm era panic. | Same split. M1 is an integration test (near-workspaces sandbox or testnet, not the unit VM) proving the `DeleteKey` receipt removes the key, including a second signed transaction from the burned key in the in-flight window. | Test added |
-| Strike window | N refusals inside a 24 h window (default 3). A prober that stays under N per 24 h is never burned. | Window kept (decision Q4). Only refusals that can never succeed are counted (payee not allowed, amount above the full cap). Cap or queue currently exhausted is uncounted. | Behaviour change, fixes a cross-key grief hole present in v2 |
-| Delay floor | Production floor 24 h (`MIN_DELAY_SECS = 86_400`), shorter in drill builds. | Unchanged. The loss bound depends on delay >= 24 h. | None |
-| Queue | `MAX_QUEUE = 32`, pending sum per token with `checked_add`, 24 h request budget, default pending limit 10x the daily limit. | Adds `expires_at` (at least `unlocks_at` plus a minimum cancel window), `cancel_all`, `purge_expired`, per-key queue slots and a per-key share of the request budget, property tests. Expired items must be purged or ignored by the count and the pending sum, otherwise stale entries keep occupying slots. | Withdrawal borsh layout change |
-| Cap | Already account-level per token (maps keyed by token, not by key). Only strikes are per key. | Same. v3 adds the written invariant and property tests over multi-key, queue-interleaved sequences. | Test and docs only |
-| Tokens | Daily keys reach `ft_transfer` through `send_small` only. `ft_transfer_call` is never called. | v3 adds no `ft_transfer_call`. | None |
-| Intents keys | `register_intents_key` adds a key on `intents.near` and records it so lockdown can remove it. That key signs on `intents.near` with no Mamori cap. | Unchanged. `cage-check` lists recorded intents keys as a red item. The loss bound is void while one exists. | Checker only |
-| Burned key return | Admin can re-add immediately. `add_daily_key` does not check `revoked_keys`. | Adds `require!(!revoked_keys.contains(key))` to `add_daily_key`. No delay unless the policy-key split ships. | Fix |
-| Non-zero allowance | Already enforced (`Allowance::limited` panics on 0, default 250 mNEAR). | Regression test only. | Test |
-| Events | NEP-297-style events already emitted under standard `kaigen`. | Extended with refusal reason codes and spend-after. | Parity |
-| Pre-flight | None | `check(key, asset, amount, to)` view, advisory, can race with state changes. | New |
-| Posture | Config and key views | `attest()` (informational, self-reported) and an off-chain `cage-check` that reads code hash and key list from RPC. | New |
-| Deployment | Per-account deploy | Hash-pinned global contract, init in the same transaction as attach. Mainnet availability unconfirmed. | New |
-| Kizashi | Double-claim race | Race fixed, marked optional everywhere. | Fix |
+| M1 | Burned key is removed from the account (sandbox) | Passed (5 tests) | V3-M1-PROGRESS.md |
+| M2 part A | Kizashi `usdc_epoch` race fix | Implemented, tested | V3-KIZASHI-PROGRESS.md |
+| M2 part B | Queue `expires_at`, `cancel_all`, `purge_expired`, per-key slots and shares | Implemented, tested | V3-MAMORI-PROGRESS.md |
+| M3 | Counting rule, loss-bound derivation, property tests, mutation checks | Done | V3-M3-PROGRESS.md, LOSS-BOUND.md |
+| M4 | `attest()`, cage-check, revoked-key check in `add_daily_key` | Done, sandbox-tested | V3-W2-EDITH-PROGRESS.md, V3-W2-CAGE-PROGRESS.md |
+| M5 | `check()` view, reason codes, extended events | Done, unit-tested | V3-W2-EDITH-PROGRESS.md, ATTEST-CHECK.md |
+| M6 | Hash-pinned global contract on testnet | Not built | ROADMAP.md, ARCHITECTURE.md 3 |
+| M7 | Nine scripted attacks | All nine passed on the sandbox | ATTACK-RESULTS.md, V3-W3-ATTACKS-PROGRESS.md |
+| M8 | Measured table | Done | ATTACK-RESULTS.md section 11 |
+| M9 | Same attacks run against Leash and near-agent-spend-guard | Not run. No comparison is made. | ROADMAP.md, NOVELTY-CLAIMS.md |
 
-Parity note: events, token caps, queue, cancel and rolling cap are parity with existing NEAR guards (Leash, near-agent-spend-guard), not advances. The aggregate cap is an engineering property that we test. We have not verified that peer guards lack it.
+## Open items that are not resolved
 
-## Honest limits in one place
-
-Testnet only, no audit, no formal verification, no measured v3 numbers yet. The ML-DSA admin flow is proven on testnet protocol 88 only. Mainnet protocol 86 has not run it (gate G1, run by Kevin). A release note says nearcore 2.13.0 moves to protocol 86 with ML-DSA-65 (https://newreleases.io/project/github/near/nearcore/release/2.13.0). Confirm activation by RPC status before any mainnet statement.
+- Strike window: the 24 h window is kept. A cumulative count is not implemented, and its false-positive cost was not measured. [ROADMAP.md Q4, ATTACK-RESULTS.md 11.4]
+- A5: the send refund assumes a transfer's failure callback arrives within 24 h. The design assumes receipts resolve in seconds. This is not enforced in code. [LOSS-BOUND.md 2.4]
+- Kizashi residual: a reservation released by the 10 minute timeout, while its transfer is still on its way, can still be double-spent by a read ordered after the release. This is documented, not modelled and not fixed. [V3-KIZASHI-PROGRESS.md step 3]
+- The admin's response time is not measured. The recovery numbers are chain-side only. [ATTACK-RESULTS.md section 13]
+- The ML-DSA admin flow is not run in v3 tests. The sandbox used an ed25519 admin as a stand-in. [ATTACK-RESULTS.md section 0, ROADMAP.md G1]
