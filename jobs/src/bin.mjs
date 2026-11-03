@@ -8,6 +8,8 @@
 //              --release: the mainnet gate (two RPC hosts, one block, writes a gate file); --pre-lock before the lock
 //   mainnet    help | gates | plan | execute --stage N --yes | lock --i-understand-this-is-irreversible
 //              dry-run by default; nothing is sent without the confirmation flag and a key file (KAIGEN_DEPLOYER_KEY_FILE)
+//   cage-check read-only: is the cage around a vault intact? RED or GREEN per condition of docs/v3/ARCHITECTURE.md 2.8
+//              (exit 1 on any red, 3 when something could not be checked; run it with no arguments for the options)
 //
 // Config: deployments.json (path in KAIGEN_DEPLOYMENTS, default ../deployments.json). Secrets only
 // come from the environment or files outside the repo; nothing secret is read from deployments.json.
@@ -15,6 +17,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { productionOmens } from "../../scripts/omens.mjs";
+import { CAGE_USAGE, cageCheck, CageUsage, exitCodeOf, parseCageArgs, renderCage } from "./cage.mjs";
 import { adminCanceller, agentCaller, classicalSubmitter, loadDeployerKey, makeDrillChain, makeSendTrip } from "./chain.mjs";
 import { renderDemo, runInjectionDemo } from "./demo.mjs";
 import { mainnetHelp } from "./help.mjs";
@@ -192,6 +195,28 @@ ${text}`);
     process.exitCode = ok && gate.ok ? 0 : 1;
   },
 
+  /** Read-only. Does not need deployments.json when --rpc or KAIGEN_RPC is given. See cage.mjs. */
+  async "cage-check"() {
+    let opts;
+    try {
+      opts = parseCageArgs(process.argv.slice(3));
+    } catch (e) {
+      if (!(e instanceof CageUsage)) throw e;
+      console.error(`${e.message}\n${CAGE_USAGE}`);
+      process.exitCode = 2;
+      return;
+    }
+    const url = opts.rpc ?? process.env.KAIGEN_RPC ?? (fs.existsSync(depPath) ? JSON.parse(fs.readFileSync(depPath, "utf8")).rpc : undefined);
+    if (!url) {
+      console.error(`no RPC url: pass --rpc, set KAIGEN_RPC or set rpc in ${depPath}\n${CAGE_USAGE}`);
+      process.exitCode = 2;
+      return;
+    }
+    const result = await cageCheck({ rpc: makeRpc(url), account: opts.account, policy: opts.policy });
+    console.log(opts.json ? JSON.stringify(result, null, 2) : renderCage(result));
+    process.exitCode = exitCodeOf(result);
+  },
+
   /** Mainnet deploy tooling. Dry-run by default; see mainnet.mjs. */
   async mainnet() {
     const args = process.argv.slice(3);
@@ -283,7 +308,7 @@ ${text}`);
 
 const cmd = process.argv[2];
 if (!commands[cmd]) {
-  console.error("usage: kaigen-jobs hinomi | keeper [--loop] | watch | firetest | demo | testnet | recycle | judge | verify [--release [--pre-lock]] | mainnet gates|plan|execute|lock");
+  console.error("usage: kaigen-jobs hinomi | keeper [--loop] | watch | firetest | demo | testnet | recycle | judge | verify [--release [--pre-lock]] | cage-check <account> | mainnet gates|plan|execute|lock");
   process.exit(2);
 }
 commands[cmd]().catch((e) => {
