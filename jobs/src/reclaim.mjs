@@ -9,6 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { actions, sendTx } from "@fastnear/api";
 import { signerFromPrivateKey } from "@fastnear/utils";
+import { signerFromSeed } from "@fastnear/ml-dsa-65";
 
 const [dir, chosenFunder] = process.argv.slice(2);
 if (!dir || !chosenFunder) {
@@ -21,12 +22,24 @@ if (!accounts[chosenFunder]) {
   process.exit(2);
 }
 
+// A rehearsal vault's only full-access key is its ML-DSA-65 admin key (the classical key is deleted), whose seed
+// the rehearsal wrote to admin-seeds.json beside accounts.json. Use it for those accounts.
+const seedsFile = path.join(dir, "admin-seeds.json");
+const seeds = fs.existsSync(seedsFile) ? JSON.parse(fs.readFileSync(seedsFile, "utf8")) : {};
+
 for (const [id, key] of Object.entries(accounts)) {
   const dot = id.indexOf(".");
   const parent = dot === -1 ? null : id.slice(dot + 1);
   if (!parent || !accounts[parent] || !id.endsWith(".testnet")) continue; // only sub-accounts of a funder we hold
+  const del = [actions.deleteAccount({ beneficiaryId: parent })];
+  const send = (signer) => sendTx({ signerId: id, signer, receiverId: id, actions: del, waitUntil: "FINAL", network: "testnet" });
   try {
-    await sendTx({ signerId: id, signer: signerFromPrivateKey(key.privateKey), receiverId: id, actions: [actions.deleteAccount({ beneficiaryId: parent })], waitUntil: "FINAL", network: "testnet" });
+    try {
+      await send(signerFromPrivateKey(key.privateKey));
+    } catch (e) {
+      if (!seeds[id] || !/does not exist/.test(String(e.message ?? e))) throw e;
+      await send(signerFromSeed(Uint8Array.from(Buffer.from(seeds[id], "hex"))));
+    }
     console.log(JSON.stringify({ step: "reclaimed", account: id, to: parent }));
   } catch (e) {
     console.log(JSON.stringify({ step: "skipped", account: id, why: String(e.message ?? e).slice(0, 160) }));

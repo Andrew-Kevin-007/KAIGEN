@@ -13,7 +13,7 @@ An optional omen contract (Kizashi) lets anyone who discloses a break of a class
 - Testnet only. No outside audit. Nothing is deployed to mainnet. KAIGEN has not run on mainnet. [ROADMAP.md section 3]
 - The v3 numbers come from one single-validator nearcore 2.14.0 sandbox (protocol 88, 128 ms blocks). The vault admin was an ed25519 key standing in for ML-DSA. [ATTACK-RESULTS.md section 0]
 - The timed attacks used a fast-forwarded chain clock. [ATTACK-RESULTS.md section 14]
-- The hash-pinned global contract for Mamori (M6) is not built. [ROADMAP.md section 2; ARCHITECTURE.md section 3]
+- The hash-pinned global contract for Mamori (M6): tooling is built. On testnet protocol 88 the mechanism is proven with a 1,024-byte module (publish, create and attach accepted; global_contract_hash equals the published hash). The real Mamori publish is not run. Init in the same transaction as the attach is not exercised. Mainnet availability is unconfirmed. [GLOBAL-CONTRACT.md sections 3, 6a and 7; MAINNET-READS.md]
 - The Create vault page (`app/app/vault/create/`) has not been run against a chain. It is enabled on testnet only.
 - v2 was deployed as drill records on testnet. v3 has no testnet deployment in the sources. [LANDSCAPE.md section 3]
 
@@ -315,7 +315,7 @@ These traces were written by us. They are not recorded agent behaviour. The mist
 - Not exercised on a chain: eight daily keys at once, registered intents keys, a non-NEAR token in the queue, the failed-transfer refund and requeue paths (covered by unit and property tests only), and the ML-DSA admin. [ATTACK-RESULTS.md section 13]
 - The timed attacks (2c, 5, 9b, and the strike lapse) moved the chain clock by a day with `sandbox_fast_forward`. The contract reads that clock, so the 24 h rules were exercised without waiting. [ATTACK-RESULTS.md section 14]
 - Admin response time (a person noticing and acting) was not measured. [ATTACK-RESULTS.md section 13]
-- Leash and near-agent-spend-guard were not run. No comparison with them is made. [ROADMAP.md M9; NOVELTY-CLAIMS.md section 5]
+- Leash and near-agent-spend-guard were not run. This README makes no comparison with them. Running their code is for the owner to do. [ROADMAP.md M9; README.md]
 
 ---
 
@@ -412,7 +412,7 @@ Line numbers were removed. They moved when v3 was added. Use function names. For
 | Id | Where | Gap | Status |
 | --- | --- | --- | --- |
 | G1 | Admin flow | ML-DSA admin flow not run on mainnet protocol 86 | Open [ROADMAP.md G1] |
-| G2 | Global contracts | Global-contract publishing works on mainnet and its real cost is known. Docs rate gives about 32 NEAR for the 323,974-byte wasm (estimate). | Open [ROADMAP.md G2] |
+| G2 | Global contracts | Global-contract publishing works on mainnet and its real cost is known. On testnet protocol 88, 0.0001 NEAR per byte was measured at 1,024 bytes. About 37.6 NEAR for the 376,192-byte mamori.wasm is an extrapolation, not measured. Mainnet is protocol 86; publishing there is unconfirmed. | Open [ROADMAP.md G2; GLOBAL-CONTRACT.md section 6a; MAINNET-READS.md] |
 | - | Storage | Each vault deploys Mamori (about 3 NEAR of storage). This was the old README's G2, which clashes with the ROADMAP id. `<!-- UNVERIFIED in v3 sources -->` | Open |
 | G3 | App | Wallet-signed path to add an ML-DSA key is untested; the harness uses a classical key. `<!-- UNVERIFIED in v3 sources -->` | Open |
 | G4 | Intents | `add_public_key` and `remove_public_key` names on `intents.near` unconfirmed | Open [ROADMAP.md G4] |
@@ -436,9 +436,9 @@ Line numbers were removed. They moved when v3 was added. Use function names. For
 ## Phase 2 / not built
 
 - Mainnet deployment, the mainnet drill pair, and the production Kizashi lock. [ROADMAP.md section 3]
-- Hash-pinned global contract for Mamori (M6, gate G2). Not built. [ROADMAP.md section 2]
+- Hash-pinned global contract for Mamori (M6, gate G2). Tooling built. Proven on testnet with a 1,024-byte module only. The real Mamori publish and mainnet are not run. [GLOBAL-CONTRACT.md sections 6a and 7; ROADMAP.md section 2]
 - A production withdrawal delay (owner decision). The floor is 24 h. [CHANGES-V2-TO-V3.md]
-- Policy-key split, `sweep_to_safe`, sentinel and yield hold. Stretch items, not promised. [ARCHITECTURE.md section 6; ROADMAP.md section 2]
+- Policy-key split and `sweep_to_safe` are in progress, not promised. Design: [STRETCH-DESIGN.md](docs/v3/STRETCH-DESIGN.md) (not yet committed). Sentinel and yield hold: stretch items, not promised. The fallback tag `v3-core-testnet` (pushed) points at d4342c0, one commit before the M6 tooling commit fe8d9d9. [git status; git ls-remote --tags; ARCHITECTURE.md section 6; ROADMAP.md section 2]
 - The Create vault page is in `app/app/vault/create/`. It has not been run against a chain. `<!-- UNVERIFIED in v3 sources: "enabled on testnet only, mainnet stays off" -->`
 - A signed gate file for `make verify`. `<!-- UNVERIFIED in v3 sources -->`
 - The landing page in `site/` is being redesigned. It is described here only as the landing page. `<!-- UNVERIFIED in v3 sources -->`

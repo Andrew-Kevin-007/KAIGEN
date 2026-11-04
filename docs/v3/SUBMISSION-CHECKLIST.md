@@ -21,15 +21,15 @@ Status: 2026-11-04. For Kevin only. Sources: docs/v3/ROADMAP.md and docs/PLAN-su
   - Command: none.
   - Done when: each item in `docs/v3/CHANGES-V2-TO-V3.md` section 6 is either sourced or removed from `README.md`, and its UNVERIFIED comment is gone. [CHANGES-V2-TO-V3.md section 6]
 
-- [ ] **3. Decide M6 (hash-pinned global contract on testnet).**
-  - Who: Kevin. M6 needs his funded testnet keys.
-  - Command: none.
-  - Done when: the decision (build it, or not) is written in `docs/v3/ROADMAP.md` section 2, M6 row. [ROADMAP.md section 2]
+- [ ] **3. Real Mamori publish on testnet (M6, hash-pinned global contract).**
+  - Who: Kevin, with one funded testnet account. No owner decision is needed to build; the tooling is built.
+  - Command: `node jobs/src/bin.mjs globalcontract --kizashi <KIZASHI_ACCOUNT> --funder-file <FUNDER_FILE>` (dry run), then add `--yes`. [GLOBAL-CONTRACT.md section 4]
+  - Done when: the real Mamori publish is recorded, which needs about 39 NEAR on one testnet account (an estimate, see GLOBAL-CONTRACT.md section 4). If it is not wanted, state it as not run. [GLOBAL-CONTRACT.md sections 4 and 6a; ROADMAP.md section 2, M6 row]
 
 - [ ] **4. Decide the stretch items (policy-key split, `sweep_to_safe`, sentinel).**
   - Who: Kevin.
   - Command: none.
-  - Done when: each item is written in `docs/v3/ROADMAP.md` section 2 as built or as "document as not applicable". M6 is not built, so Q2 recommends "document as not applicable". `sweep_to_safe` also needs a safe account and watchers (Q5). [ROADMAP.md sections 2 and 4]
+  - Done when: each item is written in `docs/v3/ROADMAP.md` section 2 as built or as "document as not applicable". The stretch items are being built (tag `v3-core-testnet` is the fallback without them); if they are dropped, Q2 recommends "document as not applicable". The design choices for the safe account and watchers (Q5) are recorded in `docs/v3/STRETCH-DESIGN.md` once it is final. [ROADMAP.md sections 2 and 4]
 
 - [ ] **5. Decide whether the peer comparison is wanted.**
   - Who: Kevin.
