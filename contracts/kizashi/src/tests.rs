@@ -434,6 +434,22 @@ fn claim_with_usdc_fits_the_gas_a_caller_attaches() {
 }
 
 #[test]
+fn a_claim_that_releases_a_full_stale_list_still_fits_the_gas_a_caller_attaches() {
+    // `claim` lets the stale reservations go before it orders its read: a full list, all of it stale, is the most it logs.
+    let mut k = usdc_registry();
+    for _ in 0..MAX_IN_FLIGHT {
+        k.in_flight.push(InFlight { claimant: accounts(4), amount: 1, at: 0 });
+    }
+    ctx_at(IN_FLIGHT_TIMEOUT_NS);
+    let sig = ed_sig(&k, "ed25519-omen", &accounts(2), &ed_key());
+    let before = env::used_gas().as_gas();
+    let _ = k.claim("ed25519-omen".into(), accounts(2), sig);
+    let used = env::used_gas().as_gas() - before;
+    assert!(logged("in_flight_released") && k.in_flight.is_empty(), "the whole list was released");
+    assert!(used * 11 / 10 <= CLAIM_GAS_ATTACHED.as_gas(), "claim used {used} gas, plus 10% must fit {}", CLAIM_GAS_ATTACHED.as_gas());
+}
+
+#[test]
 fn the_longest_retry_fits_a_transaction() {
     // NEAR and a balance read together are the longest chain `retry_payout` schedules (a verified USDC amount is
     // shorter: it skips the read and its 90 Tgas callback). Whoever calls it has to attach this much.
@@ -478,6 +494,27 @@ fn usdc_payout_the_contract_cannot_fund_is_recorded_not_lost() {
     assert!(get_created_receipts().is_empty(), "no registration deposit to attach");
     assert!(logged("payout_failed"));
     assert_eq!(k.owed(accounts(2)).usdc.0, PAID);
+}
+
+#[test]
+fn the_registration_deposit_is_not_taken_from_the_near_owed_to_another_claimant() {
+    // The deposit leaves the balance when the payout is scheduled and the token refunds it later, so while it is out the
+    // contract holds less than it owes. It may only come out of what is spare beyond what is owed.
+    let mut k = usdc_registry();
+    let owed_near: u128 = 3_000_000_000_000_000_000_000_000; // 3 NEAR, owed to accounts(4)
+    k.record_owed(&accounts(4), owed_near, 0);
+    k.record_owed(&accounts(2), 0, PAID);
+    // The reserve, what is owed and 0.005 NEAR: not enough for the 0.01 NEAR deposit.
+    ctx_with_balance(NearToken::from_yoctonear(storage_reserve() + owed_near + 5_000_000_000_000_000_000_000));
+    let text = panic_text(|| {
+        let _ = k.retry_payout(accounts(2));
+    });
+    assert!(text.contains("spare NEAR"), "a retry that cannot attach the deposit says so: {text}");
+    // With 0.02 NEAR above what is owed the same retry goes through.
+    ctx_with_balance(NearToken::from_yoctonear(storage_reserve() + owed_near + 20_000_000_000_000_000_000_000));
+    let _ = k.retry_payout(accounts(2));
+    let r = receipts_text();
+    assert!(r.contains("storage_deposit") && r.contains("ft_transfer"), "{r}");
 }
 
 #[test]
@@ -1008,25 +1045,40 @@ fn the_balance_callback_costs_the_same_gas_however_many_records_are_owed() {
 
 #[test]
 fn the_balance_callback_fits_its_gas_in_the_fullest_state_it_can_meet() {
-    // Eight claimants owed (the most there can be), the in-flight list one short of full with every entry
-    // stale (the most the callback has to release and log), and the claimant's own record to spend.
-    let mut k = usdc_registry();
-    for n in 3..=9 {
-        let other: AccountId = format!("claimant{n}.near").parse().unwrap();
-        k.record_owed(&other, 1, 1_000);
-    }
-    k.record_owed(&accounts(2), 1, PAID);
-    for _ in 0..MAX_IN_FLIGHT - 1 {
-        k.in_flight.push(InFlight { claimant: accounts(4), amount: 1, at: 0 });
-    }
+    // Eight claimants owed (the most there can be), the in-flight list one short of full, and the claimant's own
+    // record to spend. Two shapes of it: every entry still reserved (the callback pays, and has the longest list to
+    // add up), and every entry stale (the callback releases and logs them all, and refuses the read it was given:
+    // the release moves the epoch, so it schedules nothing).
+    let full = |at: u64| {
+        let mut k = usdc_registry();
+        for n in 3..=9 {
+            let other: AccountId = format!("claimant{n}.near").parse().unwrap();
+            k.record_owed(&other, 1, 1_000);
+        }
+        k.record_owed(&accounts(2), 1, PAID);
+        for _ in 0..MAX_IN_FLIGHT - 1 {
+            k.in_flight.push(InFlight { claimant: accounts(4), amount: 1, at });
+        }
+        k
+    };
+    let scheduled = || get_created_receipts().iter().any(|r| format!("{:?}", r.actions).contains("FunctionCall"));
+
+    let mut k = full(IN_FLIGHT_TIMEOUT_NS);
     ctx_init_at(IN_FLIGHT_TIMEOUT_NS);
     let before = env::used_gas().as_gas();
     k.on_usdc_balance(accounts(2), U64(k.usdc_epoch), Ok(U128(PAID * 100)));
-    let used = env::used_gas().as_gas() - before;
-    assert!(logged("in_flight_released"), "the stale entries were released in this call");
-    assert!(get_created_receipts().iter().any(|r| format!("{:?}", r.actions).contains("FunctionCall")), "and the payout was scheduled");
-    assert!(used <= ON_USDC_BALANCE_GAS.as_gas(), "used {used} gas, given {}", ON_USDC_BALANCE_GAS.as_gas());
-    assert!(used * 11 / 10 <= ON_USDC_BALANCE_GAS.as_gas(), "{used} gas leaves no room for the wasm");
+    let paying = env::used_gas().as_gas() - before;
+    assert!(!logged("in_flight_released") && scheduled(), "nothing was stale, and the payout was scheduled");
+    assert!(paying <= ON_USDC_BALANCE_GAS.as_gas(), "used {paying} gas, given {}", ON_USDC_BALANCE_GAS.as_gas());
+    assert!(paying * 11 / 10 <= ON_USDC_BALANCE_GAS.as_gas(), "{paying} gas leaves no room for the wasm");
+
+    let mut k = full(0);
+    ctx_init_at(IN_FLIGHT_TIMEOUT_NS);
+    let before = env::used_gas().as_gas();
+    k.on_usdc_balance(accounts(2), U64(k.usdc_epoch), Ok(U128(PAID * 100)));
+    let releasing = env::used_gas().as_gas() - before;
+    assert!(logged("in_flight_released") && !scheduled(), "the stale entries were released and nothing was scheduled");
+    assert!(releasing < paying, "{releasing} gas to release and refuse, {paying} to pay: the budget is set by paying");
 }
 
 #[test]
@@ -1113,12 +1165,24 @@ fn a_reservation_whose_callback_never_came_back_is_released_after_the_timeout() 
     assert!(get_created_receipts().is_empty(), "inside the timeout the reservation holds, so nothing is free");
     assert_eq!(k.in_flight_total(), PAID);
 
+    // A claim at the timeout lets the stale reservation go before it orders its read, and its callback is paid from.
+    ctx_at(IN_FLIGHT_TIMEOUT_NS);
+    let sig = ed_sig(&k, "ed25519-omen", &accounts(3), &ed_key());
+    let _ = k.claim("ed25519-omen".into(), accounts(3), sig);
+    assert!(logged("in_flight_released"), "{:?}", get_logs());
     ctx_init_at(IN_FLIGHT_TIMEOUT_NS);
     k.on_usdc_balance(accounts(3), U64(k.usdc_epoch), Ok(U128(PAID)));
     let r = receipts_text();
     assert!(r.contains("\"amount\":\"5000000\"") && receiver_is(&r, &accounts(3)), "at the timeout it is let go and the USDC is paid out: {r}");
-    assert!(logged("in_flight_released"), "{:?}", get_logs());
     assert_eq!(k.in_flight_total(), PAID, "only the new payout is reserved now");
+}
+
+/// What `claim` and `retry_payout` do before they order a balance read at `ts` ns: let the stale reservations go.
+/// Returns the epoch that read is ordered under.
+fn release_then_order_a_read(k: &mut Kizashi, ts: u64) -> U64 {
+    ctx_at(ts);
+    let _ = k.release_stale_in_flight();
+    U64(k.usdc_epoch)
 }
 
 #[test]
@@ -1146,8 +1210,9 @@ fn a_late_callback_after_the_release_frees_nothing_that_belongs_to_a_newer_payou
     let mut k = usdc_registry();
     ctx_init_at(0);
     k.on_usdc_balance(accounts(2), U64(k.usdc_epoch), Ok(U128(PAID))); // payout A, whose callback is very late
+    let ordered = release_then_order_a_read(&mut k, IN_FLIGHT_TIMEOUT_NS); // A is released ...
     ctx_init_at(IN_FLIGHT_TIMEOUT_NS);
-    k.on_usdc_balance(accounts(3), U64(k.usdc_epoch), Ok(U128(PAID))); // A is released, and payout B takes the same amount
+    k.on_usdc_balance(accounts(3), ordered, Ok(U128(PAID))); // ... and payout B takes the same amount
     assert_eq!(k.in_flight_total(), PAID);
 
     ctx_callback_at(IN_FLIGHT_TIMEOUT_NS + 1, PromiseResult::Successful(vec![]));
@@ -1371,6 +1436,73 @@ fn claim_and_retry_order_their_reads_under_the_current_epoch() {
 }
 
 
+// --- K11: a reservation released while its transfer is still on the way ---
+//
+// `release_stale` lets a reservation go after `IN_FLIGHT_TIMEOUT_NS` without knowing what became of its transfer: if its
+// callback was lost the transfer settled long ago, but if the transfer is only very late the tokens have not left yet.
+// From then on nothing subtracts them, and the callback that finally reports has no entry. What this contract can still
+// guarantee is about the reads that were ordered before the transfer landed: they are older than it, and
+// `usdc_epoch` has to say so however the landing reaches the contract.
+
+/// accounts(4) is owed 5 000 000 on a verified read and the token holds 10 000 000. accounts(2)'s payout of the
+/// other 5 000 000 was scheduled at time 0 and has not reported back.
+fn payout_in_flight_beside_a_held_amount() -> Kizashi {
+    let mut k = usdc_registry();
+    k.record_owed(&accounts(4), 0, 5_000_000);
+    ctx_init_at(0);
+    k.on_usdc_balance(accounts(2), U64(k.usdc_epoch), Ok(U128(10_000_000)));
+    assert_eq!(k.in_flight_total(), 5_000_000);
+    k
+}
+
+#[test]
+fn a_late_success_after_the_release_makes_the_reads_ordered_before_it_stale() {
+    let mut k = payout_in_flight_beside_a_held_amount();
+    ctx_at(IN_FLIGHT_TIMEOUT_NS);
+    assert_eq!(k.release_stale_in_flight().0, 5_000_000); // the transfer is still on its way
+    let ordered = k.usdc_epoch; // accounts(3)'s balance read is ordered now and sees all 10 000 000
+    ctx_callback_at(IN_FLIGHT_TIMEOUT_NS + 1, PromiseResult::Successful(vec![]));
+    k.on_usdc_paid(accounts(2), U128(5_000_000)); // the transfer lands and is reported before that read comes back
+    assert_eq!(k.usdc_epoch, ordered + 1, "a landed transfer makes every earlier read stale, entry or no entry");
+    ctx_init_at(IN_FLIGHT_TIMEOUT_NS + 2);
+    k.on_usdc_balance(accounts(3), U64(ordered), Ok(U128(10_000_000)));
+    let r = receipts_text();
+    assert!(!r.contains("ft_transfer"), "5 000 000 were scheduled out of the 5 000 000 held for accounts(4): {r}");
+    assert!(k.owed(accounts(3)).usdc_unread, "accounts(3) is paid by a retry, which reads the balance again");
+    assert_eq!(k.owed(accounts(4)).usdc.0, 5_000_000, "and what is held for accounts(4) is still held");
+}
+
+#[test]
+fn a_read_in_hand_when_its_callback_releases_a_stale_reservation_is_not_paid_from() {
+    let mut k = payout_in_flight_beside_a_held_amount();
+    let ordered = k.usdc_epoch; // accounts(3)'s read was ordered while that reservation was still good
+    // The 10 minutes pass; the read comes back with the 10 000 000 it saw, which still count the payout's tokens.
+    ctx_init_at(IN_FLIGHT_TIMEOUT_NS);
+    k.on_usdc_balance(accounts(3), U64(ordered), Ok(U128(10_000_000)));
+    let r = receipts_text();
+    assert!(!r.contains("ft_transfer"), "the release in this very callback took away what protected those tokens: {r}");
+    assert!(logged("in_flight_released"), "{:?}", get_logs());
+    assert!(k.owed(accounts(3)).usdc_unread);
+    assert_eq!(k.in_flight_total(), 0);
+}
+
+#[test]
+fn claim_releases_stale_reservations_before_it_orders_its_read() {
+    let mut k = payout_in_flight_beside_a_held_amount();
+    let sig = ed_sig(&k, "ed25519-omen", &accounts(3), &ed_key());
+    ctx_at(IN_FLIGHT_TIMEOUT_NS);
+    let _ = k.claim("ed25519-omen".into(), accounts(3), sig);
+    assert!(logged("in_flight_released"), "{:?}", get_logs());
+    let ordered = k.usdc_epoch;
+    assert_eq!(ordered, 1, "the release moved the epoch");
+    assert!(receipts_text().contains("\"epoch\":\"1\""), "the read is ordered under the epoch after the release");
+    // So its callback is paid from, instead of being refused for a release it caused itself.
+    ctx_init_at(IN_FLIGHT_TIMEOUT_NS + 1);
+    k.on_usdc_balance(accounts(3), U64(ordered), Ok(U128(10_000_000)));
+    let r = receipts_text();
+    assert!(r.contains("ft_transfer") && r.contains("\"amount\":\"5000000\"") && receiver_is(&r, &accounts(3)), "{r}");
+}
+
 // --- M2 part A: the paths matrix. Every pair of payout paths, in both orders ---
 //
 // The unit-test VM runs one call at a time, so what a chain does between two receipts has to be played by hand.
@@ -1381,8 +1513,11 @@ fn claim_and_retry_order_their_reads_under_the_current_epoch() {
 // books after every step.
 //
 // What the model assumes of the runtime, and has not checked against nearcore: a callback runs after the receipt
-// it waits for, and the refund of a failed transfer reaches the contract after that callback (the contract's own
-// `retry_payout` message, "owed NEAR has not returned yet", relies on the same order).
+// it waits for, and, unless a fixture turns `refund_may_come_first` on, the refund of a failed transfer reaches the
+// contract after that callback (the contract's own `retry_payout` message, "owed NEAR has not returned yet", relies on
+// the same order). With the refund free to come first the contract fails (see
+// `a_refund_that_reaches_the_contract_before_its_callback_is_swept_by_the_next_claim`). A storage deposit's refund is
+// a receipt of its own in any order when `deposit_refunds_come_late` is on, and cost-free otherwise.
 
 use near_sdk::mock::MockAction;
 use std::collections::{BTreeMap, HashSet, VecDeque};
@@ -1398,15 +1533,20 @@ fn omen_key(i: usize) -> (&'static str, EdKey) {
 
 #[derive(Clone, Debug, PartialEq)]
 enum Step {
-    /// A NEAR transfer to `to` and the contract's `on_near_payout` that waits for it.
+    /// A NEAR transfer to `to`. If it fails, its refund is a receipt of its own (`Refund`).
     NearPay { to: AccountId, amount: u128 },
-    /// The refund of a failed transfer. It reaches the contract after the callback.
+    /// The contract's `on_near_payout`, with what the transfer before it returned.
+    NearResolve { to: AccountId, amount: u128 },
+    /// The refund of a failed transfer, a receipt of its own: it may reach the contract before or after the callback.
     Refund(u128),
     /// The token's `ft_balance_of`: the balance is read when this is delivered.
     Read,
     /// The contract's `on_usdc_balance`, with the balance the read before it returned and the epoch it was ordered under.
     Balance { claimant: AccountId, epoch: u64 },
-    /// The token's `ft_transfer`. The storage deposit before it is taken to work.
+    /// The token's `storage_deposit` for the claimant, with `amount` attached. It works, and the token refunds the
+    /// whole deposit as a receipt of its own, which may reach the contract at any time after.
+    Register(u128),
+    /// The token's `ft_transfer`.
     FtSend { to: AccountId, amount: u128 },
     /// The contract's `on_usdc_paid`, with what `ft_transfer` returned.
     Paid { claimant: AccountId, amount: u128 },
@@ -1419,6 +1559,14 @@ struct Chain {
     snapshot: u128,
     /// Whether the last `FtSend` of this chain worked.
     last_ok: bool,
+    /// How many landings had been reported to the contract, and reservations released, when that `Read` was taken.
+    news_at_read: u32,
+}
+
+impl Chain {
+    fn new(steps: impl Into<VecDeque<Step>>) -> Self {
+        Self { steps: steps.into(), snapshot: 0, last_ok: true, news_at_read: 0 }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1426,6 +1574,8 @@ enum Op {
     Claim { omen: usize, by: AccountId },
     Retry(AccountId),
     Release,
+    /// The clock reaches `IN_FLIGHT_TIMEOUT_NS`: a reservation made at time 0 turns stale between two other steps.
+    TimeOut,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1474,6 +1624,21 @@ struct World {
     short: u32,
     /// Pays out from every balance read, however old. Only to show the model sees the race the epoch closes.
     trust_stale_reads: bool,
+    /// Landings reported to the contract plus reservations it has released: the news that makes a balance read
+    /// older than it. A read that has seen less news than the contract has when its callback pays is stale.
+    news: u32,
+    /// Whether the token's refund of a storage deposit is a receipt of its own that may reach the contract at any
+    /// time (on), or comes back at once (off: the deposit is taken to cost nothing). On multiplies the states to
+    /// explore, so only the fixtures that are about it turn it on.
+    deposit_refunds_come_late: bool,
+    /// Whether the refund of a failed NEAR transfer may reach the contract BEFORE the callback that waits for that
+    /// transfer. Off: the refund is made once the callback has run, the order the contract's own retry message
+    /// ("owed NEAR has not returned to the contract yet") assumes and nobody has checked against nearcore.
+    refund_may_come_first: bool,
+    /// For a reservation released while its transfer was still on the way: the contract cannot know, so it may
+    /// schedule tokens that transfer is about to take. The token then refuses whichever comes second (`short`), and
+    /// the checks that forbid exactly that are off. Everything else is still checked.
+    overbooking_tolerated: bool,
     /// Things that went wrong in a transaction, found as it was made.
     errors: Vec<String>,
     trace: Vec<String>,
@@ -1542,13 +1707,14 @@ fn scheduled() -> (Vec<Step>, u128) {
                     steps.push(Step::NearPay { to: r.receiver_id.clone(), amount: deposit.as_yoctonear() });
                 }
                 MockAction::FunctionCallWeight { method_name, args, attached_deposit, .. } => {
-                    // The token refunds what the registration does not need, so its storage deposit is taken to cost nothing.
-                    if method_name.as_slice() != b"storage_deposit" {
-                        leaves += attached_deposit.as_yoctonear();
-                    }
+                    leaves += attached_deposit.as_yoctonear();
                     let v = json_of(args);
                     match method_name.as_slice() {
-                        b"on_near_payout" | b"storage_deposit" => {} // the first rides with its transfer, the second is taken to work
+                        b"storage_deposit" => steps.push(Step::Register(attached_deposit.as_yoctonear())),
+                        b"on_near_payout" => steps.push(Step::NearResolve {
+                            to: account_of(&v, "claimant"),
+                            amount: amount_of(&v, "amount"),
+                        }),
                         b"ft_balance_of" => steps.push(Step::Read),
                         b"on_usdc_balance" => steps.push(Step::Balance {
                             claimant: account_of(&v, "claimant"),
@@ -1609,6 +1775,10 @@ impl World {
             paid_usdc: BTreeMap::new(),
             short: 0,
             trust_stale_reads: false,
+            news: 0,
+            deposit_refunds_come_late: false,
+            refund_may_come_first: false,
+            overbooking_tolerated: false,
             errors: Vec::new(),
             trace: Vec::new(),
         }
@@ -1621,10 +1791,20 @@ impl World {
             .unwrap_or_default();
         set_env(predecessor, self.near, self.now, results);
         let out = f(&mut self.k);
-        let (steps, leaves) = scheduled();
+        self.news += u32::from(logged("in_flight_released"));
+        let (mut steps, mut leaves) = scheduled();
+        if !self.deposit_refunds_come_late {
+            steps.retain(|s| match s {
+                Step::Register(amount) => {
+                    leaves -= amount;
+                    false
+                }
+                _ => true,
+            });
+        }
         self.near = self.near.checked_sub(leaves).expect("the contract scheduled more NEAR than it holds");
         if !steps.is_empty() {
-            self.chains.push(Chain { steps: steps.into(), snapshot: 0, last_ok: true });
+            self.chains.push(Chain::new(steps));
         }
         out
     }
@@ -1651,6 +1831,7 @@ impl World {
             Op::Release => self.call(&accounts(1), None, |k| {
                 let _ = k.release_stale_in_flight();
             }),
+            Op::TimeOut => self.now = IN_FLIGHT_TIMEOUT_NS,
         }));
         match run {
             Err(e) => {
@@ -1669,21 +1850,39 @@ impl World {
             Step::NearPay { to, amount } => {
                 let ok = !self.dead.contains(&to);
                 if ok {
-                    *self.paid_near.entry(to.clone()).or_default() += amount;
+                    *self.paid_near.entry(to).or_default() += amount;
+                } else if self.refund_may_come_first {
+                    // The refund and the callback are both made when the failed transfer is processed; with this on,
+                    // either may reach the contract first, and the explorer tries both.
+                    self.chains.push(Chain::new([Step::Refund(amount)]));
                 }
-                self.call(&accounts(0), Some(ok), |k| k.on_near_payout(to.clone(), U128(amount)));
-                if !ok {
-                    let refund = Chain { steps: VecDeque::from([Step::Refund(amount)]), snapshot: 0, last_ok: true };
-                    self.chains.push(refund);
+                self.chains[i].last_ok = ok;
+            }
+            Step::NearResolve { to, amount } => {
+                let ok = self.chains[i].last_ok;
+                self.call(&accounts(0), Some(ok), |k| k.on_near_payout(to, U128(amount)));
+                if !ok && !self.refund_may_come_first {
+                    self.chains.push(Chain::new([Step::Refund(amount)])); // after the callback
                 }
             }
+            Step::Register(amount) => self.chains.push(Chain::new([Step::Refund(amount)])),
             Step::Refund(amount) => self.near += amount,
-            Step::Read => self.chains[i].snapshot = self.tok,
+            Step::Read => {
+                self.chains[i].snapshot = self.tok;
+                self.chains[i].news_at_read = self.news;
+            }
             Step::Balance { claimant, epoch } => {
-                let seen = self.chains[i].snapshot;
+                let (seen, news_at_read) = (self.chains[i].snapshot, self.chains[i].news_at_read);
                 // `trust_stale_reads` hands the callback the epoch it has now, as if the guard were not there.
                 let epoch = if self.trust_stale_reads { self.k.usdc_epoch } else { epoch };
-                self.call(&accounts(0), None, |k| k.on_usdc_balance(claimant, U64(epoch), Ok(U128(seen))));
+                let chains_before = self.chains.len();
+                self.call(&accounts(0), None, |k| k.on_usdc_balance(claimant.clone(), U64(epoch), Ok(U128(seen))));
+                let pays = self.chains[chains_before..].iter().any(|c| c.steps.iter().any(|s| matches!(s, Step::FtSend { .. })));
+                if pays && self.news != news_at_read {
+                    self.errors.push(format!(
+                        "{claimant} was paid from a balance read taken before news the contract had by then: a landing it was told of, or a release"
+                    ));
+                }
             }
             Step::FtSend { to, amount } => {
                 let ok = if let Some(at) = self.refuse.iter().position(|a| *a == to) {
@@ -1709,6 +1908,7 @@ impl World {
                     self.landed.remove(at);
                 }
                 self.call(&accounts(0), Some(ok), |k| k.on_usdc_paid(claimant, U128(amount)));
+                self.news += u32::from(ok);
             }
         }
     }
@@ -1735,7 +1935,7 @@ impl World {
             self.chains.iter().filter(|c| !c.steps.is_empty()).map(|c| format!("{c:?}")).collect();
         chains.sort();
         format!(
-            "{started}|{}|{}|{}|{owed:?}|{in_flight:?}|{}|{omens:?}|{chains:?}|{:?}|{:?}|{:?}|{}|{:?}|{}",
+            "{started}|{}|{}|{}|{owed:?}|{in_flight:?}|{}|{omens:?}|{chains:?}|{:?}|{:?}|{:?}|{}|{:?}|{}|{}",
             self.near,
             self.tok,
             self.now,
@@ -1745,7 +1945,8 @@ impl World {
             self.paid_usdc,
             self.short,
             self.refuse,
-            self.errors.len()
+            self.errors.len(),
+            self.news
         )
     }
 
@@ -1761,7 +1962,7 @@ impl World {
         let verified: u128 = self.k.owed.values().filter(|o| !o.usdc_unread).map(|o| o.usdc).sum();
         let promised = self.k.in_flight_total() + verified;
         let held = self.tok + self.landed.iter().sum::<u128>();
-        if promised > held {
+        if promised > held && !self.overbooking_tolerated {
             out.push(format!(
                 "USDC promised twice: {promised} promised (in flight {}, owed {verified}), the token holds {held}",
                 self.k.in_flight_total()
@@ -1792,7 +1993,7 @@ impl World {
                 self.deliver(i);
             }
         }
-        if self.short > 0 {
+        if self.short > 0 && !self.overbooking_tolerated {
             out.push(format!("the token refused {} transfer(s) for want of tokens", self.short));
         }
         for (a, o) in self.k.owed.iter() {
@@ -1910,6 +2111,21 @@ fn x_cannot_receive_near() -> World {
     m
 }
 
+/// w is owed 5 000 000 USDC on a verified read, and the token's refund of each storage deposit is a receipt of its
+/// own that may reach the contract at any time.
+fn w_owed_verified_usdc_deposit_refund_late() -> World {
+    let mut m = w_owed_verified_usdc();
+    m.deposit_refunds_come_late = true;
+    m
+}
+
+/// The same, but the refund of the failed transfer may reach the contract before the callback that books it.
+fn x_cannot_receive_near_refund_first() -> World {
+    let mut m = x_cannot_receive_near();
+    m.refund_may_come_first = true;
+    m
+}
+
 /// The token refuses the first USDC transfer to y although it holds enough.
 fn token_refuses_y_once() -> World {
     let mut m = World::new();
@@ -1932,8 +2148,44 @@ fn w_payout_never_reported() -> World {
 fn w_payout_reports_late() -> World {
     let mut m = w_payout_never_reported();
     let late = Step::Paid { claimant: w(), amount: 4_000_000 };
-    m.chains.push(Chain { steps: VecDeque::from([late]), snapshot: 0, last_ok: true });
+    m.chains.push(Chain::new([late]));
     m
+}
+
+/// A payout of w's whose `ft_transfer` is still on its way when its reservation times out: the tokens have not left
+/// the token contract, and the `on_usdc_paid` that would book it is behind the transfer. `ok` is whether that transfer
+/// will work. The reservation is already `now` ns old (the timeout, or 1 ns: then `Op::TimeOut` ages it).
+fn w_payout_still_in_transit(ok: bool, now: u64) -> World {
+    let mut m = World::new();
+    m.k.record_owed(&w(), 0, 3_000_000); // held for w as well, so that a retry of w has something to pay
+    m.k.in_flight.push(InFlight { claimant: w(), amount: 4_000_000, at: 0 });
+    let steps = VecDeque::from([
+        Step::FtSend { to: w(), amount: 4_000_000 },
+        Step::Paid { claimant: w(), amount: 4_000_000 },
+    ]);
+    m.chains.push(Chain::new(steps));
+    if !ok {
+        m.refuse.push(w());
+    }
+    m.now = now;
+    m.overbooking_tolerated = true;
+    m
+}
+
+fn w_payout_in_transit_will_land() -> World {
+    w_payout_still_in_transit(true, IN_FLIGHT_TIMEOUT_NS)
+}
+
+fn w_payout_in_transit_will_fail() -> World {
+    w_payout_still_in_transit(false, IN_FLIGHT_TIMEOUT_NS)
+}
+
+fn w_payout_in_transit_times_out_later_and_lands() -> World {
+    w_payout_still_in_transit(true, 1)
+}
+
+fn w_payout_in_transit_times_out_later_and_fails() -> World {
+    w_payout_still_in_transit(false, 1)
 }
 
 fn claim_a(by: AccountId) -> Op {
@@ -1993,6 +2245,34 @@ fn matrix_a_claimants_near_payout_fails_and_comes_back_owed() {
 }
 
 #[test]
+fn matrix_the_storage_deposit_refund_is_a_receipt_of_its_own() {
+    // The 0.01 NEAR attached to each `storage_deposit` leaves the balance when the payout is scheduled and comes
+    // back whenever the token's refund arrives: a window in which a claim or a retry sees less NEAR than there is.
+    // That can only make a payout smaller, and the model checks nothing is paid beyond the pot, the owed NEAR is
+    // backed, and everything settles once the refunds are in.
+    matrix(w_owed_verified_usdc_deposit_refund_late, &pool(&[Op::Retry(w())]));
+}
+
+#[test]
+fn a_refund_that_reaches_the_contract_before_its_callback_is_swept_by_the_next_claim() {
+    // KNOWN GAP, pinned. `on_near_payout` books a failed NEAR transfer as owed, and the refund that gives the money
+    // back is a receipt of its own. If the refund lands first, a claim that starts before the callback sees the
+    // refunded NEAR as free and pays it to someone else, and the callback then books a debt nothing backs. The
+    // contract is only right if the callback runs first; the model shows both orders and the contract passes one.
+    // When this contract is changed to hold the NEAR from the moment it is scheduled, this test must start failing,
+    // and `matrix_a_claimants_near_payout_fails_and_comes_back_owed` is then to be run with the refund free to come
+    // first (`x_cannot_receive_near_refund_first`).
+    let ops = [claim_a(x()), claim_b(y())];
+    let (bad, _) = explore(&x_cannot_receive_near_refund_first, &ops, 5);
+    assert!(
+        bad.iter().any(|b| b.contains("NEAR owed twice")),
+        "the model did not find the debt that nothing backs: {bad:?}"
+    );
+    let (bad, _) = explore(&x_cannot_receive_near, &ops, 5);
+    assert!(bad.is_empty(), "with the refund after the callback the same two claims break nothing: {bad:?}");
+}
+
+#[test]
 fn matrix_the_token_refuses_one_usdc_transfer() {
     matrix(token_refuses_y_once, &pool(&[Op::Retry(y())]));
 }
@@ -2005,6 +2285,41 @@ fn matrix_a_payout_that_never_reported_is_released() {
 #[test]
 fn matrix_a_payout_reports_after_its_timeout() {
     matrix(w_payout_reports_late, &pool(&[Op::Retry(w()), Op::Release]));
+}
+
+#[test]
+fn matrix_a_reservation_released_while_its_transfer_is_on_the_way_and_lands() {
+    matrix(w_payout_in_transit_will_land, &pool(&[Op::Retry(w()), Op::Release]));
+}
+
+#[test]
+fn matrix_a_reservation_released_while_its_transfer_is_on_the_way_and_fails() {
+    matrix(w_payout_in_transit_will_fail, &pool(&[Op::Retry(w()), Op::Release]));
+}
+
+#[test]
+fn matrix_a_reservation_that_times_out_between_two_steps_while_its_transfer_lands() {
+    matrix(w_payout_in_transit_times_out_later_and_lands, &pool(&[Op::Retry(w()), Op::TimeOut]));
+}
+
+#[test]
+fn matrix_a_reservation_that_times_out_between_two_steps_while_its_transfer_fails() {
+    matrix(w_payout_in_transit_times_out_later_and_fails, &pool(&[Op::Retry(w()), Op::TimeOut]));
+}
+
+#[test]
+fn the_model_still_sees_a_stale_read_paid_from_when_overbooking_is_tolerated() {
+    // The in-transit fixtures turn off the checks that the release itself makes unavoidable (the contract cannot
+    // know the tokens are about to go). A payout from a read older than news the contract had is not among them.
+    let trusting = || {
+        let mut m = w_payout_in_transit_will_land();
+        m.trust_stale_reads = true;
+        m
+    };
+    let (bad, _) = explore(&trusting, &[claim_a(x()), Op::Release], 5);
+    assert!(bad.iter().any(|b| b.contains("balance read taken before news")), "the model did not see it: {bad:?}");
+    let (bad, _) = explore(&w_payout_in_transit_will_land, &[claim_a(x()), Op::Release], 5);
+    assert!(bad.is_empty(), "{bad:?}");
 }
 
 #[test]

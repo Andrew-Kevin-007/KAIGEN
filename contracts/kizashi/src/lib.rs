@@ -24,10 +24,12 @@ const RESOLVE_GAS: Gas = Gas::from_tgas(5);
 /// `on_usdc_balance` plus the chain it schedules (storage_deposit, ft_transfer, resolve). The prepaid
 /// gas `claim` leaves unused is shared between its callbacks on top of this, so it is a floor.
 ///
-/// Measured in the unit-test VM, which charges the real fees: the callback uses 78.7 Tgas in the fullest state it
-/// can meet, 45 of them the gas it attaches to the three calls it schedules and the rest the fees of creating them
-/// (the receipts, the function-call actions, and a data receipt for each `then`). The VM does not run the wasm,
-/// which adds a little, so 90 Tgas leaves about 14% for it. It was 55, which the callback could not have afforded.
+/// Measured in the unit-test VM, which charges the real fees: the callback uses 78.4 Tgas in the fullest state it
+/// can meet (a payout with 15 reservations and 8 owed records), 45 of them the gas it attaches to the three calls it
+/// schedules and the rest the fees of creating them (the receipts, the function-call actions, and a data receipt for
+/// each `then`). A callback that finds stale reservations releases them and pays nothing, for 0.33 Tgas. The VM does
+/// not run the wasm, which adds a little, so 90 Tgas leaves about 14% for it. It was 55, which the callback could not
+/// have afforded.
 const ON_USDC_BALANCE_GAS: Gas = Gas::from_tgas(90);
 /// The most omens one registry holds.
 const MAX_OMENS: usize = 8;
@@ -36,9 +38,11 @@ const MAX_OMENS: usize = 8;
 /// the callback that has to look through the list.
 const MAX_IN_FLIGHT: usize = 16;
 /// How long (ns) a scheduled USDC payout may stay unreported before anyone may release its reservation: 10
-/// minutes, many times the few blocks the chain needs. Too short is safe (a payout that was only slow is booked
-/// when its callback does arrive, and a second transfer of the same tokens fails into an unverified record);
-/// too long hides that much USDC from claims for that long.
+/// minutes, many times the few blocks the chain needs. A release cannot tell a callback that was lost (its transfer
+/// settled long ago) from a transfer that is only very late. Too short is therefore not free: if the transfer then
+/// lands, the books stay right (the late report still makes older balance reads stale, `usdc_epoch`), but a payout
+/// computed after the release may have counted tokens that transfer takes; the token refuses whichever of the two
+/// comes second and that one is held as an unverified record. Too long hides that much USDC from claims for that long.
 const IN_FLIGHT_TIMEOUT_NS: u64 = 600 * 1_000_000_000;
 /// Attached to the token's `storage_deposit` for a claimant: 0.01 NEAR, many times any real token's
 /// minimum. A registration-only deposit refunds the excess, or all of it if already registered.
@@ -231,6 +235,10 @@ pub struct Kizashi {
     /// `retry_payout`, as after a failed read. A read that is merely late is discarded too; that costs one retry and
     /// never tokens. A failed transfer does not count: its tokens never left, so no read is stale because of it.
     ///
+    /// It moves whenever a transfer is reported landed, even one whose reservation the timeout had already released
+    /// (the callback then finds no entry, but the tokens left all the same), and whenever the timeout releases a
+    /// reservation, which every payout, `claim` included, does BEFORE it orders or compares a read.
+    ///
     /// New state: a contract deployed with the layout from before this field cannot be upgraded in place.
     usdc_epoch: u64,
 }
@@ -315,6 +323,9 @@ impl Kizashi {
             }),
         );
 
+        // Before the balance read is ordered, not after: a release moves `usdc_epoch`, and a read ordered under the old
+        // value would be refused by its own callback for a release this claim caused.
+        self.release_stale();
         let payout = self.spendable_near();
         let mut p = Promise::new(claimant.clone());
         if payout > 0 {
@@ -359,6 +370,10 @@ impl Kizashi {
             emit_payout_failed("usdc", &claimant, None, "ft_balance_of failed");
             return;
         };
+        // A reservation whose callback never came back must not hide this claimant's USDC. Released BEFORE the epoch
+        // is compared: the release moves the epoch, and this read, ordered while that reservation still held back
+        // its tokens, is then older than the release and must not be paid from.
+        self.release_stale();
         if epoch.0 != self.usdc_epoch {
             // A payout landed (or a reservation timed out) since this read was ordered, so the balance may still
             // count tokens that have gone, or that are held for another claimant. Nothing is paid from it. The record
@@ -372,7 +387,6 @@ impl Kizashi {
         // from it. What the read may take is the balance minus what is held for OTHER claimants (their owed
         // records) and minus what other payouts have already scheduled (`in_flight`): a second claim
         // whose read landed before the first transfer did sees the same balance and must not pay it again.
-        self.release_stale(); // a reservation whose callback never came back must not hide this claimant's USDC
         let recorded = self.take_usdc_record(&claimant);
         let held_back = self.owed_total().usdc.saturating_add(self.in_flight_total());
         let amount = balance.0.saturating_sub(held_back);
@@ -405,10 +419,6 @@ impl Kizashi {
         match self.in_flight.iter().position(|p| p.claimant == claimant && p.amount == amount.0) {
             Some(i) => {
                 self.in_flight.remove(i);
-                if landed {
-                    // Reads ordered before this are older than the transfer (see `usdc_epoch`).
-                    self.usdc_epoch = self.usdc_epoch.saturating_add(1);
-                }
             }
             None => emit(
                 "in_flight_unknown",
@@ -416,6 +426,10 @@ impl Kizashi {
             ),
         }
         if landed {
+            // Reads ordered before this are older than the transfer (see `usdc_epoch`). Counted whether or not the
+            // reservation was still there: after a release the tokens left all the same, and a read ordered after
+            // the release but before the transfer landed counts them.
+            self.usdc_epoch = self.usdc_epoch.saturating_add(1);
             emit_payout_ok("usdc", &claimant, amount.0);
         } else {
             // The token refused the transfer. Either for a real reason (the tokens are still here), or because
