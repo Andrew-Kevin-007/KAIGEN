@@ -27,3 +27,5 @@ data/
 
 # Internal planning notes (not part of the public repo)
 docs/internal/
+
+.kaigen-testnet*/
