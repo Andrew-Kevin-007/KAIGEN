@@ -142,7 +142,7 @@ sequenceDiagram
     Agent->>Vault: check(key, asset, amount, to) [view, advice only]
     Agent->>Vault: send_small(token, amount, to)
     alt over limit, not allowlisted, below minimum, or cap used up
-        Vault-->>Agent: refused (outcome recorded; counted only for never-succeed refusals)
+        Vault-->>Agent: refused (outcome recorded, counted only for never-succeed refusals)
         Note over Vault: at the strike limit the key is removed and DeleteKey is scheduled
     else within limit
         Vault->>Agent: transfer (promise)
