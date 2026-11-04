@@ -1,6 +1,6 @@
 # KAIGEN v3 threat model (design draft)
 
-Status: design only. Testnet only. No audit. No contract code of v3 exists yet. "Covered" means loss is bounded under the stated conditions, never prevented. Every bound is per token, per rolling 24 h, in token units, and is void under the conditions in ARCHITECTURE.md section 5. The bound formula has not been re-derived against v3 code.
+Status: design draft. Testnet only as the target. No audit. v3 contract code exists in `contracts/mamori`, with unit tests and attacks 1 to 9 run on a local nearcore sandbox, not on testnet [ATTEST-CHECK.md header; ATTACK-RESULTS.md section 1]. "Covered" means loss is bounded under the stated conditions, never prevented. Every bound is per token, per rolling 24 h, in token units, and is void under the conditions in ARCHITECTURE.md section 5. The bound formula was re-derived against `lib.rs` at HEAD 65fde6a [LOSS-BOUND.md header]; it has not been re-derived since.
 
 ## 1. Standing assumptions
 
@@ -55,11 +55,11 @@ Status: design only. Testnet only. No audit. No contract code of v3 exists yet. 
 
 | Attacker | Capability | What v3 does | Expected outcome | Evidence status |
 |---|---|---|---|---|
-| Clumsy injected agent | Daily key, sends over cap or to unlisted payee | Counted refusals, burn at N in 24 h | No funds above cap, key deleted | Attack 1, not yet run for v3 |
-| Calibrated attacker | Daily key, reads `check`, allowlist off | Cap only | Loses exactly one cap per token per window, zero strikes | Attack 2, mandatory, not yet run |
-| Griefing or hijacked key | Daily key | Uncounted refusal for cap exhaustion, per-key queue slots | Honest key not burned. Honest key blocked for up to 24 h. | Attack 9, not yet run |
-| Queue flooder | Daily key | Slots, sum, expiry, `cancel_all` | Caps hold | Attack 4, not yet run |
-| Planter of a classical full-access key | Existing full-access control or admin mistake | cage-check red | Detection at a point in time only | Attack 8, not yet run |
+| Clumsy injected agent | Daily key, sends over cap or to unlisted payee | Counted refusals, burn at N in 24 h | No funds above cap, key deleted | Attack 1 (1a, 1b, 1c) run on sandbox, all PASS [ATTACK-RESULTS.md section 1] |
+| Calibrated attacker | Daily key, reads `check`, allowlist off | Cap only | Loses exactly one cap per token per window, zero strikes | Attack 2 (2a, 2b, 2c) run on sandbox, all PASS [ATTACK-RESULTS.md section 1] |
+| Griefing or hijacked key | Daily key | Uncounted refusal for cap exhaustion, per-key queue slots | Honest key not burned. Honest key blocked for up to 24 h. | Attack 9 (9, 9b) run on sandbox, PASS [ATTACK-RESULTS.md section 1] |
+| Queue flooder | Daily key | Slots, sum, expiry, `cancel_all` | Caps hold | Attack 4 (4a, 4b) run on sandbox, PASS [ATTACK-RESULTS.md section 1] |
+| Planter of a classical full-access key | Existing full-access control or admin mistake | cage-check red | Detection at a point in time only | Attack 8 run on sandbox, PASS, with `--stand-in-admin` [ATTACK-RESULTS.md section 1] |
 | Intents-key holder | A key registered on `intents.near` | cage-check red only | Not bounded | Design only |
 | Wrong-method prober | Daily key | Runtime rejection | Bounded by gas allowance | Docs only |
 | Cold admin thief | ML-DSA admin key | Nothing | Total loss | Out of scope |
@@ -69,15 +69,19 @@ Status: design only. Testnet only. No audit. No contract code of v3 exists yet. 
 
 ## 6. Relationship to Kizashi
 
-Kizashi stays optional. It is a circuit breaker for a break someone discloses. The omen key is not a canary. Nothing says it breaks before the keys beside it. It cannot catch a silent attacker or a first-to-break state actor who keeps the break private. Kizashi verifies classical omen signatures (ed25519 and secp256k1) with existing host functions. A contract cannot verify an ML-DSA signature, because NEP-645 lists on-chain verification host functions as out of scope (https://github.com/near/neps/pull/645). Only an in-contract check of an ML-DSA signature, which neither v2 nor v3 contains, would need a new verifier.
+Kizashi stays optional. It is a circuit breaker for a break someone discloses. The omen key is not a canary. Nothing says it breaks before the keys beside it. It cannot catch a silent attacker or a first-to-break state actor who keeps the break private. Kizashi verifies classical omen signatures (ed25519 and secp256k1) with existing host functions. On in-contract ML-DSA verification the sources disagree. This design text says a contract cannot verify an ML-DSA signature, citing NEP-645 for on-chain verification host functions being out of scope (https://github.com/near/neps/pull/645). V3-W2-EDITH-PROGRESS.md reports that the locked near-sdk 5.30 has `env::ml_dsa_verify` (protocol 87 and later). Both are to re-verify against the near-sdk source before relying on them. Whether `contracts/mamori` calls `ml_dsa_verify` was not checked in this edit.
 
 ## 7. What is unknown
 
 | Item | Status |
 |---|---|
 | Whether a contract can read its own account's key list | Inference: no host function found. The host-function list was not read. |
-| What `signer_account_pk` returns for an ML-DSA signer | Unverified. near-sdk 5.30 has no ML-DSA key variant. |
+| What `signer_account_pk` returns for an ML-DSA signer | Unverified. ARCHITECTURE.md 2.2 says near-sdk 5.30 has no ML-DSA key variant; V3-W2-EDITH-PROGRESS.md reports `CurveType::MLDSA65` in the locked near-sdk 5.30. To re-verify against the near-sdk source before relying on it. |
 | Wall-clock length of 200 blocks, yield payload limit | Unverified |
 | Gas keys with method restriction, ML-DSA gas-key support | Untested |
 | False-positive cost of a strike | No source documents it. We measure ours. |
 | Whether an exhausted allowance deletes or merely disables a NEAR function-call key | Unverified in nearcore. The v2 code comment says the runtime deletes it. |
+
+## Corrections pending
+
+- ML-DSA support in near-sdk 5.30 (sections 6 and 7 above, and the `signer_account_pk` row of section 7): this file says a contract cannot verify ML-DSA and that near-sdk 5.30 has no ML-DSA key variant; V3-W2-EDITH-PROGRESS.md says `CurveType::MLDSA65` and `env::ml_dsa_verify` are in the locked near-sdk 5.30. Both are kept with their sources. Re-verify against the near-sdk source before relying on either. ARCHITECTURE.md section 2.2 carries the same disagreement.

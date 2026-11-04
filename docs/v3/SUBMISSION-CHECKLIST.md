@@ -1,0 +1,54 @@
+# Submission checklist (owner: Kevin only)
+
+Status: 2026-11-04. For Kevin only. Sources: docs/v3/ROADMAP.md and docs/PLAN-submission-and-mainnet.md.
+
+## Rules that apply
+
+- Only Kevin holds funded mainnet keys, moves funds, posts and submits. Claude Code does not. [ROADMAP.md section 1 rules; PLAN section D]
+- Claude Code does not enter keys or run G1. Kevin runs `mainnet execute` and `mainnet lock` himself. [ROADMAP.md section 3, mainnet rule]
+- A testnet-proven submission is eligible. A missed mainnet gate costs polish, not the submission. [PLAN ground rule 2]
+- Window closes Sat 14 Nov 2026 23:59 UTC. Aim for Fri 13 Nov. Exams run 11 to 20 Nov. From 11 Nov, do only the README read, the demo check, the X post and the submit. [PLAN section A]
+
+## Checklist (in order)
+
+- [ ] **1. Run the zero-key harness.**
+  - Who: Kevin.
+  - Command: see that file (`docs/internal/V3-OPEN-CYBORG-PROGRESS.md` is not in the repo).
+  - Done when: a zero-key Kizashi run is recorded in a fire-test file, and a third-party claim still works. [PLAN section A, Tue 3 Nov; PLAN section B stage 4 item 2]
+
+- [ ] **2. Review the UNVERIFIED README claims.**
+  - Who: Kevin.
+  - Command: none.
+  - Done when: each item in `docs/v3/CHANGES-V2-TO-V3.md` section 6 is either sourced or removed from `README.md`, and its UNVERIFIED comment is gone. [CHANGES-V2-TO-V3.md section 6]
+
+- [ ] **3. Decide M6 (hash-pinned global contract on testnet).**
+  - Who: Kevin. M6 needs his funded testnet keys.
+  - Command: none.
+  - Done when: the decision (build it, or not) is written in `docs/v3/ROADMAP.md` section 2, M6 row. [ROADMAP.md section 2]
+
+- [ ] **4. Decide the stretch items (policy-key split, `sweep_to_safe`, sentinel).**
+  - Who: Kevin.
+  - Command: none.
+  - Done when: each item is written in `docs/v3/ROADMAP.md` section 2 as built or as "document as not applicable". M6 is not built, so Q2 recommends "document as not applicable". `sweep_to_safe` also needs a safe account and watchers (Q5). [ROADMAP.md sections 2 and 4]
+
+- [ ] **5. Decide whether the peer comparison is wanted.**
+  - Who: Kevin.
+  - Command: none.
+  - Done when: either Leash and near-agent-spend-guard are run with the same attack scripts, or the comparative wording is removed from `README.md`, `docs/v3/LANDSCAPE.md` and `docs/v3/NOVELTY-CLAIMS.md`. Then update gate E5 in `docs/v3/ROADMAP.md`. Today, LANDSCAPE.md and NOVELTY-CLAIMS.md still name both guards. [ROADMAP.md M9 and E5; NOVELTY-CLAIMS.md section 5 item 2]
+
+- [ ] **6. Mainnet gates G1 and G2 (optional, never under time pressure).**
+  - Who: Kevin, with his own keys.
+  - Command: G1: `mainnet execute` (dry-run by default, `jobs/src/mainnet.mjs`). G2: none.
+  - Done when: G1 has transaction links for AddKey, DeleteKey, deploy and the classical key delete on protocol 86, using a throwaway account. G2 has a publish result and its real cost. Confirm ML-DSA activation by RPC status before any mainnet statement. If this cannot be done calmly, skip it. [ROADMAP.md section 3; PLAN section B stage 1]
+
+- [ ] **7. Record the demo.**
+  - Who: Kevin.
+  - Command: none.
+  - Done when: a recording exists and runs under 90 seconds. The demo runs attack 2, then attack 1, then attack 8. [ROADMAP.md Q1; ARCHITECTURE.md, demo paragraph]. docs/v3/DEMO-SCRIPT.md is not in the repo yet.
+
+- [ ] **8. Submit.**
+  - Who: Kevin. He presses submit and posts on X.
+  - Command: none.
+  - Done when: the submission confirmation is saved. Aim Fri 13 Nov 2026. Hard close Sat 14 Nov 2026 23:59 UTC. [PLAN section A, Wed 11 to Fri 13 Nov; ROADMAP.md section 1 item 9]
+
+Not on this list: the Kizashi lock (PLAN stage 5). It is an irreversible step and is never done under time pressure. [PLAN ground rule 1]

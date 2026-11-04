@@ -1,6 +1,6 @@
 # KAIGEN v3 architecture (design draft)
 
-Status: design only. Testnet only. No audit, no mainnet run. All latency figures are targets until week 3 publishes measured testnet numbers. Facts about v2 come from contracts/mamori/src/lib.rs as read on 2026-11-02.
+Status: design draft. The v3 contract views, queue controls and cage-check are built and were run on a local nearcore sandbox, not on testnet [ATTEST-CHECK.md header; ATTACK-RESULTS.md section 1]. Testnet only as the target. No audit, no mainnet run. All latency figures are targets until week 3 publishes measured testnet numbers. Facts about v2 come from contracts/mamori/src/lib.rs as read on 2026-11-02.
 
 ## 1. Components
 
@@ -42,7 +42,7 @@ Test requirement (M1). An integration test in near-workspaces sandbox or on test
 
 Every key on a NEAR account has `predecessor == current account`, so a bare predecessor check is not access control for per-key logic. v2 already uses `env::signer_account_pk()` for strikes. Admin gating by `predecessor == current_account` is safe only because the runtime restricts function-call keys to the two daily methods. It is void if cage-check fails.
 
-Constraint. near-sdk 5.30 `PublicKey` has no ML-DSA variant, and `signer_account_pk` aborts when the bytes do not parse (https://docs.rs/near-sdk/latest/near_sdk/struct.PublicKey.html). No method reachable by the ML-DSA admin key may read `signer_account_pk`. This is why v2 `assert_admin` reads only the predecessor. Sentinel, policy and watcher keys must be classical, or their methods must avoid the read. Required test: the ML-DSA admin can call every admin method. What the host returns for an ML-DSA signer is unverified.
+Constraint. Two sources disagree on ML-DSA support in near-sdk 5.30, and this paragraph does not choose between them. (a) This design text says `PublicKey` has no ML-DSA variant (https://docs.rs/near-sdk/latest/near_sdk/struct.PublicKey.html, cited here, not checked by this edit). (b) V3-W2-EDITH-PROGRESS.md (M4b and W2 FINAL) reports that the locked near-sdk 5.30 has `CurveType::MLDSA65` and parses a 1952-byte ML-DSA key. Both statements are to be re-verified against the near-sdk source before relying on them. `signer_account_pk` is cited above as aborting when the bytes do not parse. No method reachable by the ML-DSA admin key may read `signer_account_pk`. This is why v2 `assert_admin` reads only the predecessor. Sentinel, policy and watcher keys must be classical, or their methods must avoid the read; that rule was written on statement (a) and is left as it is until the re-check. Required test: the ML-DSA admin can call every admin method (the unit-test VM run is reported in V3-W2-EDITH-PROGRESS.md M4b). What the host returns for an ML-DSA signer is unverified [V3-W2-EDITH-PROGRESS.md W2 FINAL].
 
 ### 2.3 Value-moving paths
 
@@ -93,6 +93,12 @@ Fails (red) if any of these hold:
 | A function-call key not recorded in Mamori | Outside strike and cap accounting |
 | A recorded intents key | Signs on `intents.near` with no cap |
 | Code hash from RPC differs from the pinned global-contract hash | Hash pinning is a deploy-time property only. A full-access key can swap code or the hash later, so the hash is re-read each run. |
+| ATTEST-1 (not one of the eight). `attest()` disagrees with the account asked about, or with `config()`, `daily_keys()`, `intents_keys()` or `revoked_keys()` at the same block, or is not Mamori's `attest()` at all | `attest()` is a cross-check. A lying `attest()` can only add a red here, never clear one. |
+| ATTEST-2 (not one of the eight). `attest().drill_build` is true, or `config.delay_secs` is under `min_delay_secs` | The loss bound's delay condition. A drill build allows a delay under the production floor (ATTEST-CHECK.md 2.1; LOSS-BOUND.md E4). |
+
+ATTEST-1 and ATTEST-2 are not rows of the table above. The code names the eight rows ARCH-2.8-1 to ARCH-2.8-8 by their order in this table, and gives ATTEST-1 and ATTEST-2 their own names so they are not read as part of the eight [jobs/src/cage.mjs lines 9-24, 40-52]. `attest()` also adds evidence to two of the eight: a function-call key that `attest().daily_keys` does not record is red under ARCH-2.8-6, and any key in `attest().intents_keys` is red under ARCH-2.8-7 [jobs/src/cage.mjs lines 18-19, 157-162]. With no `attest()` (a v2 build), ATTEST-1 and ATTEST-2 are UNKNOWN, so such a vault is never GREEN [jobs/src/cage.mjs line 25].
+
+Exit codes of `cage-check`: 0 all rows GREEN; 1 at least one row RED; 3 nothing RED but at least one row could not be checked, which is not a clean bill; 2 bad usage [jobs/src/cage.mjs lines 27-28, 397-398, and the `CAGE_USAGE` text at line 441].
 
 Attack 8 in section 7 plants an ed25519 full-access key and a null-allowance key.
 
@@ -104,19 +110,19 @@ Cost per the docs: 10 NEAR per 100 KB, burnt. `out/prod/mamori.wasm` is 323,974 
 
 Breaking-change option. Making `request_withdraw` refusals recorded changes its return type from U64, which breaks the v2 ABI. v3 either takes that break on purpose or keeps those refusals uncounted. This is Q-ABI in ROADMAP.md.
 
-## 3. Interfaces (v3 target, none implemented yet)
+## 3. Interfaces (v3 target; status per row)
 
 | Method | Caller | Notes |
 |---|---|---|
 | `send_small(token, amount, to)` | Daily key | Existing. Returns `SendOutcome`. |
 | `request_withdraw(token, amount, to)` | Daily key | Existing. Stores `expires_at`. Return type decision Q-ABI. |
 | `execute(id)` | Anyone | Existing. After delay, before expiry. |
-| `cancel(id)`, `cancel_all()` | Admin | `cancel_all` new. |
-| `purge_expired()` | Anyone | New. |
+| `cancel(id)`, `cancel_all()` | Admin | `cancel_all` built, run in attack 4 [ATTACK-RESULTS.md section 1]. |
+| `purge_expired()` | Anyone | Built, run in attack 5 [ATTACK-RESULTS.md section 1]. |
 | `strikes_of(key)` | View | Existing. |
 | `revoke_all_agent_keys()` | Admin | New. Reuse the gas-gated partial pattern of `lock_down`, repeat until empty. About 20 Tgas per daily key, so 8 daily keys fit one transaction, but not with intents keys. No single-call promise. |
-| `check(key, asset, amount, to)` | View | New, advisory. |
-| `attest()` | View | New, informational. |
+| `check(key, asset, amount, to)` | View | Built, advisory [ATTEST-CHECK.md section 3]. |
+| `attest()` | View | Built, informational [ATTEST-CHECK.md section 2]. |
 | `add_daily_key` | Admin | Adds revoked-key check. |
 
 ## 4. Real-time response loop
@@ -155,7 +161,7 @@ This holds only while all of these hold:
 | Admin is online during the cancel window for the pending part | Otherwise the pending part executes. |
 | Allowlist enforced for payee control | Off by default. With it off, any payee gets instant sends up to the cap. |
 
-Not bounded: repeated in-cap drain across many windows without human review, and a calibrated attacker who reads `check` headroom and sends exactly the cap with zero strikes. The refund path in `on_send_done` re-attributes failed sends by heuristic, and the property tests must cover it. The formula must be re-derived against the code before it is published anywhere. Strikes do not add to the bound, because spend before and after a strike sits in the same window.
+Not bounded: repeated in-cap drain across many windows without human review, and a calibrated attacker who reads `check` headroom and sends exactly the cap with zero strikes. The refund path in `on_send_done` re-attributes failed sends by heuristic, and the property tests must cover it. The formula was re-derived against `lib.rs` at HEAD 65fde6a [LOSS-BOUND.md header]. It must be re-derived after any code change before it is published anywhere. Strikes do not add to the bound, because spend before and after a strike sits in the same window.
 
 ## 6. Stretch items (not promised, in cut order)
 
@@ -185,3 +191,7 @@ Scripted testnet attacks, each with pass or fail and measured blocks:
 | 9 | Cross-key grief: key A exhausts the cap | Honest key B is not burned |
 
 Demo (90 seconds, Q1 open): run attack 2, then attack 1, then attack 8. One table: scenario, theoretical bound, measured loss, blocks to containment, admin actions needed. Measured numbers only, no speed comparison against vendors. A CrAIBench-style replay is optional and asserts only the contract outcome. A strike's false-positive cost is measured in replay and reported.
+
+## Corrections pending
+
+- ML-DSA support in near-sdk 5.30 (section 2.2, Constraint paragraph): the design text says there is no ML-DSA variant; V3-W2-EDITH-PROGRESS.md says `CurveType::MLDSA65` and `env::ml_dsa_verify` are present in the locked version. Both are kept with their sources. Re-verify against the near-sdk source before relying on either. THREAT-MODEL.md sections 6 and 7 carry the same disagreement.
