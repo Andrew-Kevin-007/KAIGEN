@@ -176,7 +176,7 @@ fn cfg_for(seed: u64) -> Cfg {
     let keys = pick(&mut r, &[1, 2, 3, 4, 5]) as u8;
     let fail_pct = pick(&mut r, &[0, 15, 50]) as u64;
     // A quarter of the runs try a delay the production build refuses; `world_for` falls back for those.
-    let delay_secs = if next(&mut r) % 4 == 0 {
+    let delay_secs = if next(&mut r).is_multiple_of(4) {
         pick(&mut r, &[1, 600, 3_600, 43_200, 86_399]) as u64
     } else {
         pick(&mut r, &[86_400, 86_401, 90_000, 172_800]) as u64
@@ -1060,7 +1060,7 @@ impl World {
     /// and now and then it asks where the model says the contract must refuse (room or budget used up), so that a
     /// missing refusal shows.
     fn attack_op(&self, r: &mut u64) -> Op {
-        let tok = usize::from(next(r) % 2 == 0);
+        let tok = usize::from(next(r).is_multiple_of(2));
         let (p, cap) = (self.cfg.pending[tok], self.cfg.cap[tok]);
         let cutoff = self.now.saturating_sub(DAY_NS);
         let asked: u128 = self.issued.values().filter(|v| v.tok == tok && v.at > cutoff).map(|v| v.amount).sum();
@@ -1071,16 +1071,16 @@ impl World {
         }
         let due = self.q.iter().position(|i| tok_of(&i.w.token) == tok && self.now >= i.unlocks_at && self.now < i.w.expires_at.0);
         if let Some(ix) = due {
-            if budget * 2 >= p || next(r) % 3 == 0 {
+            if budget * 2 >= p || next(r).is_multiple_of(3) {
                 return Op::Execute { pick: ix };
             }
         }
-        if budget > 0 && room == 0 && self.served.len() < MAX_DAILY_KEYS as usize && next(r) % 3 == 0 {
+        if budget > 0 && room == 0 && self.served.len() < MAX_DAILY_KEYS as usize && next(r).is_multiple_of(3) {
             if let Some(k) = (1..=KEYS).find(|k| !self.served.contains(k) && !self.revoked.contains(k)) {
                 return Op::AddKey(k);
             }
         }
-        let probe = (room == 0 || budget == 0) && next(r) % 4 == 0;
+        let probe = (room == 0 || budget == 0) && next(r).is_multiple_of(4);
         if (budget > 0 && room > 0) || probe {
             let (t, n) = self.req_at.get();
             let n = if t == self.now { n } else { 0 };
@@ -1104,7 +1104,7 @@ impl World {
             self.last_send.set(self.now);
             return Op::Send { key: self.served.iter().copied().next().unwrap_or(1), tok, amount: cap_room, to: 0 };
         }
-        Op::Advance(self.boundaries(next(r) % 4 == 0).into_iter().min().map_or(60 * SEC, |t| t - self.now))
+        Op::Advance(self.boundaries(next(r).is_multiple_of(4)).into_iter().min().map_or(60 * SEC, |t| t - self.now))
     }
 
     fn gen_op(&self, r: &mut u64) -> Op {
@@ -1119,7 +1119,7 @@ impl World {
             let queued: u128 = self.q.iter().filter(|i| tok_of(&i.w.token) == t).map(|i| i.w.amount.0).sum();
             self.cfg.pending[t] > 0 && queued * 10 >= self.cfg.pending[t] * 9
         });
-        if nearly_full && next(r) % 5 == 0 {
+        if nearly_full && next(r).is_multiple_of(5) {
             if let Some(k) = (1..=KEYS).find(|k| !self.served.contains(k) && !self.revoked.contains(k)) {
                 return Op::AddKey(k);
             }
@@ -1133,7 +1133,7 @@ impl World {
             61..=62 => Op::Cancel { pick },
             63 => Op::CancelAll,
             64..=66 => Op::Purge,
-            67..=90 => Op::Advance(if self.cfg.dust && next(r) % 40 != 0 { 1 + next(r) % (30 * SEC) } else { self.advance_ns(r) }),
+            67..=90 => Op::Advance(if self.cfg.dust && !next(r).is_multiple_of(40) { 1 + next(r) % (30 * SEC) } else { self.advance_ns(r) }),
             91..=94 => Op::Deliver { pick },
             95 => Op::AddKey(1 + (next(r) % u64::from(KEYS)) as u8),
             _ => Op::RemoveKey(1 + (next(r) % u64::from(KEYS)) as u8),
@@ -1186,8 +1186,8 @@ fn run_seed(seed: u64, steps: usize) -> Outcome {
             w.step(&op)?;
         }
         // The last step: sometimes the era rises. Then every callback still in the air is delivered.
-        if next(&mut r) % 8 == 0 {
-            let op = Op::Trip(if next(&mut r) % 2 == 0 { Era::Warning } else { Era::Kaigen });
+        if next(&mut r).is_multiple_of(8) {
+            let op = Op::Trip(if next(&mut r).is_multiple_of(2) { Era::Warning } else { Era::Kaigen });
             ops.push(op.clone());
             w.step(&op)?;
         }
@@ -1475,7 +1475,7 @@ fn failure_callbacks_that_arrive_up_to_three_days_late_never_make_the_window_und
                 _ => Op::Advance(next(&mut r) % (60 * SEC)),
             };
             w.step(&op).unwrap_or_else(|e| panic!("seed {seed} step {step} {op:?}: {e}"));
-            if w.pending.len() > known && next(&mut r) % 3 == 0 {
+            if w.pending.len() > known && next(&mut r).is_multiple_of(3) {
                 let delay = 12 * 3_600 * SEC + next(&mut r) % (48 * 3_600 * SEC);
                 let (due, serial, ts) = {
                     let cb = w.pending.last_mut().expect("the new callback");
@@ -1549,7 +1549,7 @@ fn a_failed_execute_is_not_put_back_after_a_request_was_made_while_it_was_out() 
     let mut w = two_failed_executes_with_requests_made_while_they_were_out();
     w.step(&Op::Advance(0)).unwrap();
     assert_eq!(w.stats.count["execute_dropped"], 2, "both failed executes are dropped: {:?}", w.stats.count);
-    assert!(w.stats.count.get("execute_requeued").is_none(), "{:?}", w.stats.count);
+    assert!(!w.stats.count.contains_key("execute_requeued"),"{:?}", w.stats.count);
     let queued: Vec<u64> = w.q.iter().map(|i| i.id).collect();
     assert!(queued.contains(&4) && queued.contains(&5) && queued.len() == 2, "only the two new requests are queued: {queued:?}");
     // The new requests unlock a day after they were made, which is inside the same 24 h window as the two executes.

@@ -768,6 +768,7 @@ fn drill_is_not_a_default_feature() {
 
 #[cfg(not(feature = "drill"))]
 #[test]
+#[allow(clippy::assertions_on_constants)] // the cfg gate is the check: this test only compiles without `drill`
 fn production_feature_set_has_no_reset() {
     // `reset` is behind `#[cfg(feature = "drill")]` (see reset_is_gated_by_the_drill_feature), and a
     // production build does not enable it. The wasm export list is checked at deploy time as well.
@@ -2029,7 +2030,8 @@ fn replay(make: &dyn Fn() -> World, ops: &[Op], prefix: &[Move]) -> (World, usiz
 /// with the schedule that broke it, at most `limit` of them; and the number of distinct states visited.
 fn explore(make: &dyn Fn() -> World, ops: &[Op], limit: usize) -> (Vec<String>, usize) {
     let (mut seen, mut bad) = (HashSet::new(), Vec::new());
-    let mut stack: Vec<(Vec<Move>, Option<(World, usize)>)> = vec![(vec![], None)];
+    type Frontier = Vec<(Vec<Move>, Option<(World, usize)>)>;
+    let mut stack: Frontier = vec![(vec![], None)];
     while let Some((prefix, live)) = stack.pop() {
         let (mut w, started) = live.unwrap_or_else(|| replay(make, ops, &prefix));
         if !seen.insert(w.key(started)) {

@@ -289,12 +289,12 @@ fn check_matches_what_send_small_then_does_over_random_runs() {
         now += (next(&mut rng) % 30_000) * SEC;
         if step % 41 == 0 {
             as_admin(now);
-            m.enforce_allowlist(next(&mut rng) % 3 != 0);
-            m.set_min_send(U128(if next(&mut rng) % 2 == 0 { 0 } else { 1_000 }));
+            m.enforce_allowlist(!next(&mut rng).is_multiple_of(3));
+            m.set_min_send(U128(if next(&mut rng).is_multiple_of(2) { 0 } else { 1_000 }));
             m.set_max_strikes(1 + (next(&mut rng) % 4) as u32);
         }
-        m.daily_limit = if next(&mut rng) % 97 == 0 { 0 } else { NEAR };
-        m.era = if next(&mut rng) % 20 == 0 { Era::Warning } else { Era::Calm };
+        m.daily_limit = if next(&mut rng).is_multiple_of(97) { 0 } else { NEAR };
+        m.era = if next(&mut rng).is_multiple_of(20) { Era::Warning } else { Era::Calm };
         let k = [key(1), key(2), key(9)][(next(&mut rng) % 3) as usize].clone();
         let asset = assets[(next(&mut rng) % 3) as usize].clone();
         let palette: &[u128] = match &asset {

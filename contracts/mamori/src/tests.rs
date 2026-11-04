@@ -892,7 +892,7 @@ fn a_partial_lock_down_says_how_many_unconfirmed_deletions_are_left() {
 fn the_production_delay_floor_is_a_day() {
     // A withdrawal queued by a hijacked key must outlast a day, so an owner who checks once a day can cancel it.
     // Lowering this is a decision about every production vault, not a tidy-up: change it on purpose.
-    assert!(MIN_DELAY_SECS >= 86_400);
+    const { assert!(MIN_DELAY_SECS >= 86_400) };
     assert_eq!(MIN_DELAY_SECS % 3600, 0, "the refusal message counts hours");
 }
 
@@ -1012,7 +1012,7 @@ fn a_failed_execute_cannot_push_the_queue_past_its_cap() {
 #[test]
 fn the_allowlist_is_off_by_default_so_an_empty_list_never_locks_anyone_out() {
     let mut m = setup();
-    assert_eq!(m.allowlist().enforced, false);
+    assert!(!m.allowlist().enforced);
     as_daily(&key(1), 2_000 * SEC);
     let _ = m.send_small(None, U128(1), accounts(2));
 }
@@ -1847,11 +1847,11 @@ fn lock_down_removes_intents_keys_before_daily_keys() {
         // An intents key can sign on `intents.near` without going through Mamori. A daily key cannot do
         // anything once the era is cached: `send_small` and `request_withdraw` refuse at kaigen.
         let (daily, intents) = passes[0];
-        assert!(intents < MAX_INTENTS_KEYS as u32, "{given} Tgas: the first pass must start on the intents keys");
-        assert_eq!(daily, MAX_DAILY_KEYS as u32, "{given} Tgas: no daily key may go while an intents key is left");
+        assert!(intents < MAX_INTENTS_KEYS,"{given} Tgas: the first pass must start on the intents keys");
+        assert_eq!(daily, MAX_DAILY_KEYS,"{given} Tgas: no daily key may go while an intents key is left");
         for (n, &(daily, intents)) in passes.iter().enumerate() {
             // So no daily key is started while an intents removal is left to start.
-            assert!(daily == MAX_DAILY_KEYS as u32 || intents == 0, "{given} Tgas, pass {}: {daily} daily and {intents} intents left", n + 1);
+            assert!(daily == MAX_DAILY_KEYS ||intents == 0, "{given} Tgas, pass {}: {daily} daily and {intents} intents left", n + 1);
         }
     }
 }
@@ -1921,7 +1921,7 @@ fn a_request_expires_the_execute_window_after_it_unlocks_and_says_when() {
     assert_eq!(q[0].withdrawal.expires_at.0, expiry_ns(2_000));
     assert_eq!(q[0].withdrawal.expires_at.0 - q[0].unlocks_at.0, EXECUTE_WINDOW_SECS * SEC);
     // Never shorter than the delay it follows: the production floor is a day, and so is the window.
-    assert!(EXECUTE_WINDOW_SECS >= MIN_DELAY_SECS);
+    const { assert!(EXECUTE_WINDOW_SECS >= MIN_DELAY_SECS) };
     let logged = event("request_withdraw").expect("the request is logged");
     assert_eq!((logged["data"]["id"].clone(), logged["data"]["expires_at"].clone()), (serde_json::json!(id.0), serde_json::json!(U64(expiry_ns(2_000)))));
     // The view keeps every field it had, and `expires_at` is flat beside them.
@@ -2084,7 +2084,7 @@ fn a_purge_reads_a_bounded_number_of_entries_whatever_the_queue_holds() {
     as_anyone(expiry_ns(2_000));
     assert_eq!(m.purge_expired() as usize, PURGE_SCAN_LIMIT);
     assert_eq!(m.queue.len() as usize, held - PURGE_SCAN_LIMIT);
-    while m.queue.len() > 0 {
+    while !m.queue.is_empty() {
         assert!(m.purge_expired() > 0, "every call makes progress");
     }
 }
@@ -2393,13 +2393,13 @@ fn random_run(seed: u64, steps: u32) -> std::collections::BTreeMap<&'static str,
     let (mut rng, mut t) = (seed, 2_000u64);
     for step in 0..steps {
         // Mostly short steps, now and then a day and a half, so windows roll and requests expire.
-        t += if next(&mut rng) % 50 == 0 { 130_000 } else { next(&mut rng) % 600 };
+        t += if next(&mut rng).is_multiple_of(50) { 130_000 } else { next(&mut rng) % 600 };
         let now = t * SEC;
         match next(&mut rng) % 100 {
             0..=69 => {
                 // Key 1 plays the flooder: half of all requests are its.
-                let k = key(if next(&mut rng) % 2 == 0 { 1 } else { 2 + (next(&mut rng) % 3) as u8 });
-                let amount = if next(&mut rng) % 5 != 0 {
+                let k = key(if next(&mut rng).is_multiple_of(2) { 1 } else { 2 + (next(&mut rng) % 3) as u8 });
+                let amount = if !next(&mut rng).is_multiple_of(5) {
                     1 + u128::from(next(&mut rng) % 10)
                 } else {
                     1 + u128::from(next(&mut rng)) * 150_000 % (PENDING_CAP / 3)
@@ -2416,7 +2416,7 @@ fn random_run(seed: u64, steps: u32) -> std::collections::BTreeMap<&'static str,
                     let id = ids[next(&mut rng) as usize % ids.len()];
                     let w = m.queue().iter().find(|q| q.id.0 == id).unwrap().withdrawal.clone();
                     as_anyone(now);
-                    if try_call(|| m.execute(U64(id))).is_ok() && next(&mut rng) % 2 == 0 {
+                    if try_call(|| m.execute(U64(id))).is_ok() && next(&mut rng).is_multiple_of(2) {
                         callback_after_failure(now + SEC);
                         m.on_execute_done(U64(id), w, U64(m.next_id));
                     }

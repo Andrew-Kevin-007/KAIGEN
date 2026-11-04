@@ -326,6 +326,9 @@ trait KizashiView {
     fn era(&self) -> Era;
 }
 
+/// The key of `requested_by_key`: a daily key, and the token it asked in (`None` is NEAR).
+type RequestedByKeyId = (PublicKey, Option<AccountId>);
+
 /// Nothing is deployed to mainnet yet and the testnet drill vaults are throwaway, so these fields may still
 /// change. From the first mainnet deploy on, a layout change makes every deployed vault fail to read its
 /// state, `trip` included: it then needs a `migrate` that reads the old layout. The test
@@ -373,7 +376,7 @@ pub struct Mamori {
     /// last 24 h, per token, against its share of the pending limit (see `request_withdraw`). The account-wide
     /// `requested` stays the bound on the sum. A removed key's logs stay until they age out or the key is
     /// recorded again; each is at most `MAX_WINDOW_ENTRIES` long.
-    requested_by_key: LookupMap<(PublicKey, Option<AccountId>), Vec<(u64, u128)>>,
+    requested_by_key: LookupMap<RequestedByKeyId, Vec<(u64, u128)>>,
 }
 
 #[near]
