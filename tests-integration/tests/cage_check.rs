@@ -143,7 +143,7 @@ async fn full_access_keys(f: &Fixture) -> Vec<String> {
 fn assert_green(c: &Cage, what: &str) {
     assert_eq!(c.exit, 0, "{what}: expected exit 0, got {}: {}", c.exit, c.verdict);
     assert_eq!(c.verdict["verdict"], "GREEN", "{what}: {}", c.verdict);
-    assert_eq!(c.conditions().len(), 10, "{what}: the eight conditions of ARCHITECTURE.md 2.8 and the two attest rows ran");
+    assert_eq!(c.conditions().len(), 15, "{what}: the eight conditions of ARCHITECTURE.md 2.8 and the seven attest rows (ATTEST-1 to ATTEST-7) ran");
     assert!(c.red().is_empty() && c.with_status("UNKNOWN").is_empty(), "{what}: {}", c.verdict);
     assert_attest_read(c, what);
     // Nothing disagrees at all: attest() matches the views and the account's keys.
