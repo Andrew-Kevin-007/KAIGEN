@@ -154,3 +154,39 @@ Two weaknesses of my own test turned up on the way and were fixed before this ta
 * Nothing ran on a chain for this milestone; the property tests use the unit-test VM, which cannot show cross-receipt behaviour. M1 covers key deletion on a sandbox.
 * The requeue-after-failed-execute argument in 2.2 is a sketch.
 * A5 is an assumption. The cheap hardening, if wanted later, is to give each send an id and keep an in-flight map, so that a refund removes exactly its own amount whatever its age. That changes state layout, so it was not done here.
+
+## 8. Revoked keys (deletions the account has not confirmed)
+
+Added 2026-11-04 (open item 1 of the v3 list). Code: `contracts/mamori/src/lib.rs`. Tests: `contracts/mamori/src/tests/revoked_cap.rs`. Unit VM only: nothing of this ran on a chain.
+
+What the set is. `revoked_keys` holds a daily key from the moment the vault stops serving it (admin removal or a burn) until the account confirms the DeleteKey. It stops `add_daily_key` from re-adding the key while its delete may still be in flight, it lets `lock_down` try the delete again at kaigen, and it lets cage-check tell a key pending deletion from an unrecorded one. It is not part of the loss bound: a key in it is not in `daily_keys`, `assert_daily_key` panics for it, and the only methods a function-call key can reach are the two daily ones (E6). A revoked key still on the account can burn its own gas allowance and nothing else.
+
+What was wrong. (1) The set had no cap. A delete the account answers with a failure leaves its entry for good, and `on_revoked_key_deleted` cannot tell "the account does not hold that key" from any other failure. (Whether the runtime drops a function-call key whose allowance is used up is unverified in nearcore; if it does, such a key is exactly this case, and `remove_daily_key` retries a delete that fails again.) (2) Nothing could clear such an entry, and while it stood that key could not be added again. (3) `lock_down` collected the whole set before any gas check, in the same receipt that had already scheduled the intents and daily deletes. Measured in the unit VM, which charges the host's real storage fees: 69 Ggas per key read, so 2,000 keys cost 137 of the 150 Tgas a minimal `lock_down` is given and start no delete. About 2,200 keys would use all 150 Tgas (extrapolated, not run), and a receipt that runs out of gas drops every delete it scheduled. Each entry takes one admin add and one removal or burn of a key the admin added, so this is drift in a long-lived vault, not something a daily key can do on its own.
+
+Decision.
+
+1. `add_daily_key` refuses when served keys plus awaiting-deletion keys already number `MAX_KEY_RECORDS` (16, twice `MAX_DAILY_KEYS`): `too many keys awaiting deletion: confirm or forget some first`. The older refusals keep their place ahead of it.
+2. Nothing else is refused. A removal or a burn only moves a key from `daily_keys` to `revoked_keys`, so the sum cannot rise. The cap sits on the one call that grows the sum, not on the set, so a full set never stops a containment.
+3. `forget_revoked_key(public_key)` (admin) drops one entry, schedules nothing and logs `remove_daily_key` with `retry: false, forgotten: true`.
+4. `lock_down` reads at most `MAX_KEY_RECORDS` of the set. The rule above already bounds it; the read runs before any gas check, so it carries its own guard.
+
+No state field changed (`FRESH_STATE_HEX` is the same). One new admin export; no signature, outcome or refusal text of an existing method changed.
+
+Alternatives eliminated.
+
+* Refuse to record a key when the set is full. The key would then have no retry and no re-add protection exactly when the most entries are stuck, and containment would depend on bookkeeping room. A test fails if a full set stops recording.
+* Evict an entry when full. Silent, and `IterableSet` order is not insertion order (a remove moves the last entry into the hole), so it could drop the protection of a delete still in flight.
+* A permissionless retry. The entries that stick are deletes the account will never confirm, which a retry cannot clear, and it is one more method anyone can call. The admin already retries with `remove_daily_key` on a revoked key, and `lock_down` retries at kaigen.
+* Forget after N failures. It needs a counter per key (a state change) and turns the unverified guess "failure means absent" into a rule.
+* A cursor so `lock_down` can walk a long set across passes. A new state field, for entries that cannot act.
+
+When the records are full. Adding a key is refused. Removing, burning, retrying, confirming and forgetting are not. The way out is a delete that lands, or `forget_revoked_key` after the admin has seen on RPC (`view_access_key_list`) that the key is off the account.
+
+Residual.
+
+* `lock_down` visits the revoked set last and in set order. Entries that always fail and sit first can use the gas left over in every pass and keep later entries from being retried at kaigen. No value moves differently (a revoked key cannot spend), and it shows as `revoked_keys_left`; the admin retries by hand or forgets the stuck ones.
+* Forgetting a key the account still holds only drops the retry; cage-check then reports it as a function-call key that is not recorded, which is correct. Forgetting one whose delete is still in flight reopens the re-add race the set exists to prevent.
+* With 16 records a vault cannot add a key even if fewer than 8 are served. That is the intended cost.
+* `docs/v3/ATTEST-CHECK.md` section 5 still lists `remove_daily_key` with `public_key` and `retry`; the new `forgotten` field is not in its table.
+
+Evidence (`revoked_cap.rs`, 8 tests). The 16th record is accepted and the 17th refused with the exact text. The older refusals keep their precedence. A burn and an admin removal complete with 16 records. `forget_revoked_key` frees a record, schedules nothing, logs, lets the key return, and a late delete callback leaves no phantom; it refuses a served key, an unknown key and a stranger. `lock_down` uses the same gas with 16 and with 2,000 revoked keys (119.27 Tgas, 6 deletes started, in both). A 400-step run of adds, removals, burns and forgets never holds more than 16 records. Mutations, with `lib.rs` hash-identical afterwards: cap removed fails 3 tests, `<=` for `<` 3, forget that does not remove 2, forget that does not log 1, no read guard 1 (137.3 Tgas for 2,000 keys against 119.3 for 16), a full set that stops recording 4.

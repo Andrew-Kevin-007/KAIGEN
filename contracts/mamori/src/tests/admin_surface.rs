@@ -105,6 +105,7 @@ fn every_exported_method_has_the_gate_this_table_names() {
         sorted(&[
             "add_daily_key",
             "remove_daily_key",
+            "forget_revoked_key",
             "register_intents_key",
             "set_token_limit",
             "set_pending_limit",
@@ -185,6 +186,12 @@ fn admin_cases() -> Vec<AdminCase> {
             prepare: nothing,
             call: |m| drop(m.remove_daily_key(key(1))),
             took_effect: |m| m.daily_keys().is_empty() && m.revoked_keys() == vec![key(1)],
+        },
+        AdminCase {
+            name: "forget_revoked_key",
+            prepare: |m| drop(m.remove_daily_key(key(1))),
+            call: |m| m.forget_revoked_key(key(1)),
+            took_effect: |m| m.daily_keys().is_empty() && m.revoked_keys().is_empty(),
         },
         AdminCase {
             name: "register_intents_key",

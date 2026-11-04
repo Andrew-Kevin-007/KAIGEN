@@ -223,7 +223,7 @@ fn the_failed_execute_callback_names_itself_when_it_clears_stale_requests_and_sa
     as_anyone(4_000 * SEC + 3_601 * SEC);
     let _ = m.execute(ids[0]);
     callback_after_failure(expiry_ns(4_000));
-    m.on_execute_done(ids[0], w);
+    m.on_execute_done(ids[0], w, U64(m.next_id));
     assert_eq!(event_names(), ["queue_expired", "execute_dropped"]);
     assert_eq!(data_of("queue_expired")["trigger"].as_str(), Some("execute_failed"));
     assert_eq!(data_of("execute_dropped")["reason"].as_str(), Some("expired"));
@@ -269,24 +269,24 @@ fn a_dropped_execute_says_why_for_each_reason_and_a_request_that_can_return_logs
 
     // It can return: no event, and it is back in the queue.
     callback_after_failure(2_100 * SEC);
-    m.on_execute_done(U64(90), w(key(1), live));
+    m.on_execute_done(U64(90), w(key(1), live), U64(m.next_id));
     assert!(lines_of("execute_dropped").is_empty());
     assert_eq!(m.queue().len(), 1);
 
     // Its key is gone.
     callback_after_failure(2_101 * SEC);
-    m.on_execute_done(U64(91), w(key(9), live));
+    m.on_execute_done(U64(91), w(key(9), live), U64(m.next_id));
     assert_eq!(data_of("execute_dropped")["reason"].as_str(), Some("key_gone"));
 
     // It expired.
     callback_after_failure(live + SEC);
-    m.on_execute_done(U64(92), w(key(1), live));
+    m.on_execute_done(U64(92), w(key(1), live), U64(m.next_id));
     assert_eq!(data_of("execute_dropped")["reason"].as_str(), Some("expired"));
 
     // Lockdown beats every other reason.
     m.era = Era::Kaigen;
     callback_after_failure(2_102 * SEC);
-    m.on_execute_done(U64(93), w(key(9), 1));
+    m.on_execute_done(U64(93), w(key(9), 1), U64(m.next_id));
     assert_eq!(data_of("execute_dropped")["reason"].as_str(), Some("lockdown"));
     m.era = Era::Calm;
 
@@ -295,7 +295,7 @@ fn a_dropped_execute_says_why_for_each_reason_and_a_request_that_can_return_logs
     m.cancel_all();
     queue_dust(&mut m, &key(1), 2_201, MAX_QUEUE);
     callback_after_failure(2_202 * SEC);
-    m.on_execute_done(U64(94), w(key(1), live));
+    m.on_execute_done(U64(94), w(key(1), live), U64(m.next_id));
     let dropped = data_of("execute_dropped");
     assert_eq!(dropped["reason"].as_str(), Some("no_room"));
     // The line keeps its v2 fields.

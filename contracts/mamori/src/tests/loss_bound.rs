@@ -75,8 +75,8 @@ macro_rules! vm_config {
 
 /// Daily keys the model knows are `key(1)` to `key(KEYS)`; a call by one the vault does not serve must panic.
 const KEYS: u8 = 9;
-/// A transfer's callback arrives within this long of the call. A receipt takes a few blocks, so this is generous;
-/// the refund path is only sound for callbacks inside 24 h (assumption A5 of LOSS-BOUND.md).
+/// A transfer's callback arrives within this long of the call. A receipt takes a few blocks, so this is generous.
+/// Callbacks a day or more late are covered by their own tests at the end of this file (A5 of LOSS-BOUND.md).
 const CB_WINDOW: u64 = 30 * SEC;
 /// NEAR, one listed NEP-141, and one the admin never listed (it has no cap and can never move).
 const TOKENS: usize = 3;
@@ -228,7 +228,8 @@ struct QItem {
 
 enum CbKind {
     Send { ix: usize, tok: usize, amount: u128, ts: u64 },
-    Exec { ix: usize, id: u64, w: Withdrawal },
+    /// `requests_before`: how many requests had been made when the execute went out (the contract's `next_id`).
+    Exec { ix: usize, id: u64, w: Withdrawal, requests_before: u64 },
     Revoked { key: u8 },
 }
 
@@ -637,7 +638,9 @@ impl World {
                 });
             }
             (Err(msg), None) => fail(format!("execute({id}) of a due, unexpired request was refused: `{msg}`"))?,
-            (Ok(_), want) => {
+            (Ok(promise), want) => {
+                // A promise is only built (and its receipts created) when it is dropped.
+                drop(promise);
                 if let Some(w) = want {
                     fail(format!("execute({id}) went through although it had to fail with `{w}`"))?;
                 }
@@ -646,7 +649,14 @@ impl World {
                 self.ledger.push(Transfer { t: now, tok, amount: w.amount.0, kind: Kind::Exec, status: Status::InFlight });
                 let ix = self.ledger.len() - 1;
                 self.expect_gone.insert(id);
-                self.schedule(CbKind::Exec { ix, id, w });
+                // What the contract itself put in the callback's arguments (the receipt of the call just made), and it
+                // must be the number of requests the model has seen made: `next_id` counts exactly those.
+                let r = receipts_text();
+                let tag = "\"requests_before\":\"";
+                let at = r.find(tag).ok_or_else(|| format!("the callback of execute({id}) carries no requests_before: {r}"))? + tag.len();
+                let requests_before: u64 = r[at..].split('"').next().and_then(|n| n.parse().ok()).ok_or("requests_before is not a number")?;
+                ensure!(requests_before == self.issued.len() as u64, "execute({id}) told its callback {requests_before} requests, the model has seen {}", self.issued.len());
+                self.schedule(CbKind::Exec { ix, id, w, requests_before });
                 self.stats.bump("execute_ok");
             }
         }
@@ -757,9 +767,9 @@ impl World {
                 self.check(None)?;
                 ensure!(o.sent == !fails, "on_send_done reported {o:?} for a transfer that {}", if fails { "failed" } else { "landed" });
             }
-            CbKind::Exec { ix, id, w } => {
+            CbKind::Exec { ix, id, w, requests_before } => {
                 let expired = self.now >= w.expires_at.0;
-                self.call(Who::Callback, result, |m| m.on_execute_done(U64(id), w.clone()))?;
+                self.call(Who::Callback, result, |m| m.on_execute_done(U64(id), w.clone(), U64(requests_before)))?;
                 self.ledger[ix].status = if fails { Status::Failed } else { Status::Landed };
                 if fails {
                     let dropped = near_sdk::test_utils::get_logs().iter().any(|l| l.contains("\"execute_dropped\""));
@@ -767,6 +777,7 @@ impl World {
                         self.stats.bump("execute_dropped");
                     } else {
                         ensure!(!expired && self.served.contains(&id_of(&w.requested_by)) && self.era != Era::Kaigen, "a failed execute of request {id} was put back although it is expired or its key is gone");
+                        ensure!(self.issued.len() as u64 == requests_before, "a failed execute of request {id} was put back although a request was made while it was out");
                         self.expect_new = Some(id);
                         self.stats.bump("execute_requeued");
                     }
@@ -1419,13 +1430,12 @@ fn a_delay_under_a_day_lets_two_pending_limits_through_one_window_which_is_what_
 }
 
 #[test]
-fn assumption_a5_a_failure_callback_more_than_a_day_late_makes_the_window_under_count() {
-    // The one soundness gap the property test cannot reach, because it delivers every callback within 30 s: the
-    // refund in `on_send_done` finds its entry by time and amount. Inside 24 h the entry is there, or a later
-    // slot stands in for it, which can only over-count. After 24 h the entry was pruned by the next send, and the
-    // refund takes the failed amount out of ANOTHER send's entry. A receipt does not take a day, so this is an
-    // assumption (A5 in LOSS-BOUND.md), not a guard: this test makes it executable so that nobody has to take
-    // the text on trust, and fails the day the refund is made exact.
+fn a_failure_callback_more_than_a_day_late_gives_nothing_back_so_the_window_cannot_under_count() {
+    // Assumption A5 used to be: the refund in `on_send_done` finds its entry by time and amount; inside 24 h the entry
+    // is there, or a later slot stands in for it, which can only over-count; after 24 h the next send had pruned the
+    // entry and the refund took the failed amount out of ANOTHER send's entry (window said 200 with 600 in flight, and
+    // the next 800 went through). The property test never reached it, because it delivers every callback within 30 s.
+    // Now a send that has left the 24 h window is not refunded at all: nothing counts it, so there is nothing to give back.
     let mut w = World::new(plain_cfg(MIN_DELAY_SECS)).unwrap();
     w.step(&Op::Send { key: 1, tok: 0, amount: 400, to: 2 }).unwrap();
     let late = w.pending.remove(0); // the callback of that send, held back
@@ -1435,9 +1445,144 @@ fn assumption_a5_a_failure_callback_more_than_a_day_late_makes_the_window_under_
     w.cfg.fail_pct = 100;
     let i = w.pending.len() - 1;
     w.now += 61 * SEC; // the callback arrives 24 h and a minute late, reporting that the 400 never left
-    let e = w.deliver(i).expect_err("the refund took the failed 400 out of the 600 that did leave");
-    assert!(e.contains("under-counts") && e.contains("says 200"), "{e}");
-    // And the attacker has the 400 back for nothing: the window now has room for 800 while 600 is in flight.
-    let e = w.step(&Op::Send { key: 1, tok: 0, amount: 800, to: 2 }).expect_err("the cap is now broken at its source");
-    assert!(e.contains("broken at its source"), "{e}");
+    w.deliver(i).expect("the late failure takes nothing out of the 600 that did leave");
+    let (spent, log) = w.view(|m| (m.spent_24h(None).0, m.window.get(&None::<AccountId>).cloned().unwrap_or_default()));
+    assert_eq!(spent, 600, "the window still says what is in flight");
+    assert_eq!(log.iter().map(|(_, a)| a).sum::<u128>(), 600, "and so does the stored log: {log:?}");
+    // So the attacker does not get the 400 back: 600 is in flight, and another 800 is refused, uncounted.
+    w.step(&Op::Send { key: 1, tok: 0, amount: 800, to: 2 }).expect("the model and the contract agree that 800 does not fit");
+    assert_eq!(w.stats.count["refusal_uncounted_cap_used_up"], 1);
+    assert!(w.strikes.is_empty());
+}
+
+#[test]
+fn failure_callbacks_that_arrive_up_to_three_days_late_never_make_the_window_under_count() {
+    // The property test above delivers within 30 s. This one holds a third of the send callbacks back by 12 to 60 h
+    // while the clock moves in jumps of up to 20 h, with half of the callbacks reporting a failure, and the model
+    // checks after every step and every delivery that the window never says less than what has left and not failed.
+    let (mut late, mut late_failures, mut aged_out_failures) = (0u64, 0u64, 0u64);
+    for seed in 0..120u64 {
+        let mut r = splitmix(seed ^ 0x5EED_1A7E);
+        let mut cfg = plain_cfg(MIN_DELAY_SECS);
+        cfg.fail_pct = 50;
+        cfg.cb_seed = r;
+        let mut w = World::new(cfg).expect("the vault initialises");
+        for step in 0..80 {
+            let known = w.pending.len();
+            let op = match next(&mut r) % 5 {
+                0..=2 => Op::Send { key: 1 + (next(&mut r) % 2) as u8, tok: 0, amount: 1 + u128::from(next(&mut r) % 700), to: 2 },
+                3 => Op::Advance(1 + next(&mut r) % (20 * 3_600 * SEC)),
+                _ => Op::Advance(next(&mut r) % (60 * SEC)),
+            };
+            w.step(&op).unwrap_or_else(|e| panic!("seed {seed} step {step} {op:?}: {e}"));
+            if w.pending.len() > known && next(&mut r) % 3 == 0 {
+                let delay = 12 * 3_600 * SEC + next(&mut r) % (48 * 3_600 * SEC);
+                let (due, serial, ts) = {
+                    let cb = w.pending.last_mut().expect("the new callback");
+                    let CbKind::Send { ts, .. } = cb.kind else { continue };
+                    cb.due = w.now + delay;
+                    (cb.due, cb.serial, ts)
+                };
+                late += 1;
+                if w.cb_fails(serial) {
+                    late_failures += 1;
+                    aged_out_failures += u64::from(due - ts >= DAY_NS);
+                }
+            }
+        }
+        w.step(&Op::Advance(4 * DAY_NS)).unwrap_or_else(|e| panic!("seed {seed} drain: {e}"));
+        assert!(w.pending.is_empty(), "callbacks left in the air");
+    }
+    println!("late callbacks {late}, of which reporting a failure {late_failures}, of which a day or more after the send {aged_out_failures}");
+    assert!(aged_out_failures >= 50, "the run met only {aged_out_failures} failures that arrived a day or more late");
+}
+
+fn exec_cb(w: &World, id: u64) -> usize {
+    w.pending.iter().position(|c| matches!(&c.kind, CbKind::Exec { id: i, .. } if *i == id)).expect("its callback is in the air")
+}
+
+fn queue_pos(w: &World, id: u64) -> usize {
+    w.q.iter().position(|i| i.id == id).expect("it is queued")
+}
+
+/// The order of the finding in docs/v3/LOSS-BOUND.md 2.2: four requests of 750 (two per key; pending limit 3000) unlock,
+/// two of them (ids 1 and 3) are executed and their transfers will fail, a request of 750 per key is made while they are
+/// out, the other two (ids 0 and 2) are executed, and then the failure callbacks arrive. Every callback is held back by
+/// hand so that the clock and the order are the test's. Returns the world after the callbacks, with the new requests as
+/// ids 4 and 5.
+fn two_failed_executes_with_requests_made_while_they_were_out() -> World {
+    let d = MIN_DELAY_SECS;
+    let mut w = World::new(plain_cfg(d)).unwrap();
+    for (k, a) in [(1u8, 750u128), (1, 750), (2, 750), (2, 750)] {
+        w.step(&Op::Request { key: k, tok: 0, amount: a, to: 2 }).unwrap();
+    }
+    w.step(&Op::Advance(d * SEC)).unwrap(); // all four unlock; their request budget has aged out to the nanosecond
+    let hold = |w: &mut World| w.pending.iter_mut().for_each(|c| c.due = u64::MAX / 2);
+    for id in [1u64, 3] {
+        let p = queue_pos(&w, id);
+        w.step(&Op::Execute { pick: p }).unwrap(); // out of the queue; the transfer will fail
+        hold(&mut w);
+    }
+    for k in [1u8, 2] {
+        w.step(&Op::Request { key: k, tok: 0, amount: 750, to: 2 }).unwrap(); // takes the room the two in flight held
+    }
+    assert_eq!(w.stats.count["request_ok"], 6);
+    w.step(&Op::Advance(SEC)).unwrap();
+    for id in [0u64, 2] {
+        let p = queue_pos(&w, id);
+        w.step(&Op::Execute { pick: p }).unwrap(); // frees the room the two in flight would need to come back
+        hold(&mut w);
+    }
+    for (id, fail_pct) in [(1u64, 100u64), (3, 100), (0, 0), (2, 0)] {
+        let i = exec_cb(&w, id);
+        w.cfg.fail_pct = fail_pct;
+        w.deliver(i).and_then(|_| w.check(None)).unwrap_or_else(|e| panic!("callback of {id}: {e}"));
+    }
+    w.cfg.fail_pct = 0;
+    w
+}
+
+#[test]
+fn a_failed_execute_is_not_put_back_after_a_request_was_made_while_it_was_out() {
+    // Without the rule the two failed executes came back (the queue sum did not see them while they were out), were
+    // executed again, and 4500 = 1.5 x the pending limit left the queue inside one 24 h window ("BOUND BROKEN").
+    let mut w = two_failed_executes_with_requests_made_while_they_were_out();
+    w.step(&Op::Advance(0)).unwrap();
+    assert_eq!(w.stats.count["execute_dropped"], 2, "both failed executes are dropped: {:?}", w.stats.count);
+    assert!(w.stats.count.get("execute_requeued").is_none(), "{:?}", w.stats.count);
+    let queued: Vec<u64> = w.q.iter().map(|i| i.id).collect();
+    assert!(queued.contains(&4) && queued.contains(&5) && queued.len() == 2, "only the two new requests are queued: {queued:?}");
+    // The new requests unlock a day after they were made, which is inside the same 24 h window as the two executes.
+    w.step(&Op::Advance(MIN_DELAY_SECS * SEC - SEC)).unwrap();
+    for id in [4u64, 5] {
+        let p = queue_pos(&w, id);
+        w.step(&Op::Execute { pick: p }).unwrap_or_else(|e| panic!("execute of {id}: {e}"));
+    }
+    assert_eq!(w.stats.peak["window_exec_bp_of_pending"], 10_000, "the window carried exactly one pending limit: {:?}", w.stats.peak);
+    // The keys whose requests were dropped can ask again; they are not locked out.
+    w.step(&Op::Request { key: 1, tok: 0, amount: 750, to: 2 }).unwrap();
+    assert_eq!(w.stats.count["request_ok"], 7);
+}
+
+#[test]
+fn a_failed_execute_with_no_request_made_while_it_was_out_still_comes_back_and_can_run_again() {
+    // The rule must cost the honest case nothing: the same first steps, no new requests in between.
+    let d = MIN_DELAY_SECS;
+    let mut w = World::new(plain_cfg(d)).unwrap();
+    for (k, a) in [(1u8, 750u128), (2, 750)] {
+        w.step(&Op::Request { key: k, tok: 0, amount: a, to: 2 }).unwrap();
+    }
+    w.step(&Op::Advance(d * SEC)).unwrap();
+    let p = queue_pos(&w, 0);
+    w.step(&Op::Execute { pick: p }).unwrap();
+    w.pending.iter_mut().for_each(|c| c.due = u64::MAX / 2);
+    w.step(&Op::Advance(SEC)).unwrap();
+    let i = exec_cb(&w, 0);
+    w.cfg.fail_pct = 100;
+    w.deliver(i).and_then(|_| w.check(None)).unwrap();
+    w.cfg.fail_pct = 0;
+    assert_eq!(w.stats.count["execute_requeued"], 1);
+    assert!(w.q.iter().any(|i| i.id == 0), "the request is back");
+    let p = queue_pos(&w, 0);
+    w.step(&Op::Execute { pick: p }).expect("and it can be executed again");
 }

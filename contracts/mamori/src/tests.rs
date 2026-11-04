@@ -174,6 +174,26 @@ fn duplicate_and_excess_daily_keys_are_rejected() {
     .contains("too many daily keys"));
 }
 
+/// ARCHITECTURE.md 2.5: an allowance of 0 must never reach the AddKey. In an AddKey action 0 makes every call fail,
+/// and a conversion that turned it into "unlimited" would give a daily key an open gas allowance. The admin may pass
+/// any non-zero allowance (there is no maximum in the contract; cage-check reports one above its configured maximum).
+#[test]
+fn a_zero_allowance_is_refused_and_schedules_no_key() {
+    let mut m = setup();
+    as_admin(1_001 * SEC);
+    let reason = panics_with(|| {
+        let _ = m.add_daily_key(key(2), Some(U128(0)));
+    });
+    assert!(reason.contains("allowance must be > 0"), "{reason}");
+    assert!(!receipts_text().contains("AddKey"), "{}", receipts_text());
+    // One yoctoNEAR is a limited allowance, not a zero one: it goes through, and is not unlimited.
+    as_admin(1_002 * SEC);
+    let _ = m.add_daily_key(key(3), Some(U128(1)));
+    let r = receipts_text();
+    assert!(r.contains("AddKeyWithFunctionCall") && r.contains("allowance: Some(NearToken { inner: 1 })"), "{r}");
+    assert!(!r.contains("allowance: None"), "None is an unlimited allowance: {r}");
+}
+
 #[test]
 fn send_small_enforces_a_rolling_24h_cap() {
     let mut m = setup();
@@ -291,7 +311,7 @@ fn failed_execute_requeues_the_request() {
     let mut b = VMContextBuilder::new();
     b.current_account_id(vault()).predecessor_account_id(vault());
     testing_env!(b.build(), near_sdk::test_vm_config(), near_sdk::RuntimeFeesConfig::test(), Default::default(), vec![near_sdk::PromiseResult::Failed]);
-    m.on_execute_done(id, w);
+    m.on_execute_done(id, w, U64(m.next_id));
     assert_eq!(m.queue().len(), 1);
 }
 
@@ -966,7 +986,7 @@ fn a_failed_execute_does_not_resurrect_a_request_after_lockdown() {
     m.on_era(Ok(Era::Kaigen)); // lockdown while the transfer is in flight
     lock_down_at(&mut m, 2_000 * SEC + 3700 * SEC);
     callback_after_failure(2_000 * SEC + 3702 * SEC);
-    m.on_execute_done(id, w);
+    m.on_execute_done(id, w, U64(m.next_id));
     assert!(m.queue().is_empty(), "the queue was cleared on purpose and stays cleared");
 }
 
@@ -983,7 +1003,7 @@ fn a_failed_execute_cannot_push_the_queue_past_its_cap() {
         m.request_withdraw(None, U128(1), accounts(2)); // refills every slot, including the freed one
     }
     callback_after_failure(2_000 * SEC + 3603 * SEC);
-    m.on_execute_done(id, w);
+    m.on_execute_done(id, w, U64(m.next_id));
     assert_eq!(m.queue().len() as u32, MAX_QUEUE);
 }
 
@@ -1506,7 +1526,7 @@ fn a_failed_execute_cannot_push_the_queue_past_the_pending_limit() {
     as_daily(&key(1), 2_000 * SEC + 86_402 * SEC); // a day on, the request budget is back too
     m.request_withdraw(None, U128(PENDING_CAP), accounts(2)); // takes the room the in-flight request left
     callback_after_failure(2_000 * SEC + 86_403 * SEC);
-    m.on_execute_done(id, w);
+    m.on_execute_done(id, w, U64(m.next_id));
     assert_eq!(m.queue().len(), 1);
     assert!(event("execute_dropped").is_some());
 }
@@ -1586,7 +1606,7 @@ fn a_failed_execute_does_not_resurrect_a_request_of_a_removed_key() {
     as_admin(2_000 * SEC + 3602 * SEC);
     let _ = m.remove_daily_key(key(1));
     callback_after_failure(2_000 * SEC + 3603 * SEC);
-    m.on_execute_done(id, w);
+    m.on_execute_done(id, w, U64(m.next_id));
     assert!(m.queue().is_empty());
 }
 
@@ -1942,10 +1962,10 @@ fn a_failed_execute_is_put_back_only_while_the_request_is_still_alive() {
     let _ = m.execute(alive); // both left the queue and are in flight
     assert!(m.queue().is_empty());
     callback_after_failure(end - 1);
-    m.on_execute_done(stale, ws); // still alive for one more nanosecond: back in the queue
+    m.on_execute_done(stale, ws, U64(m.next_id)); // still alive for one more nanosecond: back in the queue
     assert_eq!(queued_ids(&m), vec![stale.0]);
     callback_after_failure(end);
-    m.on_execute_done(alive, wa);
+    m.on_execute_done(alive, wa, U64(m.next_id));
     assert_eq!(queued_ids(&m), vec![alive.0], "`stale` expired meanwhile and was cleared; `alive` came back");
     assert!(event("execute_dropped").is_none());
     // And a request whose own time has run out when its callback comes back is dropped, logged.
@@ -1954,7 +1974,7 @@ fn a_failed_execute_is_put_back_only_while_the_request_is_still_alive() {
     as_anyone(expiry_ns(3_000) - 1);
     let _ = m.execute(gone);
     callback_after_failure(expiry_ns(3_000));
-    m.on_execute_done(gone, wg);
+    m.on_execute_done(gone, wg, U64(m.next_id));
     assert!(!queued_ids(&m).contains(&gone.0));
     assert!(event("execute_dropped").is_some());
 }
@@ -2174,7 +2194,7 @@ fn expired_requests_do_not_stop_a_failed_execute_from_coming_back() {
     let newer = queue_dust(&mut m, &key(1), 60_001, 1)[0]; // the freed slot goes to a newer request
     assert_eq!(m.queue().len(), MAX_QUEUE as usize);
     callback_after_failure(100_000 * SEC); // the 31 old ones expired at 92 000 s; `late` lives until 140 000 s
-    m.on_execute_done(late, w);
+    m.on_execute_done(late, w, U64(m.next_id));
     assert_eq!(queued_ids(&m), vec![late.0, newer.0]);
     assert!(event("execute_dropped").is_none());
 }
@@ -2320,7 +2340,7 @@ fn a_failed_execute_cannot_give_a_key_more_slots_than_its_share() {
     let _ = m.execute(ids[0]); // in flight: key 1 holds one slot fewer
     let replacement = request_as(&mut m, &key(1), 2_000 + TEST_DELAY + 2, 1); // and uses it
     callback_after_failure((2_000 + TEST_DELAY + 3) * SEC);
-    m.on_execute_done(ids[0], w); // coming back would make 17 of its 16
+    m.on_execute_done(ids[0], w, U64(m.next_id)); // coming back would make 17 of its 16
     assert!(event("execute_dropped").is_some());
     assert_eq!(m.queue().len(), slots as usize);
     assert!(queued_ids(&m).contains(&replacement.0) && !queued_ids(&m).contains(&ids[0].0));
@@ -2398,7 +2418,7 @@ fn random_run(seed: u64, steps: u32) -> std::collections::BTreeMap<&'static str,
                     as_anyone(now);
                     if try_call(|| m.execute(U64(id))).is_ok() && next(&mut rng) % 2 == 0 {
                         callback_after_failure(now + SEC);
-                        m.on_execute_done(U64(id), w);
+                        m.on_execute_done(U64(id), w, U64(m.next_id));
                     }
                 }
             }
@@ -2469,3 +2489,8 @@ mod admin_surface;
 mod attest_check;
 mod check_view;
 mod events;
+
+// ---- open items 1, 2, 4 of v3 (tests/revoked_cap.rs, callback_orders.rs) ------------------------------------
+
+mod callback_orders;
+mod revoked_cap;

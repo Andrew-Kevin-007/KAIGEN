@@ -18,6 +18,12 @@ use near_sdk::{
 const DAY_NS: u64 = 86_400_000_000_000;
 const MAX_DAILY_KEYS: u32 = 8;
 const MAX_INTENTS_KEYS: u32 = 8;
+/// Most keys the vault records at once as served (`daily_keys`) plus awaiting the account's confirmation of their
+/// deletion (`revoked_keys`). `add_daily_key` refuses to record a new key past it, and nothing else grows the sum: a
+/// key that is removed or burned only moves from one set to the other, so containment is never blocked by it.
+/// Twice the daily-key limit, so a full set of served keys can all be burned with room left for as many again. It
+/// keeps the one pass of `lock_down` that reads the revoked set, and `attest()`, bounded. See docs/v3/LOSS-BOUND.md.
+const MAX_KEY_RECORDS: u32 = 2 * MAX_DAILY_KEYS;
 const MAX_QUEUE: u32 = 32;
 const MAX_ALLOWED: u32 = 32;
 /// Refused attacks tolerated from one daily key inside a 24 hour window before the vault burns that key.
@@ -415,6 +421,13 @@ impl Mamori {
         // take the new key away. The admin can re-add it as soon as the account confirms the delete.
         require!(!self.revoked_keys.contains(&public_key), "revoked key: its deletion is not confirmed yet");
         require!(self.daily_keys.len() < MAX_DAILY_KEYS, "too many daily keys");
+        // The one place the records can grow. Removing or burning a key moves it from one set to the other, so
+        // refusing here, and only here, bounds both sets and leaves every containment path free to run. The way
+        // out is `forget_revoked_key` (after the admin has seen the key is off the account) or a delete that lands.
+        require!(
+            self.daily_keys.len() + self.revoked_keys.len() < MAX_KEY_RECORDS,
+            "too many keys awaiting deletion: confirm or forget some first"
+        );
         require!(self.daily_keys.insert(public_key.clone()), "daily key already recorded");
         let allowance = allowance.map_or(DEFAULT_ALLOWANCE, |a| NearToken::from_yoctonear(a.0));
         let me = env::current_account_id();
@@ -439,6 +452,23 @@ impl Mamori {
         emit("remove_daily_key", serde_json::json!({ "public_key": public_key, "retry": !served }));
         self.cancel_queued_by(&public_key, "key_removed");
         self.delete_revoked_key(&public_key)
+    }
+
+    /// Admin. Stops waiting for the account to confirm the deletion of a key the vault no longer serves: the key
+    /// leaves `revoked_keys()` and may be added again. It schedules nothing and moves no value.
+    ///
+    /// For a delete that can never be confirmed. The account answers a `DeleteKey` for a key it does not hold with
+    /// a failure, and the callback cannot tell that from any other failure, so such a key (for example one the runtime
+    /// dropped when its gas allowance ran out: unverified in nearcore) would stay recorded, and block its own re-adding,
+    /// for ever; `remove_daily_key` retries the delete but cannot clear it. The contract cannot see the account's keys, so this
+    /// is the admin's word: check `view_access_key_list` first. Forgetting a key the account still holds changes
+    /// nothing a daily key can do (the contract serves it no more) and only costs the retry at the next kaigen
+    /// pass; forgetting one whose delete is still in flight lets the admin add it back inside that race.
+    pub fn forget_revoked_key(&mut self, public_key: PublicKey) {
+        self.assert_admin();
+        require!(self.revoked_keys.remove(&public_key), "not a revoked key");
+        // Logged under the removal's event name so the events table stays as documented: `forgotten` is the new field.
+        emit("remove_daily_key", serde_json::json!({ "public_key": public_key, "retry": false, "forgotten": true }));
     }
 
     /// Adds a classical key on `intents.near` for swaps and records it so `trip` can remove it.
@@ -647,7 +677,7 @@ impl Mamori {
         transfer(&w.token, w.amount.0, w.to.clone()).then(
             Self::ext(env::current_account_id())
                 .with_static_gas(CALLBACK_GAS)
-                .on_execute_done(id, w),
+                .on_execute_done(id, w, U64(self.next_id)),
         )
     }
 
@@ -744,7 +774,10 @@ impl Mamori {
         // fails, or whose callback never runs, is not forgotten: the next `trip` tries it again. Such a key can
         // sign nothing the contract accepts, so one that never deletes costs only a delete per pass; it shows in
         // `revoked_keys_left`, and `daily_keys()` and `intents_keys()` alone say whether the keys that can act are gone.
-        let revoked: Vec<PublicKey> = self.revoked_keys.iter().cloned().collect();
+        // `add_daily_key` keeps the set within `MAX_KEY_RECORDS`; the `take` is a guard so that this read, which runs
+        // before any gas check, cannot grow with a set that something else let grow. Reading it all would fail the
+        // whole receipt, and with it the intents and daily deletes scheduled above.
+        let revoked: Vec<PublicKey> = self.revoked_keys.iter().take(MAX_KEY_RECORDS as usize).cloned().collect();
         for k in revoked.into_iter().take_while(|_| has_fanout_gas()) {
             let _ = Promise::new(me.clone())
                 .delete_key(k.clone())
@@ -766,8 +799,16 @@ impl Mamori {
         }
         // The send failed, so the funds never left: give the spend back. A send folded into a full log has
         // no entry of its own: take it back from the first entry at or after its time, which holds it.
+        //
+        // Only while the send is still inside the 24 h window (`live_log`'s own test). Once it has left, nothing
+        // counts it, so there is nothing to give back; and the next send may already have pruned its entry, so a
+        // refund would find the first later entry that is big enough and take the amount out of ANOTHER send's, and
+        // the window would say less than has been sent. A receipt takes seconds, not a day; this keeps the bound
+        // whatever the delay (docs/v3/LOSS-BOUND.md, A5).
         let mut refunded = false;
-        if let Some(log) = self.window.get_mut(&token) {
+        let still_in_window = ts.0 > env::block_timestamp().saturating_sub(DAY_NS);
+        let log = if still_in_window { self.window.get_mut(&token) } else { None };
+        if let Some(log) = log {
             let at = log
                 .iter()
                 .position(|&(t, a)| t == ts.0 && a == amount.0)
@@ -780,7 +821,7 @@ impl Mamori {
                 refunded = true;
             }
         }
-        // `refunded` false means no entry held the send any more (it had aged out of the window): nothing to give back.
+        // `refunded` false means nothing was given back: the send had left the window, or no entry held it any more.
         emit(
             "send_failed",
             serde_json::json!({
@@ -791,15 +832,26 @@ impl Mamori {
         SendOutcome { sent: false, refused: Some(Reason::TransferFailed.text().to_string()), strikes: 0, burned: false }
     }
 
+    /// `requests_before` is `next_id` as `execute` saw it: how many requests had been made when this one went out.
     #[private]
-    pub fn on_execute_done(&mut self, id: U64, withdrawal: Withdrawal) {
+    pub fn on_execute_done(&mut self, id: U64, withdrawal: Withdrawal, requests_before: U64) {
         if is_promise_success() {
             return;
         }
         // The funds never left. Put the request back to retry or cancel, unless the vault has locked
         // down meanwhile (the queue was cleared on purpose), its key was removed or burned meanwhile (its
-        // requests were cancelled on purpose), it expired meanwhile (a stale request does not come back), or
-        // newer requests took the slot or the pending headroom. Expired entries do not count as taking either.
+        // requests were cancelled on purpose), it expired meanwhile (a stale request does not come back), a request
+        // was made while it was out, or newer requests took the slot or the pending headroom. Expired entries do not
+        // count as taking either.
+        //
+        // The request is in no collection while its transfer is in flight, so the queue's sum cannot see its value.
+        // A new request can take the room it held, an `execute` of another request can then free room again, and the
+        // failed one comes back into that: the same room has carried value out twice inside one 24 h window, and a
+        // window can see 1.5 pending limits leave the queue instead of one (the test
+        // `a_failed_execute_is_not_put_back_after_a_request_was_made_while_it_was_out` scripts it). With no request
+        // made in between, only requests from before this one went out can be queued, so it fits where it was
+        // (`queue_room` then fails only if the admin changed a limit or the key set meanwhile). With one, it is not
+        // put back, and its key asks again.
         let expired = env::block_timestamp() >= withdrawal.expires_at.0;
         self.remove_expired("execute_failed");
         let room = self.queue_room(&withdrawal.requested_by, &withdrawal.token, withdrawal.amount.0).is_ok();
@@ -810,6 +862,8 @@ impl Mamori {
             Some("expired")
         } else if !self.daily_keys.contains(&withdrawal.requested_by) {
             Some("key_gone")
+        } else if self.next_id != requests_before.0 {
+            Some("request_made")
         } else if !room {
             Some("no_room")
         } else {
