@@ -182,11 +182,16 @@ fn attest_has_exactly_the_documented_fields() {
             "contract",
             "daily_keys",
             "drill_build",
+            "emergency_until",
             "intents_keys",
             "min_delay_secs",
             "note",
+            "policy_account",
+            "proposals",
             "queue_len",
             "revoked_keys",
+            "safe_account",
+            "watchers",
         ]
     );
     assert_eq!(

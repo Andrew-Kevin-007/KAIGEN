@@ -24,12 +24,12 @@ use super::*;
 const LIB_SOURCE: &str = include_str!("../lib.rs");
 
 /// An ML-DSA-65 public key (1952 bytes) as the signer of the call: the cold admin key's type.
-fn ml_dsa_key() -> PublicKey {
+pub(super) fn ml_dsa_key() -> PublicKey {
     PublicKey::from_parts(CurveType::MLDSA65, vec![7; 1952]).unwrap()
 }
 
 /// A call signed by the ML-DSA admin key (a full-access key, so the predecessor is the account itself).
-fn as_ml_dsa_admin(now: u64) {
+pub(super) fn as_ml_dsa_admin(now: u64) {
     let mut b = VMContextBuilder::new();
     b.current_account_id(vault())
         .predecessor_account_id(vault())
@@ -50,6 +50,10 @@ enum Gate {
     Private,
     /// `self.assert_daily_key()`: a recorded classical daily key.
     Daily,
+    /// `self.assert_policy();`: the one account the admin named as the policy account (predecessor only, no key read).
+    Policy,
+    /// `self.assert_sweeper();`: the admin, or a named watcher inside an emergency window (predecessor only, no key read).
+    Sweep,
     /// No gate in the method: a view, or open to anyone on purpose.
     Open,
 }
@@ -77,6 +81,10 @@ fn exported() -> Vec<(String, Gate)> {
                 last.1 = Gate::Admin;
             } else if line.contains("self.assert_daily_key();") {
                 last.1 = Gate::Daily;
+            } else if line.contains("self.assert_policy();") {
+                last.1 = Gate::Policy;
+            } else if line.contains("self.assert_sweeper();") {
+                last.1 = Gate::Sweep;
             }
         }
         private = false;
@@ -116,6 +124,13 @@ fn every_exported_method_has_the_gate_this_table_names() {
             "enforce_allowlist",
             "cancel",
             "cancel_all",
+            "set_policy_account",
+            "cancel_proposal",
+            "set_safe_account",
+            "cancel_safe_account_change",
+            "add_watcher",
+            "remove_watcher",
+            "set_emergency",
         ]),
         "admin methods"
     );
@@ -131,10 +146,17 @@ fn every_exported_method_has_the_gate_this_table_names() {
             "on_key_removed",
             "on_revoked_key_deleted",
             "on_intents_removed",
+            "on_sweep_done",
         ]),
         "private (self-call) methods"
     );
     assert_eq!(names_with(Gate::Daily), sorted(&["send_small", "request_withdraw"]), "daily-key methods");
+    assert_eq!(
+        names_with(Gate::Policy),
+        sorted(&["propose_add_daily_key", "propose_set_token_limit", "propose_set_pending_limit", "propose_allow_recipient"]),
+        "policy-account methods"
+    );
+    assert_eq!(names_with(Gate::Sweep), sorted(&["sweep_to_safe"]), "admin-or-watcher methods");
     assert_eq!(
         names_with(Gate::Open),
         sorted(&[
@@ -154,6 +176,12 @@ fn every_exported_method_has_the_gate_this_table_names() {
             "pending_limit",
             "queue",
             "spent_24h",
+            "apply",
+            "policy_account",
+            "safe_account",
+            "watchers",
+            "emergency_until",
+            "proposals",
         ]),
         "open methods (views and the permissionless ones)"
     );
@@ -261,6 +289,53 @@ fn admin_cases() -> Vec<AdminCase> {
             call: |m| assert_eq!(m.cancel_all(), 1),
             took_effect: |m| m.queue().is_empty(),
         },
+        AdminCase {
+            name: "set_policy_account",
+            prepare: nothing,
+            call: |m| m.set_policy_account(Some(accounts(3))),
+            took_effect: |m| m.policy_account() == Some(accounts(3)),
+        },
+        AdminCase {
+            name: "cancel_proposal",
+            prepare: |m| {
+                m.set_policy_account(Some(accounts(3)));
+                as_account(&accounts(3), 1_500 * SEC);
+                m.propose_allow_recipient(accounts(2));
+                as_admin(1_501 * SEC);
+            },
+            call: |m| m.cancel_proposal(U64(0)),
+            took_effect: |m| m.proposals().is_empty(),
+        },
+        AdminCase {
+            name: "set_safe_account",
+            prepare: nothing,
+            call: |m| m.set_safe_account(accounts(5)),
+            took_effect: |m| m.safe_account().pending.is_some_and(|p| p.account == accounts(5)),
+        },
+        AdminCase {
+            name: "cancel_safe_account_change",
+            prepare: |m| m.set_safe_account(accounts(5)),
+            call: |m| m.cancel_safe_account_change(),
+            took_effect: |m| m.safe_account().pending.is_none(),
+        },
+        AdminCase {
+            name: "add_watcher",
+            prepare: nothing,
+            call: |m| m.add_watcher(accounts(3)),
+            took_effect: |m| m.watchers() == vec![accounts(3)],
+        },
+        AdminCase {
+            name: "remove_watcher",
+            prepare: |m| m.add_watcher(accounts(3)),
+            call: |m| m.remove_watcher(accounts(3)),
+            took_effect: |m| m.watchers().is_empty(),
+        },
+        AdminCase {
+            name: "set_emergency",
+            prepare: nothing,
+            call: |m| m.set_emergency(3_600),
+            took_effect: |m| m.emergency_until() == U64(2_000 * SEC + 3_600 * SEC),
+        },
     ]
 }
 
@@ -273,7 +348,7 @@ fn the_admin_cases_cover_every_admin_method_the_source_has() {
 
 /// Each case gets a fresh mocked blockchain: the unit VM keeps its storage across `testing_env!` calls inside one
 /// test, and every case sets up its own vault. The mock is per thread, so a thread is a fresh chain.
-fn on_a_fresh_chain(f: impl FnOnce() + Send + 'static) {
+pub(super) fn on_a_fresh_chain(f: impl FnOnce() + Send + 'static) {
     if let Err(e) = std::thread::spawn(f).join() {
         std::panic::resume_unwind(e);
     }
@@ -311,6 +386,46 @@ fn every_admin_method_refuses_a_caller_that_is_not_the_account() {
             let after = (m.daily_keys(), m.intents_keys(), m.revoked_keys(), m.queue().len(), m.config().max_strikes);
             assert_eq!(before, after, "{} changed state for a stranger", case.name);
         });
+    }
+}
+
+/// The stretch items give three kinds of account some power: a policy account (proposals), watchers (sweeps in a window),
+/// and a safe account (receives swept value). None of them is the admin: every admin method refuses each, whatever it
+/// can do through its own door, and none of them can use the daily methods either.
+#[test]
+fn the_policy_account_a_watcher_and_the_safe_account_can_call_no_admin_method_and_no_daily_method() {
+    let watcher: AccountId = "watcher.near".parse().unwrap();
+    for case in admin_cases() {
+        for (who, what) in [(accounts(3), "the policy account"), (watcher.clone(), "a watcher"), (accounts(5), "the safe account")] {
+            let (w, name) = (watcher.clone(), case.name);
+            on_a_fresh_chain(move || {
+                let mut m = setup();
+                as_admin(1_100 * SEC);
+                m.set_policy_account(Some(accounts(3)));
+                m.add_watcher(w);
+                m.set_safe_account(accounts(5));
+                m.set_emergency(3_600);
+                (case.prepare)(&mut m);
+                let before = (m.daily_keys(), m.intents_keys(), m.revoked_keys(), m.queue().len(), m.config().max_strikes, m.policy_account(), m.watchers());
+                as_account(&who, 1_500 * SEC);
+                let msg = panics_with(|| (case.call)(&mut m));
+                assert!(msg.contains("admin only"), "{name} by {what}: expected 'admin only', got {msg:?}");
+                let after = (m.daily_keys(), m.intents_keys(), m.revoked_keys(), m.queue().len(), m.config().max_strikes, m.policy_account(), m.watchers());
+                assert_eq!(before, after, "{name} changed state for {what}");
+            });
+        }
+    }
+    let mut m = setup();
+    for who in [accounts(3), watcher, accounts(5)] {
+        as_account(&who, 2_000 * SEC);
+        let msg = panics_with(|| {
+            let _ = m.send_small(None, U128(1), accounts(2));
+        });
+        assert!(msg.contains("daily key only"), "{who}: {msg}");
+        let msg = panics_with(|| {
+            m.request_withdraw(None, U128(1), accounts(2));
+        });
+        assert!(msg.contains("daily key only"), "{who}: {msg}");
     }
 }
 

@@ -19,6 +19,15 @@
 //! reported, so the message is a counterexample, not a trace.
 //!
 //! `KAIGEN_PROP_SEEDS` and `KAIGEN_PROP_STEPS` scale a run up (a soak); the defaults keep `cargo test` quick.
+//!
+//! The stretch items (docs/v3/STRETCH-DESIGN.md, LOSS-BOUND.md section 9) are in the model too, in two thirds of the runs:
+//! a policy account that proposes limit raises and keys, `apply` and `cancel_proposal`, a policy account that is replaced,
+//! a safe account that changes after its delay, watchers, emergency windows, and `sweep_to_safe` by the admin, a watcher,
+//! a stranger and the policy account. The ledger gains a third kind of transfer (a sweep); the sweep over every 24 h window
+//! checks three claims: sends + executes within the cap + pending limit as before (a sweep is not a loss, it goes to the
+//! owner's own safe account), executes + sweeps within two pending limits, and everything that left the vault within the
+//! cap + two pending limits. Limits can now rise during a run (a proposal that has waited its delay), so a window is checked
+//! against the limits in force at its end (the model only ever raises them).
 
 use super::*;
 use near_sdk::borsh::BorshDeserialize;
@@ -114,6 +123,55 @@ fn id_of(k: &PublicKey) -> u8 {
     (1..=KEYS).find(|n| &key(*n) == k).expect("a key of the model")
 }
 
+// ---- the stretch items: the accounts the model uses -------------------------------------------------
+
+/// Policy accounts 0 and 1, watchers 0 and 1, safe accounts 0 to 2. None is a payee, the vault, or the stranger of `Who::Anyone`.
+const POLICIES: u8 = 2;
+const WATCHERS: u8 = 2;
+const SAFES: u8 = 3;
+
+fn policy_acct(i: u8) -> AccountId {
+    match i {
+        0 => accounts(3),
+        _ => "policy2.near".parse().unwrap(),
+    }
+}
+
+fn watcher_acct(i: u8) -> AccountId {
+    format!("watch{}.near", i + 1).parse().unwrap()
+}
+
+fn safe_acct(i: u8) -> AccountId {
+    format!("safe{}.near", i + 1).parse().unwrap()
+}
+
+/// A change the model has the policy account propose. Limits only ever go up (a proposal that would lower one is never run).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum MChange {
+    /// A 24 h cap for token `tok` (1 or 2: NEAR's has no setter).
+    Cap { tok: usize, limit: u128 },
+    Pending { tok: usize, limit: u128 },
+    AddKey(u8),
+    /// The payee that is not on the allowlist from the start (payee 2).
+    Allow,
+}
+
+#[derive(Clone, Debug)]
+struct MProp {
+    change: MChange,
+    executable_at: u64,
+    expires_at: u64,
+}
+
+/// Who calls `sweep_to_safe` in an `Op::Sweep`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Sweeper {
+    Admin,
+    Watcher(u8),
+    Stranger,
+    Policy,
+}
+
 // ---- configuration -------------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
@@ -136,15 +194,17 @@ struct Cfg {
     dust: bool,
     /// Most steps come from the greedy drainer (`attack_op`) instead of the random mix.
     attacker: bool,
+    /// The run also drives the stretch items: a policy account, a safe account, watchers, emergency windows, sweeps.
+    stretch: bool,
 }
 
 impl Cfg {
     /// The exec part of the claim: one pending limit, or two when the build allows a delay under a day (drill).
-    fn exec_claim(&self, tok: usize) -> u128 {
+    fn exec_claim(&self, pending: u128) -> u128 {
         if cfg!(feature = "drill") && self.delay_secs < MIN_DELAY_SECS {
-            2 * self.pending[tok]
+            2 * pending
         } else {
-            self.pending[tok]
+            pending
         }
     }
 }
@@ -181,7 +241,7 @@ fn cfg_for(seed: u64) -> Cfg {
     } else {
         pick(&mut r, &[86_400, 86_401, 90_000, 172_800]) as u64
     };
-    Cfg { delay_secs, cap: [cap0, cap1, 0], pending: [pending(cap0, h0), pending(cap1, h1), 0], min_send, max_strikes, allowlist, keys, fail_pct, cb_seed: r, dust, attacker: seed % 4 == 1 }
+    Cfg { delay_secs, cap: [cap0, cap1, 0], pending: [pending(cap0, h0), pending(cap1, h1), 0], min_send, max_strikes, allowlist, keys, fail_pct, cb_seed: r, dust, attacker: seed % 4 == 1, stretch: !seed.is_multiple_of(3) && !dust }
 }
 
 // ---- the model -----------------------------------------------------------------------------------
@@ -197,6 +257,8 @@ enum Status {
 enum Kind {
     Send,
     Exec,
+    /// `sweep_to_safe`: value that goes to the safe account, not out of the owner's hands.
+    Sweep,
 }
 
 /// One transfer the contract started: the block of the call that started it, not of the callback.
@@ -231,6 +293,7 @@ enum CbKind {
     /// `requests_before`: how many requests had been made when the execute went out (the contract's `next_id`).
     Exec { ix: usize, id: u64, w: Withdrawal, requests_before: u64 },
     Revoked { key: u8 },
+    Sweep { ix: usize, id: u64, tok: usize, amount: u128, safe: u8 },
 }
 
 struct Cb {
@@ -252,6 +315,18 @@ enum Op {
     AddKey(u8),
     RemoveKey(u8),
     Trip(Era),
+    /// `by`: a policy account (0 or 1) or, from 2 on, a stranger.
+    Propose { by: u8, change: MChange },
+    Apply { pick: usize },
+    CancelProposal { pick: usize },
+    /// The admin names the policy account (0 or 1) or switches the path off.
+    SetPolicy(Option<u8>),
+    SetSafe(u8),
+    CancelSafe,
+    AddWatcher(u8),
+    RemoveWatcher(u8),
+    SetEmergency(u64),
+    Sweep { pick: usize, by: Sweeper },
 }
 
 #[derive(Default, Clone)]
@@ -284,6 +359,8 @@ enum Who {
     Daily(u8),
     Anyone,
     Callback,
+    Policy(u8),
+    Watcher(u8),
 }
 
 /// Everything the contract says about itself, read in one view.
@@ -330,6 +407,8 @@ impl Snap {
 
 struct World {
     cfg: Cfg,
+    /// The configuration the run started with (`cfg` follows the limits a proposal raises); a replay starts from this.
+    base_cfg: Cfg,
     /// What the chain stores for the account, and the borsh bytes of the contract state under it.
     storage: HashMap<Vec<u8>, Vec<u8>>,
     state: Vec<u8>,
@@ -354,6 +433,21 @@ struct World {
     /// The drainer's own bookkeeping: when it last tried a send, and how many keys it has asked with at this instant.
     last_send: std::cell::Cell<u64>,
     req_at: std::cell::Cell<(u64, usize)>,
+    // ---- the stretch items
+    policy: Option<u8>,
+    proposals: BTreeMap<u64, MProp>,
+    next_proposal: u64,
+    safe_cur: Option<u8>,
+    safe_pend: Option<(u8, u64)>,
+    watchers: BTreeSet<u8>,
+    emergency_until: u64,
+    /// Payee 2 has been put on the allowlist (by a proposal).
+    allowed2: bool,
+    /// Whether the admin ever set a pending limit for the token: without one it is ten times the cap.
+    explicit_pending: [bool; TOKENS],
+    /// (from, value): the limits in force, in order, for the window sweep.
+    cap_hist: [Vec<(u64, u128)>; TOKENS],
+    pending_hist: [Vec<(u64, u128)>; TOKENS],
 }
 
 impl World {
@@ -361,6 +455,7 @@ impl World {
     fn new(cfg: Cfg) -> Result<World, String> {
         let mut w = World {
             cfg: cfg.clone(),
+            base_cfg: cfg.clone(),
             storage: HashMap::new(),
             state: vec![],
             now: 3 * DAY_NS,
@@ -380,6 +475,17 @@ impl World {
             expect_gone: BTreeSet::new(),
             last_send: std::cell::Cell::new(0),
             req_at: std::cell::Cell::new((0, 0)),
+            policy: None,
+            proposals: BTreeMap::new(),
+            next_proposal: 0,
+            safe_cur: None,
+            safe_pend: None,
+            watchers: BTreeSet::new(),
+            emergency_until: 0,
+            allowed2: false,
+            explicit_pending: [true, true, false],
+            cap_hist: std::array::from_fn(|tok| vec![(0, cfg.cap[tok])]),
+            pending_hist: std::array::from_fn(|tok| vec![(0, cfg.pending[tok])]),
         };
         w.env(Who::Admin, vec![]);
         let m = try_call(|| {
@@ -397,8 +503,16 @@ impl World {
             for n in 1..=cfg.keys {
                 let _ = m.add_daily_key(key(n), None);
             }
+            if cfg.stretch {
+                m.set_policy_account(Some(policy_acct(0)));
+                m.set_safe_account(safe_acct(0));
+            }
             m
         })?;
+        if cfg.stretch {
+            w.policy = Some(0);
+            w.safe_pend = Some((0, w.now + cfg.delay_secs * SEC));
+        }
         w.state = near_sdk::borsh::to_vec(&m).expect("state serialises");
         drop(m);
         w.storage = with_mocked_blockchain(|b| b.take_storage());
@@ -418,6 +532,12 @@ impl World {
             }
             Who::Anyone => {
                 b.predecessor_account_id(accounts(4)).signer_account_id(accounts(4));
+            }
+            Who::Policy(i) => {
+                b.predecessor_account_id(policy_acct(i)).signer_account_id(policy_acct(i));
+            }
+            Who::Watcher(i) => {
+                b.predecessor_account_id(watcher_acct(i)).signer_account_id(watcher_acct(i));
             }
         }
         set_blockchain_interface(MockedBlockchain::new(
@@ -493,6 +613,16 @@ impl World {
             Op::AddKey(k) => self.add_key(*k)?,
             Op::RemoveKey(k) => self.remove_key(*k)?,
             Op::Trip(e) => self.trip(*e)?,
+            Op::Propose { by, change } => self.propose(*by, change)?,
+            Op::Apply { pick } => self.apply(*pick)?,
+            Op::CancelProposal { pick } => self.cancel_proposal(*pick)?,
+            Op::SetPolicy(p) => self.set_policy(*p)?,
+            Op::SetSafe(s) => self.set_safe(*s)?,
+            Op::CancelSafe => self.cancel_safe()?,
+            Op::AddWatcher(w) => self.add_watcher(*w)?,
+            Op::RemoveWatcher(w) => self.remove_watcher(*w)?,
+            Op::SetEmergency(secs) => self.set_emergency(*secs)?,
+            Op::Sweep { pick, by } => self.sweep(*pick, *by)?,
         };
         self.check(per_key)
     }
@@ -521,7 +651,7 @@ impl World {
                 ensure!(served && calm && amount > 0, "send_small returned a refusal where it had to panic");
                 ensure!(!o.sent && o.refused.is_some(), "a refusal that says it sent: {o:?}");
                 // The counting rule (ARCHITECTURE 2.1): only a refusal that could never succeed for an honest key counts.
-                let (counted, why) = if self.cfg.allowlist && !listed(to) {
+                let (counted, why) = if self.cfg.allowlist && !self.is_listed(to) {
                     (true, "allowlist")
                 } else if cap == 0 {
                     (false, "no limit")
@@ -563,7 +693,7 @@ impl World {
             }
             Ok(PromiseOrValue::Promise(_)) => {
                 ensure!(served && calm && amount > 0, "send_small went through where it had to panic");
-                ensure!(!self.cfg.allowlist || listed(to), "payee control broken: a send went to unlisted payee {to} with the allowlist enforced");
+                ensure!(!self.cfg.allowlist || self.is_listed(to), "payee control broken: a send went to unlisted payee {to} with the allowlist enforced");
                 ensure!(cap > 0 && amount <= cap && !(tok == 0 && amount < self.cfg.min_send), "send went through that had to be refused");
                 ensure!(used + amount <= cap, "send of {amount} went through with {used} of {cap} already sent in 24 h: the cap is broken at its source");
                 self.ledger.push(Transfer { t: now, tok, amount, kind: Kind::Send, status: Status::InFlight });
@@ -744,6 +874,305 @@ impl World {
         Ok(None)
     }
 
+    // ---- the stretch items ---------------------------------------------------------------------
+
+    /// Payees 0 and 1 are on the list when the run enforces it; payee 2 is once a proposal has put it there.
+    fn is_listed(&self, to: u8) -> bool {
+        listed(to) || (to == 2 && self.allowed2)
+    }
+
+    /// The safe account in force now: a waiting one once its delay has passed, else the current one.
+    fn safe_now(&self) -> Option<u8> {
+        match self.safe_pend {
+            Some((s, at)) if self.now >= at => Some(s),
+            _ => self.safe_cur,
+        }
+    }
+
+    fn settle_safe(&mut self) {
+        if let Some((s, at)) = self.safe_pend {
+            if self.now >= at {
+                self.safe_cur = Some(s);
+                self.safe_pend = None;
+            }
+        }
+    }
+
+    fn set_cap(&mut self, tok: usize, limit: u128) {
+        self.cfg.cap[tok] = limit;
+        self.cap_hist[tok].push((self.now, limit));
+        // A token the admin never gave a pending limit has ten times its cap.
+        if !self.explicit_pending[tok] {
+            self.set_pending(tok, limit * PENDING_LIMIT_MULTIPLE, false);
+        }
+    }
+
+    fn set_pending(&mut self, tok: usize, limit: u128, explicit: bool) {
+        self.cfg.pending[tok] = limit;
+        self.pending_hist[tok].push((self.now, limit));
+        self.explicit_pending[tok] |= explicit;
+    }
+
+    fn hist_at(hist: &[(u64, u128)], t: u64) -> u128 {
+        hist.iter().rev().find(|(from, _)| *from <= t).map_or(0, |(_, v)| *v)
+    }
+
+    fn propose(&mut self, by: u8, change: &MChange) -> Result<Option<(u8, usize)>, String> {
+        let now = self.now;
+        let who = if by < POLICIES { Who::Policy(by) } else { Who::Anyone };
+        let out = self.call(who, vec![], |m| match change {
+            MChange::Cap { tok, limit } => m.propose_set_token_limit(tk(*tok).expect("a token"), U128(*limit)),
+            MChange::Pending { tok, limit } => m.propose_set_pending_limit(tk(*tok), U128(*limit)),
+            MChange::AddKey(k) => m.propose_add_daily_key(key(*k), None),
+            MChange::Allow => m.propose_allow_recipient(payee(2)),
+        });
+        let right_account = by < POLICIES && self.policy == Some(by);
+        let live = self.proposals.values().filter(|p| now < p.expires_at).count();
+        let want = if self.policy.is_none() {
+            Some("no policy account is set")
+        } else if !right_account {
+            Some("policy account only")
+        } else if live >= MAX_PROPOSALS as usize {
+            Some("too many proposals waiting")
+        } else {
+            None
+        };
+        match (out, want) {
+            (Err(msg), Some(w)) => {
+                ensure!(msg.contains(w), "propose by {by}: wanted `{w}`, got `{msg}`");
+                self.stats.bump("propose_refused");
+            }
+            (Err(msg), None) => fail(format!("propose by policy account {by} failed: `{msg}`"))?,
+            (Ok(id), None) => {
+                ensure!(id.0 == self.next_proposal, "proposal id {} where the model expects {}", id.0, self.next_proposal);
+                self.proposals.retain(|_, p| now < p.expires_at);
+                let executable_at = now + self.cfg.delay_secs * SEC;
+                self.proposals.insert(id.0, MProp { change: change.clone(), executable_at, expires_at: executable_at + EXECUTE_WINDOW_SECS * SEC });
+                self.next_proposal += 1;
+                self.stats.bump("propose_ok");
+            }
+            (Ok(_), Some(w)) => fail(format!("propose by {by} went through although it had to fail with `{w}`"))?,
+        }
+        Ok(None)
+    }
+
+    fn apply(&mut self, pick: usize) -> Result<Option<(u8, usize)>, String> {
+        let now = self.now;
+        let ids: Vec<u64> = self.proposals.keys().copied().collect();
+        // One time in six an id nobody proposed.
+        let id = if ids.is_empty() || pick % 6 == 5 { self.next_proposal + 3 } else { ids[pick % ids.len()] };
+        let prop = self.proposals.get(&id).cloned();
+        if let Some(p) = &prop {
+            let due = now >= p.executable_at && now < p.expires_at;
+            let lowers = match p.change {
+                MChange::Cap { tok, limit } => limit < self.cfg.cap[tok],
+                MChange::Pending { tok, limit } => limit < self.cfg.pending[tok],
+                _ => false,
+            };
+            if due && lowers {
+                // The model's limits only rise; a proposal that would lower one waits for its end.
+                self.stats.bump("apply_skipped_would_lower");
+                return Ok(None);
+            }
+        }
+        let out = self.call(Who::Anyone, vec![], |m| drop(m.apply(U64(id))));
+        let want: Option<&str> = match &prop {
+            None => Some("no such proposal"),
+            Some(p) if now < p.executable_at => Some("still locked"),
+            Some(p) if now >= p.expires_at => Some("expired"),
+            Some(p) => match &p.change {
+                MChange::AddKey(k) if self.revoked.contains(k) => Some("revoked key"),
+                MChange::AddKey(_) if self.served.len() >= MAX_DAILY_KEYS as usize => Some("too many daily keys"),
+                MChange::AddKey(k) if self.served.contains(k) => Some("already recorded"),
+                MChange::Allow if self.allowed2 => Some("already allowed"),
+                _ => None,
+            },
+        };
+        match (out, want) {
+            (Err(msg), Some(w)) => {
+                ensure!(msg.contains(w), "apply({id}): wanted `{w}`, got `{msg}`");
+                self.stats.bump(match w {
+                    "still locked" => "apply_still_locked",
+                    "expired" => "apply_expired",
+                    "no such proposal" => "apply_unknown",
+                    _ => "apply_refused_by_the_change",
+                });
+            }
+            (Err(msg), None) => fail(format!("apply({id}) of a due proposal failed: `{msg}`"))?,
+            (Ok(()), Some(w)) => fail(format!("apply({id}) went through although it had to fail with `{w}`"))?,
+            (Ok(()), None) => {
+                let p = prop.expect("a due proposal");
+                self.proposals.remove(&id);
+                match p.change {
+                    MChange::Cap { tok, limit } => self.set_cap(tok, limit),
+                    MChange::Pending { tok, limit } => self.set_pending(tok, limit, true),
+                    MChange::AddKey(k) => {
+                        self.served.insert(k);
+                    }
+                    MChange::Allow => self.allowed2 = true,
+                }
+                self.stats.bump("apply_ok");
+            }
+        }
+        Ok(None)
+    }
+
+    fn cancel_proposal(&mut self, pick: usize) -> Result<Option<(u8, usize)>, String> {
+        let ids: Vec<u64> = self.proposals.keys().copied().collect();
+        let id = if ids.is_empty() || pick % 5 == 4 { self.next_proposal + 3 } else { ids[pick % ids.len()] };
+        let known = self.proposals.contains_key(&id);
+        let out = self.call(Who::Admin, vec![], |m| m.cancel_proposal(U64(id)));
+        match (out, known) {
+            (Ok(()), true) => {
+                self.proposals.remove(&id);
+                self.stats.bump("proposal_cancelled");
+            }
+            (Err(msg), false) => ensure!(msg.contains("no such proposal"), "cancel_proposal({id}): `{msg}`"),
+            (Ok(()), false) => fail(format!("cancel_proposal({id}) of an unknown proposal went through"))?,
+            (Err(msg), true) => fail(format!("cancel_proposal({id}) failed: `{msg}`"))?,
+        }
+        Ok(None)
+    }
+
+    fn set_policy(&mut self, p: Option<u8>) -> Result<Option<(u8, usize)>, String> {
+        let held = self.proposals.len();
+        self.call(Who::Admin, vec![], |m| m.set_policy_account(p.map(policy_acct)))?;
+        let dropped = near_sdk::test_utils::get_logs().iter().find(|l| l.contains("\"set_policy_account\"")).cloned().unwrap_or_default();
+        ensure!(dropped.contains(&format!("\"dropped\":{held}")), "set_policy_account dropped other than the {held} proposals the model holds: {dropped}");
+        self.proposals.clear();
+        self.policy = p;
+        self.stats.bump(if held > 0 { "policy_replaced_with_proposals_waiting" } else { "policy_replaced" });
+        Ok(None)
+    }
+
+    fn set_safe(&mut self, s: u8) -> Result<Option<(u8, usize)>, String> {
+        self.call(Who::Admin, vec![], |m| m.set_safe_account(safe_acct(s)))?;
+        self.settle_safe();
+        self.safe_pend = Some((s, self.now + self.cfg.delay_secs * SEC));
+        self.stats.bump("safe_account_named");
+        Ok(None)
+    }
+
+    fn cancel_safe(&mut self) -> Result<Option<(u8, usize)>, String> {
+        let out = self.call(Who::Admin, vec![], |m| m.cancel_safe_account_change());
+        self.settle_safe();
+        match (out, self.safe_pend.take()) {
+            (Ok(()), Some(_)) => self.stats.bump("safe_account_change_cancelled"),
+            (Err(msg), None) => ensure!(msg.contains("no safe account change is waiting"), "cancel_safe_account_change: `{msg}`"),
+            (Ok(()), None) => fail("cancel_safe_account_change with nothing waiting went through".into())?,
+            (Err(msg), Some(_)) => fail(format!("cancel_safe_account_change of a waiting change failed: `{msg}`"))?,
+        }
+        Ok(None)
+    }
+
+    fn add_watcher(&mut self, w: u8) -> Result<Option<(u8, usize)>, String> {
+        let out = self.call(Who::Admin, vec![], |m| m.add_watcher(watcher_acct(w)));
+        match (out, self.watchers.insert(w)) {
+            (Ok(()), true) => self.stats.bump("watcher_added"),
+            (Err(msg), false) => ensure!(msg.contains("already a watcher"), "add_watcher({w}): `{msg}`"),
+            (Ok(()), false) => fail(format!("add_watcher({w}) of a watcher went through"))?,
+            (Err(msg), true) => fail(format!("add_watcher({w}) failed: `{msg}`"))?,
+        }
+        Ok(None)
+    }
+
+    fn remove_watcher(&mut self, w: u8) -> Result<Option<(u8, usize)>, String> {
+        let out = self.call(Who::Admin, vec![], |m| m.remove_watcher(watcher_acct(w)));
+        match (out, self.watchers.remove(&w)) {
+            (Ok(()), true) => self.stats.bump("watcher_removed"),
+            (Err(msg), false) => ensure!(msg.contains("not a watcher"), "remove_watcher({w}): `{msg}`"),
+            (Ok(()), false) => fail(format!("remove_watcher({w}) of a stranger went through"))?,
+            (Err(msg), true) => fail(format!("remove_watcher({w}) failed: `{msg}`"))?,
+        }
+        Ok(None)
+    }
+
+    fn set_emergency(&mut self, secs: u64) -> Result<Option<(u8, usize)>, String> {
+        let out = self.call(Who::Admin, vec![], |m| m.set_emergency(secs));
+        if secs > MAX_EMERGENCY_SECS {
+            let msg = out.err().unwrap_or_default();
+            ensure!(msg.contains("an emergency window lasts at most 7 days"), "set_emergency({secs}): `{msg}`");
+        } else {
+            out?;
+            self.emergency_until = if secs == 0 { 0 } else { self.now + secs * SEC };
+            self.stats.bump(if secs == 0 { "emergency_closed" } else { "emergency_opened" });
+        }
+        Ok(None)
+    }
+
+    fn sweep(&mut self, pick: usize, by: Sweeper) -> Result<Option<(u8, usize)>, String> {
+        let now = self.now;
+        let item = self.pick_item(pick);
+        let id = item.as_ref().map_or(u64::MAX - 1, |i| i.id);
+        let who = match by {
+            Sweeper::Admin => Who::Admin,
+            Sweeper::Watcher(w) => Who::Watcher(w),
+            Sweeper::Stranger => Who::Anyone,
+            Sweeper::Policy => Who::Policy(0),
+        };
+        let out = self.call(who, vec![], |m| m.sweep_to_safe(U64(id)));
+        let gate = match by {
+            Sweeper::Admin => None,
+            Sweeper::Watcher(w) if self.watchers.contains(&w) => (now >= self.emergency_until).then_some("no emergency"),
+            _ => Some("admin or watcher only"),
+        };
+        let want = if gate.is_some() {
+            gate
+        } else if self.safe_now().is_none() {
+            Some("no safe account is in force")
+        } else {
+            match &item {
+                None => Some("no such request"),
+                Some(i) if now >= i.w.expires_at.0 => Some("expired"),
+                Some(_) => None,
+            }
+        };
+        match (out, want) {
+            (Err(msg), Some(w)) => {
+                ensure!(msg.contains(w), "sweep({id}) by {by:?}: wanted `{w}`, got `{msg}`");
+                self.stats.bump(match w {
+                    "no emergency" => "sweep_refused_no_emergency",
+                    "admin or watcher only" => "sweep_refused_not_a_sweeper",
+                    "no safe account is in force" => "sweep_refused_no_safe_account",
+                    "expired" => "sweep_refused_expired",
+                    _ => "sweep_refused_no_request",
+                });
+            }
+            (Err(msg), None) => fail(format!("sweep({id}) by {by:?} of a live request was refused: `{msg}`"))?,
+            (Ok(promise), want) => {
+                // A promise is only built (and its receipts created) when it is dropped.
+                drop(promise);
+                if let Some(w) = want {
+                    fail(format!("sweep({id}) by {by:?} went through although it had to fail with `{w}`"))?;
+                }
+                let w = item.expect("a sweep that went through had a queued request").w;
+                let (tok, safe) = (tok_of(&w.token), self.safe_now().expect("a safe account in force"));
+                // Where the value went: to the safe account, and to no payee of the model.
+                let r = receipts_text();
+                let to_safe = match &w.token {
+                    None => format!("receiver_id: AccountId(\"{}\")", safe_acct(safe)),
+                    Some(_) => format!("\"receiver_id\":\"{}\"", safe_acct(safe)),
+                };
+                ensure!(r.contains(&to_safe), "a sweep of request {id} did not go to safe account {safe}: {r}");
+                for stranger in (0..3).map(payee) {
+                    ensure!(!r.contains(&format!("\"{stranger}\"")), "a sweep of request {id} touched payee {stranger}: {r}");
+                }
+                let logged = near_sdk::test_utils::get_logs().into_iter().find(|l| l.contains("\"sweep_to_safe\"")).unwrap_or_default();
+                let sweeper = match by {
+                    Sweeper::Watcher(w) => watcher_acct(w),
+                    _ => vault(),
+                };
+                ensure!(logged.contains(&format!("\"by\":\"{sweeper}\"")) && logged.contains(&format!("\"safe\":\"{}\"", safe_acct(safe))), "sweep event: {logged}");
+                self.ledger.push(Transfer { t: now, tok, amount: w.amount.0, kind: Kind::Sweep, status: Status::InFlight });
+                let ix = self.ledger.len() - 1;
+                self.expect_gone.insert(id);
+                self.schedule(CbKind::Sweep { ix, id, tok, amount: w.amount.0, safe });
+                self.stats.bump(if matches!(by, Sweeper::Admin) { "sweep_ok_by_admin" } else { "sweep_ok_by_watcher" });
+            }
+        }
+        Ok(None)
+    }
+
     /// Delivers callbacks that are due before `target`, each at its own due time, then moves the clock.
     fn advance_to(&mut self, target: u64) -> Result<Option<(u8, usize)>, String> {
         while let Some((i, _)) = self.pending.iter().enumerate().filter(|(_, c)| c.due <= target).min_by_key(|(_, c)| (c.due, c.serial)) {
@@ -782,6 +1211,13 @@ impl World {
                         self.stats.bump("execute_requeued");
                     }
                 }
+            }
+            CbKind::Sweep { ix, id, tok, amount, safe } => {
+                self.call(Who::Callback, result, |m| m.on_sweep_done(U64(id), tk(tok), U128(amount), safe_acct(safe)))?;
+                self.ledger[ix].status = if fails { Status::Failed } else { Status::Landed };
+                let said = near_sdk::test_utils::get_logs().iter().any(|l| l.contains("\"sweep_failed\""));
+                ensure!(said == fails, "on_sweep_done logged sweep_failed = {said} for a transfer that {}", if fails { "failed" } else { "landed" });
+                self.stats.bump(if fails { "sweep_callback_failed" } else { "sweep_callback_landed" });
             }
             CbKind::Revoked { key: k } => {
                 self.call(Who::Callback, result, |m| m.on_revoked_key_deleted(key(k)))?;
@@ -897,41 +1333,86 @@ impl World {
                 );
             }
         }
+        // The stretch settings, as the views show them.
+        let (policy, safe_view, watchers, until, props) = self.view(|m| (m.policy_account(), m.safe_account(), m.watchers(), m.emergency_until(), m.proposals()));
+        ensure!(policy == self.policy.map(policy_acct), "policy account: contract {policy:?}, model {:?}", self.policy);
+        let want_safe = SafeAccountView {
+            current: self.safe_now().map(safe_acct),
+            pending: self.safe_pend.filter(|(_, at)| now < *at).map(|(s, at)| PendingSafe { account: safe_acct(s), effective_at: U64(at) }),
+        };
+        ensure!(safe_view == want_safe, "safe account: contract {safe_view:?}, model {want_safe:?}");
+        let have: BTreeSet<String> = watchers.iter().map(ToString::to_string).collect();
+        let want: BTreeSet<String> = self.watchers.iter().map(|w| watcher_acct(*w).to_string()).collect();
+        ensure!(have == want && watchers.len() == self.watchers.len(), "watchers: contract {have:?}, model {want:?}");
+        ensure!(until.0 == self.emergency_until, "emergency_until: contract {}, model {}", until.0, self.emergency_until);
+        let seen: BTreeMap<u64, (u64, u64, MChange)> = props
+            .iter()
+            .map(|v| {
+                let change = match &v.proposal.change {
+                    Change::SetTokenLimit { token, limit } => MChange::Cap { tok: tok_of(&Some(token.clone())), limit: limit.0 },
+                    Change::SetPendingLimit { token, limit } => MChange::Pending { tok: tok_of(token), limit: limit.0 },
+                    Change::AddDailyKey { public_key, .. } => MChange::AddKey(id_of(public_key)),
+                    Change::AllowRecipient { account } => {
+                        assert_eq!(account, &payee(2), "the model proposes only payee 2");
+                        MChange::Allow
+                    }
+                };
+                (v.id.0, (v.proposal.executable_at.0, v.proposal.expires_at.0, change))
+            })
+            .collect();
+        let model: BTreeMap<u64, (u64, u64, MChange)> = self.proposals.iter().map(|(id, p)| (*id, (p.executable_at, p.expires_at, p.change.clone()))).collect();
+        ensure!(seen == model, "proposals: contract {seen:?}, model {model:?}");
+        ensure!(self.proposals.len() as u32 <= MAX_PROPOSALS, "{} proposals waiting", self.proposals.len());
         self.q = snap.q;
         self.expect_new = None;
         self.expect_gone.clear();
         self.check_bound()
     }
 
-    /// The claim, swept over every 24 h window that starts at a transfer: sends within the cap, execs within the
-    /// pending claim, both together within cap + pending claim. Nothing that has not failed is left out.
+    /// The claims, swept over every 24 h window that starts at a transfer (a send, an execute or a sweep that has not
+    /// failed; in flight counts), against the limits in force at the end of the window (they only ever rise):
+    ///
+    /// * sends within the cap, executes within the pending claim, both together within cap + pending claim: the loss
+    ///   bound of LOSS-BOUND.md section 1, unchanged. A sweep is not in it: it goes to the owner's safe account.
+    /// * executes + sweeps within two pending limits: both leave the queue, and what leaves it in a window was queued
+    ///   at the start of the window (at most one pending limit) or asked for inside it (at most one more, the 24 h budget).
+    /// * everything that left the vault (sends, executes, sweeps) within the cap + two pending limits: what a stolen
+    ///   safe account would add to the loss.
     fn check_bound(&mut self) -> Res {
         for tok in 0..TOKENS {
             let ev: Vec<&Transfer> = self.ledger.iter().filter(|t| t.tok == tok && t.status != Status::Failed).collect();
-            let (mut hi, mut sends, mut execs) = (0usize, 0u128, 0u128);
-            let (cap, claim) = (self.cfg.cap[tok], self.cfg.exec_claim(tok));
-            let mut lo_sends = 0u128;
-            let mut lo_execs = 0u128;
+            let (mut hi, mut sends, mut execs, mut swept) = (0usize, 0u128, 0u128, 0u128);
+            let (mut lo_sends, mut lo_execs, mut lo_swept) = (0u128, 0u128, 0u128);
             for lo in 0..ev.len() {
                 // The window is (ev[lo].t - 1, ev[lo].t - 1 + 24 h]: every transfer from lo on that is less than 24 h later.
                 while hi < ev.len() && ev[hi].t < ev[lo].t + DAY_NS {
                     match ev[hi].kind {
                         Kind::Send => sends += ev[hi].amount,
                         Kind::Exec => execs += ev[hi].amount,
+                        Kind::Sweep => swept += ev[hi].amount,
                     }
                     hi += 1;
                 }
-                let (s, x) = (sends - lo_sends, execs - lo_execs);
+                let end = (ev[lo].t + DAY_NS - 1).min(self.now);
+                let (cap, pend) = (Self::hist_at(&self.cap_hist[tok], end), Self::hist_at(&self.pending_hist[tok], end));
+                let claim = self.cfg.exec_claim(pend);
+                let (s, x, w) = (sends - lo_sends, execs - lo_execs, swept - lo_swept);
                 ensure!(s <= cap, "BOUND BROKEN token {tok}: {s} sent through send_small in a window starting at {}, cap {cap}", ev[lo].t);
                 ensure!(x <= claim, "BOUND BROKEN token {tok}: {x} executed from the queue in a window starting at {}, claim {claim} (delay {} s)", ev[lo].t, self.cfg.delay_secs);
                 ensure!(s + x <= cap + claim, "BOUND BROKEN token {tok}: {} lost in a window starting at {}, claim {}", s + x, ev[lo].t, cap + claim);
-                let total = u64::try_from((s + x) * 10_000 / (cap + self.cfg.pending[tok]).max(1)).unwrap_or(u64::MAX);
-                self.stats.peak("window_total_bp_of_cap_plus_pending", total);
-                self.stats.peak("window_exec_bp_of_pending", u64::try_from(x * 10_000 / self.cfg.pending[tok].max(1)).unwrap_or(u64::MAX));
-                self.stats.peak("window_send_bp_of_cap", u64::try_from(s * 10_000 / cap.max(1)).unwrap_or(u64::MAX));
+                ensure!(x + w <= 2 * pend, "BOUND BROKEN token {tok}: {} left the queue (executed {x}, swept {w}) in a window starting at {}, claim {}", x + w, ev[lo].t, 2 * pend);
+                ensure!(s + x + w <= cap + 2 * pend, "BOUND BROKEN token {tok}: {} left the vault (sent {s}, executed {x}, swept {w}) in a window starting at {}, claim {}", s + x + w, ev[lo].t, cap + 2 * pend);
+                let bp = |num: u128, den: u128| u64::try_from(num * 10_000 / den.max(1)).unwrap_or(u64::MAX);
+                self.stats.peak("window_total_bp_of_cap_plus_pending", bp(s + x, cap + pend));
+                self.stats.peak("window_exec_bp_of_pending", bp(x, pend));
+                self.stats.peak("window_send_bp_of_cap", bp(s, cap));
+                self.stats.peak("window_swept_bp_of_pending", bp(w, pend));
+                self.stats.peak("window_queue_outflow_bp_of_two_pendings", bp(x + w, 2 * pend));
+                self.stats.peak("window_gross_bp_of_cap_plus_two_pendings", bp(s + x + w, cap + 2 * pend));
                 match ev[lo].kind {
                     Kind::Send => lo_sends += ev[lo].amount,
                     Kind::Exec => lo_execs += ev[lo].amount,
+                    Kind::Sweep => lo_swept += ev[lo].amount,
                 }
             }
         }
@@ -1029,6 +1510,14 @@ impl World {
         for (_, since) in self.strikes.values() {
             add(since + DAY_NS);
         }
+        for p in self.proposals.values() {
+            add(p.executable_at);
+            add(p.expires_at);
+        }
+        if let Some((_, at)) = self.safe_pend {
+            add(at);
+        }
+        add(self.emergency_until);
         b
     }
 
@@ -1107,7 +1596,68 @@ impl World {
         Op::Advance(self.boundaries(next(r).is_multiple_of(4)).into_iter().min().map_or(60 * SEC, |t| t - self.now))
     }
 
+    /// One step of the stretch items: mostly sweeps and the proposals that feed the table, now and then a change of the
+    /// policy account, the safe account, the watchers or the window. Everything is aimed at the instants where the
+    /// answer turns over (`boundaries`), and a fifth of the callers are the wrong ones.
+    fn stretch_op(&self, r: &mut u64) -> Op {
+        let pick = next(r) as usize;
+        match next(r) % 100 {
+            0..=34 => {
+                let by = match next(r) % 10 {
+                    0..=2 => Sweeper::Admin,
+                    3..=7 => Sweeper::Watcher((next(r) % u64::from(WATCHERS)) as u8),
+                    8 => Sweeper::Stranger,
+                    _ => Sweeper::Policy,
+                };
+                Op::Sweep { pick, by }
+            }
+            35..=52 => {
+                let right = self.policy.unwrap_or(0);
+                let by = match next(r) % 10 {
+                    0 => 2,
+                    1 => 1 - right.min(1),
+                    _ => right,
+                };
+                let change = match next(r) % 7 {
+                    0 => {
+                        let tok = 1 + (next(r) % 2) as usize;
+                        MChange::Cap { tok, limit: self.cfg.cap[tok] + 1 + u128::from(next(r) % 600) }
+                    }
+                    1 | 2 => {
+                        let tok = (next(r) % 3) as usize;
+                        MChange::Pending { tok, limit: self.cfg.pending[tok] + 1 + u128::from(next(r) % 2_000) }
+                    }
+                    3 | 4 => MChange::AddKey((1..=KEYS).find(|k| !self.served.contains(k) && !self.revoked.contains(k)).unwrap_or(1 + (next(r) % u64::from(KEYS)) as u8)),
+                    _ => MChange::Allow,
+                };
+                Op::Propose { by, change }
+            }
+            53..=66 => Op::Apply { pick },
+            67..=70 => Op::CancelProposal { pick },
+            71..=73 => Op::SetPolicy(match next(r) % 4 {
+                0 => None,
+                n => Some((n % u64::from(POLICIES)) as u8),
+            }),
+            74..=79 => Op::SetSafe((next(r) % u64::from(SAFES)) as u8),
+            80..=82 => Op::CancelSafe,
+            83..=86 => Op::AddWatcher((next(r) % u64::from(WATCHERS)) as u8),
+            87..=88 => Op::RemoveWatcher((next(r) % u64::from(WATCHERS)) as u8),
+            _ => Op::SetEmergency(match next(r) % 8 {
+                0 => 0,
+                1 => 60,
+                2 => 3_600,
+                3 => DAY_NS / SEC,
+                4 => MAX_EMERGENCY_SECS,
+                5 => MAX_EMERGENCY_SECS + 1,
+                _ => 6 * 3_600,
+            }),
+        }
+    }
+
     fn gen_op(&self, r: &mut u64) -> Op {
+        if self.cfg.stretch && next(r) % 100 < 20 {
+            return self.stretch_op(r);
+        }
         if self.cfg.attacker && next(r) % 100 < 85 {
             return self.attack_op(r);
         }
@@ -1201,7 +1751,7 @@ fn run_seed(seed: u64, steps: usize) -> Outcome {
             stats.merge(&w.stats);
             Outcome::Passed(stats)
         }
-        Err(msg) => Outcome::Failed(Box::new(Failure { seed, cfg: w.cfg.clone(), ops, msg })),
+        Err(msg) => Outcome::Failed(Box::new(Failure { seed, cfg: w.base_cfg.clone(), ops, msg })),
     }
 }
 
@@ -1325,12 +1875,36 @@ fn the_loss_bound_holds_after_every_step_of_random_multi_key_sequences() {
         "window_log_full",
         "trip_kaigen",
         "trip_warning",
+        // the stretch items
+        "sweep_ok_by_admin",
+        "sweep_ok_by_watcher",
+        "sweep_refused_no_emergency",
+        "sweep_refused_not_a_sweeper",
+        "sweep_refused_no_safe_account",
+        "sweep_refused_expired",
+        "sweep_callback_landed",
+        "sweep_callback_failed",
+        "propose_ok",
+        "propose_refused",
+        "apply_ok",
+        "apply_still_locked",
+        "apply_expired",
+        "apply_refused_by_the_change",
+        "proposal_cancelled",
+        "policy_replaced_with_proposals_waiting",
+        "safe_account_named",
+        "safe_account_change_cancelled",
+        "watcher_added",
+        "watcher_removed",
+        "emergency_opened",
+        "emergency_closed",
     ] {
         assert!(stats.count.get(what).copied().unwrap_or(0) > 0, "the sequences never met `{what}`: {:?}", stats.count);
     }
     assert!(stats.peak["window_send_bp_of_cap"] >= 10_000, "no run ever used the whole cap: {:?}", stats.peak);
     assert!(stats.peak["window_exec_bp_of_pending"] >= 10_000, "no run ever executed a whole pending limit inside one window: {:?}", stats.peak);
     assert!(stats.peak["window_total_bp_of_cap_plus_pending"] >= 10_000, "no run ever lost cap + pending in one window: {:?}", stats.peak);
+    assert!(stats.peak["window_swept_bp_of_pending"] >= 10_000, "no run ever swept a whole pending limit to the safe account inside one window: {:?}", stats.peak);
     if cfg!(feature = "drill") {
         // The build that allows a delay under a day must show why the floor exists: more than cap + pending in one window.
         assert!(
@@ -1354,7 +1928,7 @@ fn scripted(cfg: Cfg, ops: &[Op]) -> World {
 }
 
 fn plain_cfg(delay_secs: u64) -> Cfg {
-    Cfg { delay_secs, cap: [1_000, 1_000, 0], pending: [3_000, 3_000, 0], min_send: 0, max_strikes: 3, allowlist: false, keys: 2, fail_pct: 0, cb_seed: 1, dust: false, attacker: false }
+    Cfg { delay_secs, cap: [1_000, 1_000, 0], pending: [3_000, 3_000, 0], min_send: 0, max_strikes: 3, allowlist: false, keys: 2, fail_pct: 0, cb_seed: 1, dust: false, attacker: false, stretch: false }
 }
 
 #[test]
@@ -1585,4 +2159,42 @@ fn a_failed_execute_with_no_request_made_while_it_was_out_still_comes_back_and_c
     assert!(w.q.iter().any(|i| i.id == 0), "the request is back");
     let p = queue_pos(&w, 0);
     w.step(&Op::Execute { pick: p }).expect("and it can be executed again");
+}
+
+#[test]
+fn a_sweep_is_not_a_loss_and_a_stolen_safe_account_would_add_at_most_one_more_pending_limit() {
+    // The restated claims of LOSS-BOUND.md section 9, made tight by a script. Two keys, delay 24 h, cap 1000, pending 3000.
+    // The safe account is named at the start and is in force from exactly one delay later. Both keys queue half of the
+    // pending limit; a day later, in ONE window: the whole cap is sent, both requests are executed (3000), both keys queue
+    // 3000 again (their first budget has aged out to the nanosecond) and the admin sweeps those to the safe account.
+    // 7000 left the vault: cap + 2 pending limits. Only 4000 of it, cap + pending, went to anyone but the safe account.
+    let d = 86_400;
+    let mut cfg = plain_cfg(d);
+    cfg.stretch = true;
+    let w = scripted(
+        cfg,
+        &[
+            Op::Request { key: 1, tok: 0, amount: 1_500, to: 2 },
+            Op::Request { key: 2, tok: 0, amount: 1_500, to: 2 },
+            Op::Advance(d * SEC),
+            Op::Send { key: 1, tok: 0, amount: 1_000, to: 2 },
+            Op::Execute { pick: 0 },
+            Op::Execute { pick: 0 },
+            Op::Request { key: 1, tok: 0, amount: 1_500, to: 2 },
+            Op::Request { key: 2, tok: 0, amount: 1_500, to: 2 },
+            Op::Sweep { pick: 0, by: Sweeper::Admin },
+            Op::Sweep { pick: 0, by: Sweeper::Admin },
+            // And no more of either: the cap is used up and so is the request budget.
+            Op::Send { key: 2, tok: 0, amount: 1, to: 2 },
+            Op::Request { key: 1, tok: 0, amount: 1, to: 2 },
+            Op::Advance(60 * SEC),
+        ],
+    );
+    assert_eq!(w.stats.count["sweep_ok_by_admin"], 2);
+    assert_eq!(w.stats.peak["window_total_bp_of_cap_plus_pending"], 10_000, "the loss is cap + pending, the sweeps are not in it");
+    assert_eq!(w.stats.peak["window_swept_bp_of_pending"], 10_000);
+    assert_eq!(w.stats.peak["window_queue_outflow_bp_of_two_pendings"], 10_000, "3000 executed + 3000 swept: two pending limits leave the queue");
+    assert_eq!(w.stats.peak["window_gross_bp_of_cap_plus_two_pendings"], 10_000, "7000 left the vault in one window: cap + 2 pending limits");
+    assert!(w.q.is_empty(), "the swept requests are gone");
+    assert_eq!(w.stats.count["refusal_uncounted_cap_used_up"], 1, "one more unit of the cap is refused");
 }

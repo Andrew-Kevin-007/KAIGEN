@@ -1,6 +1,6 @@
 # KAIGEN v3 loss bound (re-derived against the code)
 
-Status: 2026-11-03. Derived from `contracts/mamori/src/lib.rs` at HEAD 65fde6a (lib.rs sha256 276A870A...), not from the design docs. Testnet only. No audit, no mainnet run. The derivation is an argument plus property tests, not a machine-checked proof; sections 4 and 5 say what each piece of evidence does and does not show. Line numbers are lib.rs as of that hash.
+Status: 2026-11-03; section 9 (the stretch items) added 2026-11-04, sections 1 to 8 as they were. Derived from `contracts/mamori/src/lib.rs` at HEAD 65fde6a (lib.rs sha256 276A870A...), not from the design docs. Testnet only. No audit, no mainnet run. The derivation is an argument plus property tests, not a machine-checked proof; sections 4 and 5 say what each piece of evidence does and does not show. Line numbers are lib.rs as of that hash.
 
 ## 1. The bound
 
@@ -190,3 +190,68 @@ Residual.
 * `docs/v3/ATTEST-CHECK.md` section 5 still lists `remove_daily_key` with `public_key` and `retry`; the new `forgotten` field is not in its table.
 
 Evidence (`revoked_cap.rs`, 8 tests). The 16th record is accepted and the 17th refused with the exact text. The older refusals keep their precedence. A burn and an admin removal complete with 16 records. `forget_revoked_key` frees a record, schedules nothing, logs, lets the key return, and a late delete callback leaves no phantom; it refuses a served key, an unknown key and a stranger. `lock_down` uses the same gas with 16 and with 2,000 revoked keys (119.27 Tgas, 6 deletes started, in both). A 400-step run of adds, removals, burns and forgets never holds more than 16 records. Mutations, with `lib.rs` hash-identical afterwards: cap removed fails 3 tests, `<=` for `<` 3, forget that does not remove 2, forget that does not log 1, no read guard 1 (137.3 Tgas for 2,000 keys against 119.3 for 16), a full set that stops recording 4.
+
+## 9. The stretch items: the policy path and sweeps
+
+Added 2026-11-04. Code: `contracts/mamori/src/lib.rs` (`apply`, `sweep_to_safe` and the settings around them). Design, reasons and the attack each rule is for: STRETCH-DESIGN.md. Tests: `tests/sweep.rs`, `tests/policy.rs`, and the extended `tests/loss_bound.rs`. Unit VM only: nothing of this ran on a chain. The derivation below is an argument plus property tests, like sections 1 to 8.
+
+### 9.1 What changed in what the bound reads
+
+* Entries leave the queue in one more way: `sweep_to_safe`. It takes one live entry out of the queue and starts a transfer of that entry's token and amount to the safe account in force. It writes nothing else: not `window`, not `requested`, not `requested_by_key`, no strike, no key, no setting, and it gives no request budget back (test `a_sweep_touches_no_cap_budget_strike_key_or_setting_and_refunds_no_request_budget`). Invariant Q of 2.2 (queue sum at most P_T, at most 32 entries) is a statement about inserts, and a removal cannot break it, so 2.2 stands as written with "or `sweep_to_safe`" added to the list of exits.
+* The limits can change during a window by an applied proposal (`apply`), after the withdrawal delay and before the proposal lapses. The admin's `set_token_limit` and `set_pending_limit` always could change them, with no delay at all; what is new is a delayed path and a model that raises limits in the middle of a run. A7 is restated in 9.3.
+
+### 9.2 The bound, restated
+
+"Loss" keeps its definition (1): value that `send_small` and `execute` started. A sweep is not in it: it goes to the safe account, which is the owner's own (A12). Three claims, per token T and every half-open 24 h window W, with C_T and P_T the limits in force at the end of W:
+
+    loss_T(W)                       <=  C_T + P_T        when the delay D is at least 24 h   (unchanged)
+    executed_T(W) + swept_T(W)      <=  2 P_T            for every D
+    sent_T(W) + executed_T(W) + swept_T(W)  <=  C_T + 2 P_T   for every D
+
+(The first is C_T + 2 P_T when D is under 24 h, as before; drill builds only.) The first line is the bound of section 1, and it needed no new argument: a sweep removes entries, and the sketch of 2.2 only uses that the entries executed in W were queued at a and that the queue held at most P_T of them.
+
+Second line. Let a start W. A request that leaves the queue for good in W, by an `execute` that lands or by a sweep, is one of: queued at a, or in flight at a and later put back, which together add up to at most P_T (they were all in the queue at the moment before the first of those executes, as in 2.2, because a put-back needs that no request was made in between); or requested inside W, which adds up to at most P_T by the 24 h request budget (E8), and a sweep does not refund it. A request leaves for good once: an executed request is out of the queue, a failed one returns only through the same room test, a swept one is gone (a failed sweep transfer is not put back). So executed + swept is at most 2 P_T. With D at least 24 h, executed alone is at most P_T (2.2), so a sweep adds at most 2 P_T minus what was executed.
+
+Third line. Sends are within C_T (2.1) and the second line bounds the rest. It is what would leave the vault if the safe account were also in hostile hands (a stolen watcher plus a stolen safe account). With the safe account honest it is not a loss: the loss is the first line.
+
+The first line is tight (a_calibrated_attacker...), and so are the other two: `a_sweep_is_not_a_loss_and_a_stolen_safe_account_would_add_at_most_one_more_pending_limit` sends the whole cap (1,000), executes both requests (3,000), has both keys ask for 3,000 again (their first budget aged out to the nanosecond) and sweeps those, all in one window: 7,000 left the vault (cap + 2 pending limits), 4,000 of it was loss (cap + pending), and one more unit of the cap and of the request budget is refused.
+
+Limits that fall are not modelled. A pending or token limit lowered by the admin (which was always possible) can leave the queue holding more than the new limit until it drains; the claims then use the larger earlier limit for the entries admitted under it. The model only raises limits, and checks each window against the limits in force at its end.
+
+### 9.3 Conditions added or restated
+
+| # | Condition | Enforced or assumed | Where, and how it is checked |
+|---|---|---|---|
+| E10 | A sweep sends only to the safe account in force, and only the request's own token and amount. There is no destination argument | Enforced | `sweep_to_safe`. Model: receipts of every sweep go to the safe account of the model and to no payee. Mutation S1 |
+| E11 | Only the admin, or a watcher inside an admin-declared window of at most 7 days, can sweep. The policy account, a stranger and a key of the vault with no admin power cannot | Enforced for the contract part; the runtime part (a daily key reaches two methods) is E6 | `assert_sweeper`. Model: a sweep by a stranger, the policy account or a watcher outside a window always panics. Mutations S4, S5, S6 |
+| E12 | A proposal changes a setting only after `delay_secs`, once, before it lapses, and only if it was not cancelled and its policy account was not replaced | Enforced | `propose`, `apply`, `set_policy_account`. Model: the proposals table equals the contract's after every step. Mutations P2, P3, P4, P6 |
+| A7 | **Restated.** The configuration (C_T, P_T, allowlist, strike cap) is the one in force for the whole window, except that a limit may be raised during it by a proposal that waited its delay or by the admin; the claims use the limits in force at the end of W | Assumed | The model raises limits through `apply` and checks every window against the limits at its end |
+| A11 | The admin looks at least once per withdrawal delay, now also for the policy path: a loosening proposed by a stolen policy account applies after the delay unless the admin cancels it or replaces the account | Assumed | Without it the loosening applies. STRETCH-DESIGN.md section 3 |
+| A12 | The safe account is the owner's own and its keys are safe | Assumed | If not, line 3 of 9.2 is what leaves |
+| A13 | The policy account and the watchers are NEAR accounts whose keys are held as the owner intends. The contract cannot see how | Assumed | They are accounts, not keys of the vault, so cage-check's key list does not show them |
+
+Not changed: E1 to E9, A1 to A6, A8 to A10. A5 and the other callback assumptions apply to the sweep callback in the same way as to the others, and it only logs.
+
+### 9.4 Evidence
+
+`contracts/mamori/src/tests/loss_bound.rs` has the model of section 4 extended: in two runs of three (not the dust runs) the vault has a policy account and a safe account from the start, and the generator adds proposals (by the right account, the other one and a stranger), `apply` of a proposal, a stale one and an unknown id, `cancel_proposal`, replacing the policy account, naming and cancelling a safe account, adding and removing watchers, opening and closing emergency windows (including one second past the 7-day maximum), and sweeps by the admin, a watcher, a stranger and the policy account. After every step the views (`policy_account`, `safe_account`, `watchers`, `emergency_until`, `proposals`) are compared with the model, every sweep's receipts are checked to go to the safe account and to no payee, and the three claims of 9.2 are swept over every window.
+
+Results at lib.rs sha256 B87F5413... (the tests are in `tests/`, run on 2026-11-04):
+
+| Run | Result |
+|---|---|
+| `cargo test -p mamori` | 230 passed (193 before the stretch items, 37 new tests), 0 failed |
+| `cargo test -p mamori --features drill` | 226 passed (189 before), 0 failed |
+| Property test, default: 300 seeds x 110 steps | The three claims held after every step. Counts and peaks: sweeps by the admin 400 and by a watcher 76; refused for a stranger, the policy account or a non-watcher 1,186, for a watcher outside a window 212, with no safe account in force 88, for an expired request 20, for an unknown one 124; 360 sweep transfers landed and 116 failed; proposals 771 accepted and 347 refused, 62 applied (251 too early, 94 too late, 13 refused by the change itself, 5 skipped because the model never lowers a limit); the policy account replaced 199 times (117 with proposals waiting). Peaks: sends 100% of the cap, executions 100% of the pending limit, loss 100% of cap + P and never above, swept 100% of P, executes + sweeps 74.95% of 2P, everything that left 81.83% of cap + 2P |
+| Soak, default build | 4,000 seeds x 110 steps: 0 violations, 571 s on a busy machine (the soak before the stretch model took 196 s; it now also compares five views and the proposals table after every step). 121,393 sends, 97,097 requests, 47,328 executions, 2,287 key burns, 5,267 sweeps by the admin and 962 by a watcher, 10,469 proposals accepted and 838 applied, 6,627 emergency windows opened. Peaks: loss 100% of cap + P and never above; swept 200% of P in one window (no executions in it); executes + sweeps 100% of 2P; everything that left 100% of cap + 2P. All three claims of 9.2 are reached exactly by the generator and never exceeded |
+| Soak, drill build | 3,000 seeds: 0 violations of the drill claims, 438 s. 3,924 sweeps by the admin and 688 by a watcher, 7,840 proposals accepted and 773 applied. Executions peak at 200% of P (the delay-under-a-day case the floor is for), loss 190.9% of cap + P (claim: cap + 2P), swept 200% of P, executes + sweeps 100% of 2P, everything that left 100% of cap + 2P |
+| Directed script | The tight window of 9.2: loss peak 10,000 bp of cap + P, gross peak 10,000 bp of cap + 2P |
+
+Mutation checks (each removes or weakens one line of `lib.rs`; the file was restored from a byte copy and compared by hash after every run): 74 mutations, all caught (0 survivors, 0 compile errors), `lib.rs` byte-identical after every run (sha256 B87F5413...). The first 69 cover the sweep side (24: the destination, the queue removal, the expiry check, the window check and its edge, the watcher check, the admin needing a window, the safe account defaulting to the vault, its edge, immediate effect, missing settle and missing delay, the three "not the vault" checks, the watcher cap, duplicates and unknown removals, the 7-day cap and its edge, zero not closing a window, a shorter window not replacing, the failed-sweep log, two event fields) and the policy side (45: any caller, no policy account named, no delay, the lapse length, its edge and its absence, the lock edge and its absence, the proposal staying after `apply`, each of the four changes made a no-op, rotation keeping proposals, the table size, its room check and its clearing, zero allowance, the allowance cap, its edge and its absence, cancel keeping the proposal, event fields, the views, the five `attest()` fields, the wire tag, the state layout). Five more were aimed at the tests the first batch had not named: a gate keyed on the ML-DSA curve, a hard-coded safe-account delay, a wrong destination in the callback, watchers passing `assert_admin`, a signer-key read in `assert_sweeper`. Every one of the 37 new tests fails under at least one of them. The property test alone is seen failing under at least 42 of the 74 (the log lists only the first six failing tests of a mutation, so this is a lower bound), among them the wrong destination, the missing delay, the window and watcher checks, the safe-account timing and the proposal timing. Mutation S1 (a sweep that pays the request's own payee) also fails the directed script. Logs: D:\HACK-Projects\toolchain\stretch-edith\mutations.log and mutations2.log
+
+### 9.5 Not done
+
+* Nothing ran on a chain. The gas of `apply` and `sweep_to_safe` is the gas of `add_daily_key` and `execute` in shape and was not measured; `PromiseOrValue<()>` as the return type of `apply` was not run on the real runtime.
+* A limit that falls during a window is not in the model (9.2).
+* A swept NEP-141 request whose safe account is not registered with the token fails and is not put back; the value stays in the vault and the request is gone.
+* The property test cannot show a stolen watcher or policy account being outside the vault's control; that is the account's own keys (A13).

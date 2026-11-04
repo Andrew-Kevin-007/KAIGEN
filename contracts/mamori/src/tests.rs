@@ -47,6 +47,17 @@ fn as_anyone(now: u64) {
     testing_env!(b.build());
 }
 
+/// A call from a named account (a policy account, a watcher, a safe account): it is both predecessor and signer.
+fn as_account(who: &AccountId, now: u64) {
+    let mut b = VMContextBuilder::new();
+    b.current_account_id(vault())
+        .predecessor_account_id(who.clone())
+        .signer_account_id(who.clone())
+        .block_timestamp(now)
+        .account_balance(NearToken::from_near(100));
+    testing_env!(b.build());
+}
+
 /// A callback the contract sent to itself.
 fn as_callback(now: u64) {
     as_admin(now);
@@ -110,9 +121,13 @@ fn panics_with(f: impl FnOnce()) -> String {
 
 /// Debug text of the created receipts, with byte-array fields (method names, args) decoded to text.
 fn receipts_text() -> String {
-    let raw = format!("{:?}", get_created_receipts());
+    readable(&format!("{:?}", get_created_receipts()))
+}
+
+/// `raw` (Debug text of receipts or of their actions) with byte-array fields decoded to text.
+fn readable(raw: &str) -> String {
     let mut out = String::new();
-    let mut rest = raw.as_str();
+    let mut rest = raw;
     while let Some(start) = rest.find('[') {
         out.push_str(&rest[..start]);
         let Some(len) = rest[start..].find(']') else { break };
@@ -2466,7 +2481,12 @@ fn random_sequences_over_four_keys_never_break_a_per_key_or_an_account_bound() {
 /// throwaway, so the layout may still change: when it does, rebuild this string from the failure message.
 /// From the first mainnet deploy on, a change here means every deployed vault fails to read its state (and
 /// `trip` with it): write a `migrate` that reads the old layout first, and only then update this string.
-const FRESH_STATE_HEX: &str = "03000000626f62000000a1edccce1bc2d30000000000008051010000000000000000000002000000647602000000646d0000000002000000697602000000696d010000006c010000007001000000720000a0dec5adc935360000000000000001000000770000000002000000717602000000716d00000000000000000000000002000000617602000000616d000300000001000000730000000002000000787602000000786d010000006b";
+const FRESH_STATE_HEX: &str = "03000000626f62000000a1edccce1bc2d30000000000008051010000000000000000000002000000647602000000646d0000000002000000697602000000696d010000006c010000007001000000720000a0dec5adc935360000000000000001000000770000000002000000717602000000716d00000000000000000000000002000000617602000000616d000300000001000000730000000002000000787602000000786d010000006b0000000000020000006f76020000006f6d000000000000000000000000000002000000747602000000746d0000000000000000";
+
+/// The same bytes as they were before the stretch items (tag `v3-core-testnet`, HEAD d4342c0). The stretch items only
+/// appended fields, so a vault of the v3 core and one with the stretch items agree on every byte of this prefix; the test
+/// below pins that, so a later edit cannot reorder or reshape the core fields while only updating the long string.
+const V3_CORE_STATE_HEX: &str = "03000000626f62000000a1edccce1bc2d30000000000008051010000000000000000000002000000647602000000646d0000000002000000697602000000696d010000006c010000007001000000720000a0dec5adc935360000000000000001000000770000000002000000717602000000716d00000000000000000000000002000000617602000000616d000300000001000000730000000002000000787602000000786d010000006b";
 
 #[test]
 fn the_state_layout_is_pinned_so_a_change_cannot_brick_a_deployed_vault_unnoticed() {
@@ -2474,6 +2494,21 @@ fn the_state_layout_is_pinned_so_a_change_cannot_brick_a_deployed_vault_unnotice
     let m = Mamori::init(accounts(1), U128(NEAR), 86_400);
     let hex: String = near_sdk::borsh::to_vec(&m).unwrap().iter().map(|b| format!("{b:02x}")).collect();
     assert_eq!(hex, FRESH_STATE_HEX, "the state layout changed: see the note above FRESH_STATE_HEX");
+    assert!(hex.starts_with(V3_CORE_STATE_HEX), "the v3 core fields are no longer a prefix of the state");
+    // What the stretch items appended, field by field, in declaration order.
+    let appended = &hex[V3_CORE_STATE_HEX.len()..];
+    assert_eq!(
+        appended,
+        concat!(
+            "00",                                       // policy_account: none
+            "00000000", "02000000", "6f76", "02000000", "6f6d", // proposals: no keys, vector prefix `ov`, map prefix `om`
+            "0000000000000000",                         // next_proposal: 0
+            "00", "00",                                 // safe_account, safe_pending: none
+            "00000000", "02000000", "7476", "02000000", "746d", // watchers: no accounts, prefixes `tv`, `tm`
+            "0000000000000000",                         // emergency_until: 0
+        ),
+        "the stretch fields are not what the layout note in lib.rs lists"
+    );
 }
 
 // ---- M3: the loss bound as a property (tests/loss_bound.rs) -----------------------------------------
@@ -2494,3 +2529,8 @@ mod events;
 
 mod callback_orders;
 mod revoked_cap;
+
+// ---- the stretch items (tests/sweep.rs, tests/policy.rs) ----------------------------------------------
+
+mod sweep;
+mod policy;

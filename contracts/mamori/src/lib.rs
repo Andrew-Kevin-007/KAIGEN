@@ -85,6 +85,13 @@ const EXECUTE_WINDOW_SECS: u64 = 86_400;
 /// It is a guard: `purge_expired` can be called by anyone, and its gas must stay bounded even if that stopped
 /// being true.
 const PURGE_SCAN_LIMIT: usize = MAX_QUEUE as usize;
+/// Most accounts the admin may name as watchers at once (`add_watcher`). A watcher can only call `sweep_to_safe`.
+const MAX_WATCHERS: u32 = 4;
+/// Longest emergency window the admin may declare in one call, in seconds: a week. Watchers can sweep only inside
+/// one, so a stolen watcher is idle outside it, and an owner who leaves for longer than this has to declare again.
+const MAX_EMERGENCY_SECS: u64 = 7 * 86_400;
+/// Most proposals the policy account may have waiting at once. Expired ones are cleared before a new one is counted.
+const MAX_PROPOSALS: u32 = 8;
 
 /// Same wire format as Kizashi's `Era`.
 #[near(serializers = [borsh, json])]
@@ -164,6 +171,56 @@ pub struct ConfigView {
     pub min_send: U128,
 }
 
+/// A change the policy account may propose. A closed list of the admin's loosening settings: each is applied, after the
+/// delay, by the same private function the admin's own method uses, so a proposal can do nothing the admin could not.
+/// Not here, on purpose: the NEAR cap (it has no setter at all), intents keys, the allowlist switch, the minimum send,
+/// the strike limit, and everything about the policy account, the safe account, the watchers and the emergency window.
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Change {
+    AddDailyKey { public_key: PublicKey, allowance: Option<U128> },
+    SetTokenLimit { token: AccountId, limit: U128 },
+    SetPendingLimit { token: Option<AccountId>, limit: U128 },
+    AllowRecipient { account: AccountId },
+}
+
+/// A change waiting for its delay. The admin can cancel it until `apply` runs it.
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Debug)]
+pub struct Proposal {
+    pub change: Change,
+    pub proposed_at: U64,
+    /// First instant (ns) at which `apply` may run it: `proposed_at` plus the withdrawal delay.
+    pub executable_at: U64,
+    /// First instant (ns) at which it can no longer run: `executable_at` plus `EXECUTE_WINDOW_SECS`.
+    pub expires_at: U64,
+}
+
+#[near(serializers = [json])]
+pub struct ProposalView {
+    pub id: U64,
+    #[serde(flatten)]
+    pub proposal: Proposal,
+}
+
+/// A safe account the admin has named that is not in force yet.
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingSafe {
+    pub account: AccountId,
+    /// First instant (ns) at which it replaces the current safe account: the change plus the withdrawal delay.
+    pub effective_at: U64,
+}
+
+/// The safe account in force now, and the change waiting for its delay, if any.
+#[near(serializers = [json])]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SafeAccountView {
+    pub current: Option<AccountId>,
+    pub pending: Option<PendingSafe>,
+}
+
 /// One recorded daily key in `attest()`.
 #[near(serializers = [json])]
 pub struct KeyAttestation {
@@ -203,6 +260,16 @@ pub struct Attestation {
     pub revoked_keys: Vec<PublicKey>,
     /// Withdrawal requests waiting in the queue (expired ones included until purged).
     pub queue_len: u32,
+    /// The one account whose `propose_*` calls the vault accepts (`None`: the policy path is off).
+    pub policy_account: Option<AccountId>,
+    /// Where `sweep_to_safe` sends value, and the change of it that is waiting for its delay.
+    pub safe_account: SafeAccountView,
+    /// The accounts that may call `sweep_to_safe`, while an emergency window is open.
+    pub watchers: Vec<AccountId>,
+    /// End (ns) of the emergency window; at or before the block time it is closed.
+    pub emergency_until: U64,
+    /// Changes the policy account proposed that have neither been applied nor cancelled (expired ones included until cleared).
+    pub proposals: Vec<ProposalView>,
     /// Fixed text: what this answer is and is not.
     pub note: String,
 }
@@ -377,6 +444,21 @@ pub struct Mamori {
     /// `requested` stays the bound on the sum. A removed key's logs stay until they age out or the key is
     /// recorded again; each is at most `MAX_WINDOW_ENTRIES` long.
     requested_by_key: LookupMap<RequestedByKeyId, Vec<(u64, u128)>>,
+    /// The stretch items (docs/v3/STRETCH-DESIGN.md), all appended after the v3 core so that its layout is a prefix.
+    /// The only account whose `propose_*` calls are accepted. Never the vault itself: every key of the vault has the
+    /// vault as predecessor, so that would make every key a policy key.
+    policy_account: Option<AccountId>,
+    /// What the policy account has proposed and the delay has not yet run or the admin cancelled, by id.
+    proposals: IterableMap<u64, Proposal>,
+    next_proposal: u64,
+    /// Where `sweep_to_safe` sends value. Set by the admin only, never the vault itself, and a new one takes effect only
+    /// after `safe_pending` has waited the withdrawal delay.
+    safe_account: Option<AccountId>,
+    safe_pending: Option<PendingSafe>,
+    /// Accounts (not keys of the vault) that may call `sweep_to_safe` while `emergency_until` is in the future.
+    watchers: IterableSet<AccountId>,
+    /// Block time (ns) until which watchers may sweep; 0 when no window was ever declared.
+    emergency_until: u64,
 }
 
 #[near]
@@ -410,6 +492,13 @@ impl Mamori {
             strikes: LookupMap::new(b"s"),
             revoked_keys: IterableSet::new(b"x"),
             requested_by_key: LookupMap::new(b"k"),
+            policy_account: None,
+            proposals: IterableMap::new(b"o"),
+            next_proposal: 0,
+            safe_account: None,
+            safe_pending: None,
+            watchers: IterableSet::new(b"t"),
+            emergency_until: 0,
         }
     }
 
@@ -418,31 +507,7 @@ impl Mamori {
     /// Adds a classical function-call key limited to `send_small` and `request_withdraw`, and records it.
     pub fn add_daily_key(&mut self, public_key: PublicKey, allowance: Option<U128>) -> Promise {
         self.assert_admin();
-        require!(self.era != Era::Kaigen, "lockdown: classical keys can no longer be added");
-        // A key the vault stopped serving (removed or burned) may still be on the account until its delete is
-        // confirmed. Adding it back now would race that delete, and a delete that landed after the add would
-        // take the new key away. The admin can re-add it as soon as the account confirms the delete.
-        require!(!self.revoked_keys.contains(&public_key), "revoked key: its deletion is not confirmed yet");
-        require!(self.daily_keys.len() < MAX_DAILY_KEYS, "too many daily keys");
-        // The one place the records can grow. Removing or burning a key moves it from one set to the other, so
-        // refusing here, and only here, bounds both sets and leaves every containment path free to run. The way
-        // out is `forget_revoked_key` (after the admin has seen the key is off the account) or a delete that lands.
-        require!(
-            self.daily_keys.len() + self.revoked_keys.len() < MAX_KEY_RECORDS,
-            "too many keys awaiting deletion: confirm or forget some first"
-        );
-        require!(self.daily_keys.insert(public_key.clone()), "daily key already recorded");
-        let allowance = allowance.map_or(DEFAULT_ALLOWANCE, |a| NearToken::from_yoctonear(a.0));
-        let me = env::current_account_id();
-        emit("add_daily_key", serde_json::json!({ "public_key": public_key }));
-        Promise::new(me.clone())
-            .add_access_key_allowance(
-                public_key.clone(),
-                Allowance::limited(allowance).unwrap_or_else(|| env::panic_str("allowance must be > 0")),
-                me.clone(),
-                DAILY_METHODS,
-            )
-            .then(Self::ext(me).with_static_gas(SMALL_CALLBACK_GAS).on_key_added(public_key))
+        self.record_daily_key(public_key, allowance)
     }
 
     /// Stops serving a daily key at once, cancels its queued requests and deletes it from the account. The
@@ -495,8 +560,7 @@ impl Mamori {
     /// the token's 24 h limit, so zero for a token without one. Zero here shuts the queue for that token.
     pub fn set_pending_limit(&mut self, token: Option<AccountId>, limit: U128) {
         self.assert_admin();
-        emit("set_pending_limit", serde_json::json!({ "token": token, "limit": limit }));
-        self.pending_limits.insert(token, limit.0);
+        self.put_pending_limit(token, limit);
     }
 
     /// Smallest NEAR amount `send_small` accepts; smaller ones are refused without a strike.
@@ -509,9 +573,7 @@ impl Mamori {
     /// Adds a recipient that `send_small` may pay while the allowlist is enforced.
     pub fn allow_recipient(&mut self, account: AccountId) {
         self.assert_admin();
-        require!(self.allowed.len() < MAX_ALLOWED, "allowlist is full");
-        require!(self.allowed.insert(account.clone()), "already allowed");
-        emit("allow_recipient", serde_json::json!({ "account": account }));
+        self.put_allowed(account);
     }
 
     pub fn disallow_recipient(&mut self, account: AccountId) {
@@ -555,6 +617,81 @@ impl Mamori {
             );
         }
         cancelled.len() as u32
+    }
+
+    // ---- policy account, safe account, watchers: the stretch items (docs/v3/STRETCH-DESIGN.md) ------------------
+
+    /// Admin. Names the one account whose `propose_*` calls the vault accepts, or `None` to switch the policy path
+    /// off. Every proposal still waiting is dropped in the same call and logged: a proposal is only as good as the
+    /// account that made it, so replacing a policy account that may be stolen also takes back what it asked for,
+    /// with no race against `apply`. Never the vault itself: every key of the vault has the vault as predecessor, so
+    /// that would make every key a policy key (the same reason `assert_admin` must not be given to a function-call key).
+    pub fn set_policy_account(&mut self, account: Option<AccountId>) {
+        self.assert_admin();
+        if let Some(a) = &account {
+            require!(*a != env::current_account_id(), "the policy account cannot be the vault itself");
+        }
+        let ids: Vec<u64> = self.proposals.keys().copied().collect();
+        let dropped = self.take_proposals(ids);
+        self.policy_account = account.clone();
+        emit("set_policy_account", serde_json::json!({ "account": account, "dropped": dropped.len(), "proposals": dropped }));
+    }
+
+    /// Admin. Throws one waiting proposal away, whether or not its delay has passed.
+    pub fn cancel_proposal(&mut self, id: U64) {
+        self.assert_admin();
+        let p = self.proposals.remove(&id.0).unwrap_or_else(|| env::panic_str("no such proposal"));
+        emit("proposal_cancelled", serde_json::json!({ "id": id, "change": p.change }));
+    }
+
+    /// Admin. Names the account `sweep_to_safe` sends to. Not in force at once: it replaces the current one only after
+    /// the withdrawal delay, and `cancel_safe_account_change` can take it back until then. A second call before that
+    /// replaces the waiting one and starts the delay again. Never the vault itself (a sweep would then move nothing
+    /// anywhere and look like protection). The first one waits too: the rule is the same for every change.
+    pub fn set_safe_account(&mut self, account: AccountId) {
+        self.assert_admin();
+        require!(account != env::current_account_id(), "the safe account cannot be the vault itself");
+        let now = env::block_timestamp();
+        self.settle_safe_account(now);
+        let effective_at = U64(self.unlock_time(now));
+        emit("set_safe_account", serde_json::json!({ "account": account, "effective_at": effective_at }));
+        self.safe_pending = Some(PendingSafe { account, effective_at });
+    }
+
+    /// Admin. Withdraws a safe-account change that has not taken effect yet. One that has is in force: set another.
+    pub fn cancel_safe_account_change(&mut self) {
+        self.assert_admin();
+        self.settle_safe_account(env::block_timestamp());
+        let p = self.safe_pending.take().unwrap_or_else(|| env::panic_str("no safe account change is waiting"));
+        emit("safe_account_change_cancelled", serde_json::json!({ "account": p.account }));
+    }
+
+    /// Admin. Names an account that may call `sweep_to_safe` while an emergency window is open. A watcher is an
+    /// ACCOUNT, identified by the predecessor of its call, not a key of the vault: the vault grows no new access key,
+    /// and no code path reads the signer's key. Never the vault itself (every key of the vault would then be a watcher).
+    pub fn add_watcher(&mut self, account: AccountId) {
+        self.assert_admin();
+        require!(account != env::current_account_id(), "a watcher cannot be the vault itself");
+        require!(self.watchers.len() < MAX_WATCHERS, "too many watchers");
+        require!(self.watchers.insert(account.clone()), "already a watcher");
+        emit("add_watcher", serde_json::json!({ "account": account }));
+    }
+
+    pub fn remove_watcher(&mut self, account: AccountId) {
+        self.assert_admin();
+        require!(self.watchers.remove(&account), "not a watcher");
+        emit("remove_watcher", serde_json::json!({ "account": account }));
+    }
+
+    /// Admin. Opens an emergency window of `secs` seconds from now, in which the watchers may call `sweep_to_safe`; it
+    /// replaces any window already open. Zero closes it. At most `MAX_EMERGENCY_SECS` (7 days). The admin never needs a
+    /// window to sweep.
+    pub fn set_emergency(&mut self, secs: u64) {
+        self.assert_admin();
+        require!(secs <= MAX_EMERGENCY_SECS, "an emergency window lasts at most 7 days");
+        let until = if secs == 0 { 0 } else { env::block_timestamp().saturating_add(secs.saturating_mul(1_000_000_000)) };
+        self.emergency_until = until;
+        emit("set_emergency", serde_json::json!({ "secs": secs, "until": U64(until) }));
     }
 
     // ---- daily keys -----------------------------------------------------------------------
@@ -658,6 +795,41 @@ impl Mamori {
         U64(id)
     }
 
+    // ---- the policy account ----------------------------------------------------------------
+
+    /// Policy account. Proposes adding a daily key. Nothing happens now: anyone may `apply` it once the withdrawal
+    /// delay has passed (and before it expires), and the admin may `cancel_proposal` until then. The only checks here are
+    /// the cheap ones; `apply` makes the real ones, on the state of that moment.
+    ///
+    /// The gas allowance may not exceed the default (0.25 NEAR; none means the default): a bigger one is the admin's to
+    /// give. An allowance is gas the key can burn from the vault's balance outside every cap (docs/v3/LOSS-BOUND.md A3), so
+    /// this is the one place the policy path is narrower than the admin's call, and a stolen policy account that nobody
+    /// cancels in time gets a key worth at most the default, not a key that can burn the balance.
+    pub fn propose_add_daily_key(&mut self, public_key: PublicKey, allowance: Option<U128>) -> U64 {
+        self.assert_policy();
+        require!(allowance.is_none_or(|a| a.0 > 0), "allowance must be > 0");
+        require!(allowance.is_none_or(|a| a.0 <= DEFAULT_ALLOWANCE.as_yoctonear()), "an allowance above the default is the admin's to give");
+        self.propose(Change::AddDailyKey { public_key, allowance })
+    }
+
+    /// Policy account. Proposes a 24 h cap for a NEP-141 token (see `propose_add_daily_key` for the rest).
+    pub fn propose_set_token_limit(&mut self, token: AccountId, limit: U128) -> U64 {
+        self.assert_policy();
+        self.propose(Change::SetTokenLimit { token, limit })
+    }
+
+    /// Policy account. Proposes a pending limit for a token (`None` is NEAR).
+    pub fn propose_set_pending_limit(&mut self, token: Option<AccountId>, limit: U128) -> U64 {
+        self.assert_policy();
+        self.propose(Change::SetPendingLimit { token, limit })
+    }
+
+    /// Policy account. Proposes adding a recipient to the allowlist.
+    pub fn propose_allow_recipient(&mut self, account: AccountId) -> U64 {
+        self.assert_policy();
+        self.propose(Change::AllowRecipient { account })
+    }
+
     // ---- anyone ---------------------------------------------------------------------------
 
     /// Sends a queued request once the delay has passed AND the era is calm. Both are needed, always. It must
@@ -691,6 +863,60 @@ impl Mamori {
     /// own, so purging neither gives budget back nor needs to.)
     pub fn purge_expired(&mut self) -> u32 {
         self.remove_expired("purge_expired")
+    }
+
+    /// Anyone. Runs a proposal once its delay has passed and before it expires, through the same private function the
+    /// admin's own method uses, so it refuses what the admin's call would refuse (a refusal rolls the whole call back and
+    /// the proposal waits for the next try, until it expires). The delay is the withdrawal delay: the policy account
+    /// cannot loosen anything faster than a queued withdrawal could leave, and the admin looks at the same cadence.
+    pub fn apply(&mut self, id: U64) -> PromiseOrValue<()> {
+        let p = self.proposals.get(&id.0).cloned().unwrap_or_else(|| env::panic_str("no such proposal"));
+        let now = env::block_timestamp();
+        require!(now >= p.executable_at.0, "still locked");
+        require!(now < p.expires_at.0, "expired");
+        // The change runs first and the proposal is taken out only after it has not refused, so a refusal leaves the
+        // proposal where it was whatever the caller's view of the state (on the chain a panic discards every write anyway).
+        let done = match p.change.clone() {
+            Change::AddDailyKey { public_key, allowance } => PromiseOrValue::Promise(self.record_daily_key(public_key, allowance)),
+            Change::SetTokenLimit { token, limit } => {
+                self.token_limits.insert(token, limit.0);
+                PromiseOrValue::Value(())
+            }
+            Change::SetPendingLimit { token, limit } => {
+                self.put_pending_limit(token, limit);
+                PromiseOrValue::Value(())
+            }
+            Change::AllowRecipient { account } => {
+                self.put_allowed(account);
+                PromiseOrValue::Value(())
+            }
+        };
+        self.proposals.remove(&id.0);
+        emit("proposal_applied", serde_json::json!({ "id": id, "change": p.change }));
+        done
+    }
+
+    /// The admin, or a watcher inside an emergency window. Moves one queued request out of harm's way: it leaves the
+    /// queue and its amount of its token goes to the safe account, and to nowhere else (there is no destination
+    /// argument; the request's own payee is ignored). It can only lower what a daily key could still send: it takes an
+    /// entry out of the queue and touches no cap, budget, strike, key or setting. An expired request is refused (it can
+    /// never run, so nothing is at risk), and so is any call while no safe account is in force. A transfer that fails
+    /// leaves the value in the vault and the request gone, like `cancel`; it is logged (`sweep_failed`), not put back,
+    /// because a put-back is exactly the path that once carried 1.5 pending limits out of one window.
+    pub fn sweep_to_safe(&mut self, id: U64) -> Promise {
+        let by = self.assert_sweeper();
+        let now = env::block_timestamp();
+        let safe = self.effective_safe(now).unwrap_or_else(|| env::panic_str("no safe account is in force"));
+        let w = self.queue.get(&id.0).cloned().unwrap_or_else(|| env::panic_str("no such request"));
+        require!(now < w.expires_at.0, "expired");
+        self.queue.remove(&id.0);
+        emit(
+            "sweep_to_safe",
+            serde_json::json!({ "id": id, "by": by, "safe": safe, "token": w.token, "amount": w.amount, "was_to": w.to }),
+        );
+        transfer(&w.token, w.amount.0, safe.clone()).then(
+            Self::ext(env::current_account_id()).with_static_gas(CALLBACK_GAS).on_sweep_done(id, w.token, w.amount, safe),
+        )
     }
 
     /// Reads `kizashi.era()`. At kaigen: removes recorded keys from `intents.near`, deletes every recorded
@@ -884,6 +1110,15 @@ impl Mamori {
         }
     }
 
+    /// A sweep's transfer failed: the value is still in the vault and the request is gone (see `sweep_to_safe`). Logged so
+    /// the owner sees it; nothing is put back.
+    #[private]
+    pub fn on_sweep_done(&self, id: U64, token: Option<AccountId>, amount: U128, safe: AccountId) {
+        if !is_promise_success() {
+            emit("sweep_failed", serde_json::json!({ "id": id, "token": token, "amount": amount, "safe": safe }));
+        }
+    }
+
     /// If the AddKey failed (for example the key already exists on the account), forget it: a
     /// recorded key that is not really a daily key could later get a real key deleted.
     #[private]
@@ -975,6 +1210,11 @@ impl Mamori {
             intents_keys: self.intents_keys.iter().cloned().collect(),
             revoked_keys: self.revoked_keys.iter().cloned().collect(),
             queue_len: self.queue.len(),
+            policy_account: self.policy_account(),
+            safe_account: self.safe_account(),
+            watchers: self.watchers(),
+            emergency_until: self.emergency_until(),
+            proposals: self.proposals(),
             note: ATTEST_NOTE.to_string(),
         }
     }
@@ -1000,6 +1240,31 @@ impl Mamori {
         // The same arithmetic `refuse` ends with: this strike is the last when it reaches `max_strikes`.
         let would_burn = counted && self.open_strikes(&key, now).count.saturating_add(1) >= self.max_strikes;
         CheckView { verdict, reason, counted, would_burn, headroom: self.headroom(&asset, now).into() }
+    }
+
+    /// The one account whose `propose_*` calls are accepted; `None` when the policy path is off.
+    pub fn policy_account(&self) -> Option<AccountId> {
+        self.policy_account.clone()
+    }
+
+    /// The safe account in force now, and a change still waiting for its delay.
+    pub fn safe_account(&self) -> SafeAccountView {
+        let now = env::block_timestamp();
+        SafeAccountView { current: self.effective_safe(now), pending: self.safe_pending.clone().filter(|p| now < p.effective_at.0) }
+    }
+
+    pub fn watchers(&self) -> Vec<AccountId> {
+        self.watchers.iter().cloned().collect()
+    }
+
+    /// End (ns) of the emergency window; at or before the block time it is closed.
+    pub fn emergency_until(&self) -> U64 {
+        U64(self.emergency_until)
+    }
+
+    /// Proposals waiting (expired ones too, until the next proposal clears them), with the instants they run and lapse.
+    pub fn proposals(&self) -> Vec<ProposalView> {
+        self.proposals.iter().map(|(id, p)| ProposalView { id: U64(*id), proposal: p.clone() }).collect()
     }
 
     pub fn daily_keys(&self) -> Vec<PublicKey> {
@@ -1064,6 +1329,116 @@ impl Mamori {
             "daily key only"
         );
         require!(self.daily_keys.contains(&env::signer_account_pk()), "not a recorded daily key");
+    }
+
+    /// Everything `add_daily_key` does once the caller is allowed: the admin's call and a policy proposal that has
+    /// waited out its delay (`apply`) both come here, so they refuse and record exactly the same.
+    fn record_daily_key(&mut self, public_key: PublicKey, allowance: Option<U128>) -> Promise {
+        require!(self.era != Era::Kaigen, "lockdown: classical keys can no longer be added");
+        // A key the vault stopped serving (removed or burned) may still be on the account until its delete is
+        // confirmed. Adding it back now would race that delete, and a delete that landed after the add would
+        // take the new key away. The admin can re-add it as soon as the account confirms the delete.
+        require!(!self.revoked_keys.contains(&public_key), "revoked key: its deletion is not confirmed yet");
+        require!(self.daily_keys.len() < MAX_DAILY_KEYS, "too many daily keys");
+        // The one place the records can grow. Removing or burning a key moves it from one set to the other, so
+        // refusing here, and only here, bounds both sets and leaves every containment path free to run. The way
+        // out is `forget_revoked_key` (after the admin has seen the key is off the account) or a delete that lands.
+        require!(
+            self.daily_keys.len() + self.revoked_keys.len() < MAX_KEY_RECORDS,
+            "too many keys awaiting deletion: confirm or forget some first"
+        );
+        require!(self.daily_keys.insert(public_key.clone()), "daily key already recorded");
+        let allowance = allowance.map_or(DEFAULT_ALLOWANCE, |a| NearToken::from_yoctonear(a.0));
+        let me = env::current_account_id();
+        emit("add_daily_key", serde_json::json!({ "public_key": public_key }));
+        Promise::new(me.clone())
+            .add_access_key_allowance(
+                public_key.clone(),
+                Allowance::limited(allowance).unwrap_or_else(|| env::panic_str("allowance must be > 0")),
+                me.clone(),
+                DAILY_METHODS,
+            )
+            .then(Self::ext(me).with_static_gas(SMALL_CALLBACK_GAS).on_key_added(public_key))
+    }
+
+    /// Who may call `sweep_to_safe`, and so who `by` is in its log: the admin always (predecessor is the vault, as for
+    /// every admin method), a watcher only inside an emergency window. Identified by the predecessor alone, so it is the
+    /// same for an ML-DSA admin and a classical one, and no key is read.
+    fn assert_sweeper(&self) -> AccountId {
+        let caller = env::predecessor_account_id();
+        if caller == env::current_account_id() {
+            return caller;
+        }
+        require!(self.watchers.contains(&caller), "admin or watcher only");
+        require!(env::block_timestamp() < self.emergency_until, "no emergency: watchers can sweep only in a declared window");
+        caller
+    }
+
+    /// Only the policy account, and only while one is named. The vault itself can never be it (`set_policy_account`).
+    fn assert_policy(&self) {
+        let policy = self.policy_account.as_ref().unwrap_or_else(|| env::panic_str("no policy account is set"));
+        require!(&env::predecessor_account_id() == policy, "policy account only");
+    }
+
+    /// The safe account in force at `now`: the waiting one once its delay has passed, else the current one.
+    fn effective_safe(&self, now: u64) -> Option<AccountId> {
+        match &self.safe_pending {
+            Some(p) if now >= p.effective_at.0 => Some(p.account.clone()),
+            _ => self.safe_account.clone(),
+        }
+    }
+
+    /// Makes a waiting safe account whose delay has passed the current one. Called before the admin changes the setting.
+    fn settle_safe_account(&mut self, now: u64) {
+        if let Some(p) = self.safe_pending.clone().filter(|p| now >= p.effective_at.0) {
+            self.safe_account = Some(p.account);
+            self.safe_pending = None;
+        }
+    }
+
+    /// Queues a proposal: clears the expired ones, checks there is room, and times it by the withdrawal delay.
+    fn propose(&mut self, change: Change) -> U64 {
+        let now = env::block_timestamp();
+        let stale: Vec<u64> = self.proposals.iter().filter(|(_, p)| now >= p.expires_at.0).map(|(id, _)| *id).collect();
+        let cleared = self.take_proposals(stale);
+        if !cleared.is_empty() {
+            emit("proposal_expired", serde_json::json!({ "count": cleared.len(), "proposals": cleared }));
+        }
+        require!(self.proposals.len() < MAX_PROPOSALS, "too many proposals waiting");
+        let id = self.next_proposal;
+        self.next_proposal += 1;
+        let executable_at = self.unlock_time(now);
+        let expires_at = executable_at.saturating_add(EXECUTE_WINDOW_SECS.saturating_mul(1_000_000_000));
+        let p = Proposal { change, proposed_at: U64(now), executable_at: U64(executable_at), expires_at: U64(expires_at) };
+        emit(
+            "propose",
+            serde_json::json!({ "id": U64(id), "change": p.change, "executable_at": p.executable_at, "expires_at": p.expires_at }),
+        );
+        self.proposals.insert(id, p);
+        U64(id)
+    }
+
+    /// Removes these proposals and returns each as event data, so nothing leaves the table without a log line.
+    fn take_proposals(&mut self, ids: Vec<u64>) -> Vec<serde_json::Value> {
+        ids.into_iter()
+            .filter_map(|id| {
+                let p = self.proposals.remove(&id)?;
+                Some(serde_json::json!({ "id": U64(id), "change": p.change, "executable_at": p.executable_at }))
+            })
+            .collect()
+    }
+
+    /// `set_pending_limit` without the caller check: the admin's call and a proposal that has waited out its delay.
+    fn put_pending_limit(&mut self, token: Option<AccountId>, limit: U128) {
+        emit("set_pending_limit", serde_json::json!({ "token": token, "limit": limit }));
+        self.pending_limits.insert(token, limit.0);
+    }
+
+    /// `allow_recipient` without the caller check, for the same two callers.
+    fn put_allowed(&mut self, account: AccountId) {
+        require!(self.allowed.len() < MAX_ALLOWED, "allowlist is full");
+        require!(self.allowed.insert(account.clone()), "already allowed");
+        emit("allow_recipient", serde_json::json!({ "account": account }));
     }
 
     fn limit_for(&self, token: &Option<AccountId>) -> u128 {

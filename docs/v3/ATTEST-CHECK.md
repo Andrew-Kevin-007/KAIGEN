@@ -34,6 +34,11 @@ All 128-bit and 64-bit chain numbers travel as decimal strings (NEAR JSON conven
 | `intents_keys` | array of keys | Keys recorded on `intents.near`. Each signs there with no cap from this contract. |
 | `revoked_keys` | array of keys | Daily keys the vault stopped serving (removed or burned) whose deletion from the account is not confirmed yet. |
 | `queue_len` | number | Requests in the withdrawal queue, expired ones included until purged. |
+| `policy_account` | account or null | The one account whose `propose_*` calls the vault accepts; null when the policy path is off. Added with the stretch items (STRETCH-DESIGN.md). |
+| `safe_account` | object | `{current, pending}`: where `sweep_to_safe` sends value now (null when none is in force), and a change still waiting for its delay (`{account, effective_at}` or null). |
+| `watchers` | array of accounts | The accounts that may call `sweep_to_safe` while an emergency window is open. Accounts, not keys of the vault: they do not appear in `view_access_key_list`. |
+| `emergency_until` | string (ns) | End of the emergency window. At or before `block_timestamp` it is closed (0 when none was ever declared). |
+| `proposals` | array | Changes the policy account proposed that are neither applied nor cancelled, each `{id, change, proposed_at, executable_at, expires_at}`; `change` is `{kind, ...}` with `kind` one of `add_daily_key`, `set_token_limit`, `set_pending_limit`, `allow_recipient`. Expired ones stay until the next proposal clears them. |
 | `note` | string | Fixed text saying what this answer is and is not. |
 
 Per-token caps are not in `attest()`: token limits live in a map that cannot be listed. Read them with `token_limit(token)` and `pending_limit(token)` for the tokens the policy names.
@@ -55,6 +60,7 @@ Per-token caps are not in `attest()`: token limits live in a map that cannot be 
 | A recorded intents key | `attest().intents_keys` | The list. Not visible in RPC. |
 | Code hash differs from the pinned hash | RPC `view_account` | Nothing. |
 | Loss-bound conditions that live in the contract's own config | `attest()` | `drill_build`, `config.delay_secs` against `min_delay_secs`, `allowlist_enforced`, `config.era`, `config.max_strikes`. |
+| Stretch items (policy path, sweep) | `attest()`, views `policy_account`, `safe_account`, `watchers`, `emergency_until`, `proposals` | Nothing in the key list changes: the policy account and the watchers are accounts, so a vault that uses them has the same keys as one that does not. Worth a row each in cage-check, none built here (jobs/ is out of scope for this change): `proposals` not empty (a loosening is on its way: show it, with `executable_at`); `policy_account` or any watcher or the safe account equal to the vault (the contract refuses to record that, so it can only be a lie); `emergency_until` in the future (watchers are armed); `safe_account.pending` not null (the destination of a sweep is about to change). |
 
 ## 3. `check`
 
@@ -130,6 +136,18 @@ Envelope, unchanged: `EVENT_JSON:{"standard":"kaigen","version":"1.0.0","event":
 | `enforce_allowlist` | `enforce_allowlist` | `on` |
 | `trip` | `on_era` | `era`, `changed` |
 | `lockdown_partial` | `lock_down`, keys are left | `daily_keys_left`, `intents_keys_left`, `revoked_keys_left` |
+| `set_policy_account` | `set_policy_account` | `account` (null: policy path off), `dropped` (how many waiting proposals it took back), `proposals` (those, as `{id, change, executable_at}`) |
+| `propose` | `propose_*` | `id`, `change`, `executable_at`, `expires_at` |
+| `proposal_expired` | `propose_*` (it clears the lapsed ones first) | `count`, `proposals` |
+| `proposal_cancelled` | `cancel_proposal` | `id`, `change` |
+| `proposal_applied` | `apply` | `id`, `change`. Logged after the change's own event (`add_daily_key`, `set_pending_limit`, `allow_recipient`; a token limit has none, as with the admin's call), because the change runs first and the proposal is removed only if it did not refuse |
+| `set_safe_account` | `set_safe_account` | `account`, `effective_at` |
+| `safe_account_change_cancelled` | `cancel_safe_account_change` | `account` |
+| `add_watcher` | `add_watcher` | `account` |
+| `remove_watcher` | `remove_watcher` | `account` |
+| `set_emergency` | `set_emergency` | `secs`, `until` (0 when closed) |
+| `sweep_to_safe` | `sweep_to_safe` | `id`, `by` (the admin account or the watcher), `safe`, `token`, `amount`, `was_to` (the payee the request named, which got nothing) |
+| `sweep_failed` | `on_sweep_done`, the transfer failed | `id`, `token`, `amount`, `safe`. The value is still in the vault and the request is gone |
 
 Order within one call that burns a key: `refused`, then `queue_cancelled` (if the key had requests), then `key_burned`. A burn is the largest log a single call writes: with a full queue of the burning key (32 requests, 64-character accounts, 37-digit amounts, a secp256k1 key) it logs 11 349 bytes in three events, against the 16 384 bytes a receipt may log (measured in the unit-test VM, which enforces that limit).
 
@@ -152,4 +170,4 @@ Not added, on purpose: no `receipts()` view (unbounded per-call storage would be
 
 ## 7. Where it is tested
 
-`contracts/mamori/src/tests/attest_check.rs` (attest), `check_view.rs` (check, reason codes, the doc ties), `events.rs` (events), `admin_surface.rs` (every new export is classified; no new path reads the signer key). `cargo test -p mamori` and `cargo test -p mamori --features drill`.
+`contracts/mamori/src/tests/attest_check.rs` (attest), `check_view.rs` (check, reason codes, the doc ties), `events.rs` (events), `admin_surface.rs` (every new export is classified; no new path reads the signer key). The stretch settings and events (policy account, proposals, safe account, watchers, emergency window, sweep) are tested in `sweep.rs` and `policy.rs`, and `policy.rs` ties `attest()` to the views that read the same state. `cargo test -p mamori` and `cargo test -p mamori --features drill`.
