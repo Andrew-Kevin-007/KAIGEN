@@ -12,6 +12,9 @@
 //              (dry run unless --yes; needs the rehearsal that `testnet` provisioned, KAIGEN_TESTNET_DIR)
 //   cage-check read-only: is the cage around a vault intact? RED or GREEN per condition of docs/v3/ARCHITECTURE.md 2.8
 //              (exit 1 on any red, 3 when something could not be checked; run it with no arguments for the options)
+//   globalcontract  testnet only (M6): publish Mamori as a global contract BY CODE HASH, create a vault and attach it with
+//              init in the same transaction, verify over RPC (dry run unless --yes; run it with no arguments for the options)
+//              `globalcontract publish --wasm <file>`: publish-only, any valid wasm, no init, prints the MEASURED cost
 //
 // Config: deployments.json (path in KAIGEN_DEPLOYMENTS, default ../deployments.json). Secrets only
 // come from the environment or files outside the repo; nothing secret is read from deployments.json.
@@ -26,6 +29,8 @@ import { mainnetHelp } from "./help.mjs";
 import { judge, renderJudge } from "./judge.mjs";
 import { provision, recycle, rehearse, renderRehearsal, zeroKey } from "./testnet.mjs";
 import { renderZeroKey, runFireTest, ZeroKeyError } from "./firetest.mjs";
+import { defaultSeedFile, describeWasm, GLOBAL_USAGE, GlobalUsage, parseGlobalArgs, planGlobalContract, measurePublishTx, planPublishOnly, renderMeasured, renderRun, runGlobalContract, verifyVault } from "./globalcontract.mjs";
+import { adminSigner, loadFunder, makeSender } from "./globaltx.mjs";
 import { record, snapshot } from "./hinomi.mjs";
 import { NO_VAULTS, runKeeper, tripOnce } from "./keeper.mjs";
 import { buildPlan, executeStage, findLatestGate, loadInputs, lockKizashi, Refused, renderPlan, runGates } from "./mainnet.mjs";
@@ -244,6 +249,78 @@ ${text}`);
     process.exitCode = exitCodeOf(result);
   },
 
+  /**
+   * M6, testnet only: publish the Mamori wasm as a global contract by code hash, create a vault and attach it with init in the
+   * same transaction, then verify over RPC. Dry run unless --yes (no signing, reads only). See globalcontract.mjs and
+   * docs/v3/GLOBAL-CONTRACT.md.
+   */
+  async globalcontract() {
+    let o;
+    try {
+      o = parseGlobalArgs(process.argv.slice(3), { wasm: path.join(root, "out", "prod", "mamori.wasm"), seedFile: defaultSeedFile(root, process.env), funderFile: process.env.KAIGEN_FUNDER_FILE });
+    } catch (e) {
+      if (!(e instanceof GlobalUsage)) throw e;
+      console.error(`${e.message}
+${GLOBAL_USAGE}`);
+      process.exitCode = 2;
+      return;
+    }
+    const rpc = makeRpc(o.rpc);
+    const readWasm = () => {
+      try {
+        return fs.readFileSync(o.wasm);
+      } catch (e) {
+        throw new Error(`cannot read the wasm ${o.wasm}: ${e.code ?? e.message}`);
+      }
+    };
+    if (o.mode === "cost") {
+      const r = await measurePublishTx({ rpc, txHash: o.costOf, signerId: o.signer, bytes: o.bytes });
+      console.log(`publish transaction ${o.costOf} of ${o.signer}, code hash ${r.codeHash}\n${renderMeasured(r.measured).join("\n")}`);
+      process.exitCode = r.measured.yoctoPerByte === null ? 1 : 0;
+      return;
+    }
+    if (o.mode === "verify") {
+      const codeHash = o.codeHash ?? describeWasm(readWasm(), o.wasm).codeHash;
+      const v = await verifyVault({ rpc, vault: o.verifyVault, codeHash, adminHandle: o.admin });
+      const { text, ok } = report(v.checks);
+      console.log(`${text}${v.cage ? `
+
+${renderCage(v.cage)}` : ""}`);
+      process.exitCode = ok ? 0 : 1;
+      return;
+    }
+    const funder = o.funderFile ? loadFunder(o.funderFile) : null;
+    // `publish` takes any valid wasm and calls nothing on the attached account; the default run is Mamori's vault with init.
+    const plan =
+      o.mode === "publish"
+        ? planPublishOnly({ wasm: readWasm(), wasmPath: o.wasm, funderId: funder?.accountId ?? null, account: o.vault, accountYocto: o.vaultYocto })
+        : planGlobalContract({ wasm: readWasm(), wasmPath: o.wasm, funderId: funder?.accountId ?? null, vault: o.vault, kizashi: o.kizashi, dailyLimitYocto: o.dailyLimitYocto, delaySecs: o.delaySecs, vaultYocto: o.vaultYocto });
+    const log = (e) => console.log(JSON.stringify({ at: new Date().toISOString(), ...e }));
+    const out = await runGlobalContract({
+      plan,
+      rpc,
+      funder,
+      sender: makeSender({ rpc }),
+      makeAdmin: (a) => adminSigner({ seedFile: o.seedFile, ...a }),
+      yes: o.yes,
+      expectedChain: o.chainId,
+      log,
+      recordFile: path.join(path.dirname(o.seedFile), `global-contract-${plan.vault}.json`),
+    });
+    console.log(`
+${renderRun(out)}`);
+    if (out.dryRun) {
+      console.log(`
+DRY RUN: nothing was signed or sent. To do it for real (this burns the cost above):
+  node jobs/src/bin.mjs ${process.argv.slice(2).join(" ")}${o.funderFile ? (process.argv.includes("--funder-file") ? "" : "   (funder file from KAIGEN_FUNDER_FILE)") : " --funder-file <funded testnet account file>"} --yes`);
+      process.exitCode = out.pre.ok ? 0 : 1;
+      return;
+    }
+    console.log(`
+${out.rec.ok ? "ATTACHED AND VERIFIED" : "VERIFICATION FAILED: do not announce anything, read the checks above"}; record ${path.join(path.dirname(o.seedFile), `global-contract-${plan.vault}.json`)}; the vault's ML-DSA-65 admin seed is in ${o.seedFile} (back it up: it is the only key of ${plan.vault})`);
+    process.exitCode = out.rec.ok ? 0 : 1;
+  },
+
   /** Mainnet deploy tooling. Dry-run by default; see mainnet.mjs. */
   async mainnet() {
     const args = process.argv.slice(3);
@@ -335,7 +412,7 @@ ${text}`);
 
 const cmd = process.argv[2];
 if (!commands[cmd]) {
-  console.error("usage: kaigen-jobs hinomi | keeper [--loop] | watch | firetest | demo | testnet | recycle | zerokey [--yes] | judge | verify [--release [--pre-lock]] | cage-check <account> | mainnet gates|plan|execute|lock");
+  console.error("usage: kaigen-jobs hinomi | keeper [--loop] | watch | firetest | demo | testnet | recycle | zerokey [--yes] | judge | verify [--release [--pre-lock]] | cage-check <account> | globalcontract [publish --wasm <file>] --kizashi <account> [--yes] | mainnet gates|plan|execute|lock");
   process.exit(2);
 }
 commands[cmd]().catch((e) => {
