@@ -24,6 +24,29 @@
 //               min_delay_secs (docs/v3/LOSS-BOUND.md E4: a delay under a day breaks the cap bound)
 // With no attest() (a v2 build) ATTEST-1 and ATTEST-2 are UNKNOWN, so such a vault is never GREEN (exit 3).
 //
+// The five stretch fields of attest() (docs/v3/STRETCH-DESIGN.md, ATTEST-CHECK.md 2.1) get one row each. Row table:
+//   ATTEST-3  safe account    RED if the safe account in force or the one waiting is the vault itself (the contract refuses to
+//                             record that, D2: it can only be a lie), or if an emergency window is open while no safe account
+//                             is in force (watchers are armed with nowhere to sweep to). Needs safe_account, emergency_until
+//                             and block_timestamp.
+//   ATTEST-4  policy actors   RED if the policy account or a watcher is the vault itself (D2: every key of the vault would
+//                             then be a policy actor or a watcher), is the implicit account of a daily key (the daily key's
+//                             holder would then also be the policy account or a watcher, the split D1 exists to prevent), or
+//                             if there are more than 4 watchers or one is listed twice (D13). Needs policy_account and watchers.
+//   ATTEST-5  emergency       RED if emergency_until is more than 7 days past block_timestamp (MAX_EMERGENCY_SECS, D13). An open
+//                             window within 7 days is allowed. Needs emergency_until and block_timestamp.
+//   ATTEST-6  safe change     RED if a pending safe-account change unlocks at or before block_timestamp (attest() reports only
+//                             a change still waiting, so it would have skipped its delay), or later than block_timestamp plus
+//                             config.delay_secs (no change set at or after this block can unlock that late, so the answer is
+//                             inconsistent). Limit: the time the change was set is not in attest(), so an unlock earlier than
+//                             set time + delay but inside that window is not seen. Needs safe_account, block_timestamp and
+//                             config.delay_secs.
+//   ATTEST-7  proposals       RED if a waiting proposal has executable_at under proposed_at plus config.delay_secs (D4), or more
+//                             than 8 proposals wait (D5). Needs proposals and config.delay_secs.
+// A row whose fields are absent from attest() (a vault built before the stretch items) is UNKNOWN, never GREEN. A field that is
+// present but not of the documented shape makes attest() malformed (ATTEST-1 RED, the rest UNKNOWN). Like ATTEST-1/2, these rows
+// read attest() only, so they can add RED or UNKNOWN and never clear a row.
+//
 // Exit: 0 all GREEN, 1 at least one RED, 3 nothing RED but something could not be checked (not a clean bill, the
 // same meaning as `watch`), 2 bad usage (bin.mjs).
 import fs from "node:fs";
@@ -49,7 +72,18 @@ export const IDS = {
   // Not rows of the ARCHITECTURE.md table: what attest() brings that the table has no row for.
   attestAgrees: "ATTEST-1",
   productionBuild: "ATTEST-2",
+  safeAccount: "ATTEST-3",
+  policyActors: "ATTEST-4",
+  emergencyWindow: "ATTEST-5",
+  safeChange: "ATTEST-6",
+  proposals: "ATTEST-7",
 };
+
+/** Limits of the stretch items (MAX_EMERGENCY_SECS, MAX_WATCHERS, MAX_PROPOSALS in contracts/mamori/src/lib.rs). */
+const NS_PER_SEC = 10n ** 9n;
+const MAX_EMERGENCY_NS = 7n * 86_400n * NS_PER_SEC;
+const MAX_WATCHERS = 4;
+const MAX_PROPOSALS = 8;
 
 /** What this check cannot see; printed with every report so a GREEN is not read as more than it is. */
 export const LIMITS = [
@@ -95,6 +129,8 @@ export const ATTEST_VERSION = 1;
 const isObject = (x) => x !== null && typeof x === "object" && !Array.isArray(x);
 const isCount = (x) => Number.isInteger(x) && x >= 0;
 const isKey = (x) => typeof x === "string" && x !== "";
+const isU64 = (x) => typeof x === "string" && /^\d+$/.test(x);
+const isSafeView = (x) => isObject(x) && (x.current === null || isKey(x.current)) && (x.pending === null || (isObject(x.pending) && isKey(x.pending.account) && isU64(x.pending.effective_at)));
 
 /**
  * Checks what `readAttest` kept against the shape of docs/v3/ATTEST-CHECK.md section 2.1, and keeps only the fields the
@@ -123,6 +159,15 @@ export function parseAttestation(attest) {
   need(Array.isArray(raw.daily_keys) && raw.daily_keys.every((k) => isObject(k) && isKey(k.public_key)), "daily_keys is not a list of { public_key, strikes }");
   need(Array.isArray(raw.intents_keys) && raw.intents_keys.every(isKey), "intents_keys is not a list of keys");
   need(Array.isArray(raw.revoked_keys) && raw.revoked_keys.every(isKey), "revoked_keys is not a list of keys");
+  // The stretch fields: absent is allowed (an older vault; the rows say UNKNOWN), present must have the documented shape.
+  const has = (name) => raw[name] !== undefined;
+  const optional = (name, ok, what) => !has(name) || need(ok(raw[name]), what);
+  optional("block_timestamp", isU64, "block_timestamp is not a decimal string");
+  optional("policy_account", (x) => x === null || isKey(x), "policy_account is neither null nor an account");
+  optional("safe_account", isSafeView, "safe_account is not { current: account or null, pending: { account, effective_at } or null }");
+  optional("watchers", (x) => Array.isArray(x) && x.every(isKey), "watchers is not a list of accounts");
+  optional("emergency_until", isU64, "emergency_until is not a decimal string");
+  optional("proposals", (x) => Array.isArray(x) && x.every((q) => isObject(q) && isU64(q.proposed_at) && isU64(q.executable_at)), "proposals is not a list of { proposed_at, executable_at, ... } with decimal strings");
   if (problems.length) return { state: "malformed", problems };
   const a = {
     account_id: raw.account_id,
@@ -133,6 +178,13 @@ export function parseAttestation(attest) {
     intents: raw.intents_keys,
     revoked: raw.revoked_keys,
     allowlist_enforced: typeof raw.allowlist_enforced === "boolean" ? raw.allowlist_enforced : null,
+    // undefined: the field is not in this attest() (a vault built before the stretch items). policy_account null is "policy path off".
+    block_timestamp: has("block_timestamp") ? BigInt(raw.block_timestamp) : undefined,
+    policy_account: has("policy_account") ? raw.policy_account : undefined,
+    safe_account: has("safe_account") ? raw.safe_account : undefined,
+    watchers: has("watchers") ? raw.watchers : undefined,
+    emergency_until: has("emergency_until") ? BigInt(raw.emergency_until) : undefined,
+    proposals: has("proposals") ? raw.proposals : undefined,
   };
   return { state: "ok", problems: [], a };
 }
@@ -188,7 +240,77 @@ export function crossCheckAttest(attest, facts) {
   if (a.drill_build) found(IDS.productionBuild, "attest().drill_build is true: a drill build allows a delay under the production floor and lets the cached era fall again", ["drill_build"]);
   if (a.config.delay_secs < a.min_delay_secs) found(IDS.productionBuild, `config.delay_secs ${a.config.delay_secs} is under min_delay_secs ${a.min_delay_secs}`, ["config.delay_secs"]);
 
+  stretchChecks(a, facts, found, (id, detail) => unchecked.push({ id, detail }));
+
   return { status: findings.length ? "disagree" : unchecked.length ? "partial" : "agree", problems: [], findings, unchecked, attest: a };
+}
+
+/** The account a key names as an implicit account (ed25519 only: the 64 hex digits of the key), or null. */
+function implicitAccountOf(publicKey) {
+  if (!publicKey.startsWith("ed25519:")) return null;
+  try {
+    const bytes = base58.decode(publicKey.slice("ed25519:".length));
+    return bytes.length === 32 ? Buffer.from(bytes).toString("hex") : null;
+  } catch {
+    return null;
+  }
+}
+
+/** ATTEST-3 .. ATTEST-7 (see the row table at the top). `missing` records a row that could not be judged for want of a field. */
+function stretchChecks(a, facts, found, missing) {
+  const vaults = new Set([facts.account, a.account_id]);
+  const delayNs = BigInt(a.config.delay_secs) * NS_PER_SEC;
+  const now = a.block_timestamp;
+  // A row runs only when every field it reads is in attest(); otherwise it is UNKNOWN.
+  const ready = (id, fields) => {
+    const absent = fields.filter(([, v]) => v === undefined).map(([n]) => n);
+    if (absent.length) missing(id, `attest() lacks ${absent.join(", ")} (a vault built before the stretch items)`);
+    return absent.length === 0;
+  };
+
+  if (ready(IDS.safeAccount, [["safe_account", a.safe_account], ["emergency_until", a.emergency_until], ["block_timestamp", now]])) {
+    const { current, pending } = a.safe_account;
+    for (const [what, acct] of [["safe account in force", current], ["pending safe account", pending?.account]]) {
+      if (acct && vaults.has(acct)) found(IDS.safeAccount, `the ${what} is the vault itself (${acct}): a sweep would move nothing anywhere`, [acct]);
+    }
+    if (current === null && a.emergency_until > now) found(IDS.safeAccount, "an emergency window is open but no safe account is in force: the watchers are armed with nowhere to sweep to", ["safe_account.current"]);
+  }
+
+  if (ready(IDS.policyActors, [["policy_account", a.policy_account], ["watchers", a.watchers]])) {
+    const dailyAccounts = new Map();
+    for (const k of [...a.daily, ...facts.keys.filter(isFc).map((k) => k.public_key)]) {
+      const acct = implicitAccountOf(k);
+      if (acct) dailyAccounts.set(acct, k);
+    }
+    const actors = [["policy account", a.policy_account], ...a.watchers.map((w) => ["watcher", w])].filter(([, acct]) => acct !== null);
+    for (const [who, acct] of actors) {
+      if (vaults.has(acct)) found(IDS.policyActors, `the ${who} is the vault itself (${acct}): every key of the vault would act as it`, [acct]);
+      if (dailyAccounts.has(acct)) found(IDS.policyActors, `the ${who} ${acct} is the implicit account of the daily key ${dailyAccounts.get(acct)}: its holder would hold both roles`, [acct]);
+    }
+    if (a.watchers.length > MAX_WATCHERS) found(IDS.policyActors, `${a.watchers.length} watchers, the contract allows at most ${MAX_WATCHERS}`, a.watchers);
+    const twice = a.watchers.filter((w, i) => a.watchers.indexOf(w) !== i);
+    if (twice.length) found(IDS.policyActors, `watcher listed twice: ${list(twice)}`, twice);
+  }
+
+  if (ready(IDS.emergencyWindow, [["emergency_until", a.emergency_until], ["block_timestamp", now]]) && a.emergency_until - now > MAX_EMERGENCY_NS) {
+    const days = Number((a.emergency_until - now) / (86_400n * NS_PER_SEC));
+    found(IDS.emergencyWindow, `the emergency window ends ${days} days after the block, the longest allowed is 7`, ["emergency_until"]);
+  }
+
+  if (ready(IDS.safeChange, [["safe_account", a.safe_account], ["block_timestamp", now]]) && a.safe_account.pending) {
+    const at = BigInt(a.safe_account.pending.effective_at);
+    const who = a.safe_account.pending.account;
+    if (at <= now) found(IDS.safeChange, `the change to ${who} unlocks at ${at}, not after the block time ${now}: it did not wait its delay`, [who]);
+    else if (at > now + delayNs) found(IDS.safeChange, `the change to ${who} unlocks at ${at}, more than delay_secs ${a.config.delay_secs} after the block time: not a change this contract can have recorded`, [who]);
+  }
+
+  if (ready(IDS.proposals, [["proposals", a.proposals]])) {
+    if (a.proposals.length > MAX_PROPOSALS) found(IDS.proposals, `${a.proposals.length} proposals wait, the contract allows at most ${MAX_PROPOSALS}`, [`${a.proposals.length} proposals`]);
+    for (const q of a.proposals) {
+      const waited = BigInt(q.executable_at) - BigInt(q.proposed_at);
+      if (waited < delayNs) found(IDS.proposals, `proposal ${q.id ?? "?"} can run ${waited} ns after it was proposed, under delay_secs ${a.config.delay_secs}`, [`proposal ${q.id ?? "?"}`]);
+    }
+  }
 }
 
 /**
@@ -326,9 +448,26 @@ function codeHash({ acc, policy }) {
 const ATTEST_NAMES = {
   [IDS.attestAgrees]: "attest() agrees with the account and with the vault's own views",
   [IDS.productionBuild]: "the vault is a production build with the delay floor",
+  [IDS.safeAccount]: "the safe account is not the vault and is in force while an emergency window is open",
+  [IDS.policyActors]: "the policy account and the watchers are not the vault, not a daily key's account, and within the watcher limit",
+  [IDS.emergencyWindow]: "the emergency window is no longer than 7 days",
+  [IDS.safeChange]: "a pending safe-account change waits the withdrawal delay",
+  [IDS.proposals]: "waiting proposals wait the withdrawal delay and are no more than 8",
 };
 
-/** ATTEST-1 and ATTEST-2: red on a finding, unchecked when attest() or a view it is compared with could not be read. */
+const ATTEST_GREEN = {
+  [IDS.attestAgrees]: "account_id, config, daily_keys, intents_keys and revoked_keys equal the vault's views",
+  [IDS.productionBuild]: "drill_build is false and delay_secs is not under min_delay_secs",
+  [IDS.safeAccount]: "the safe account is not the vault, and it is in force whenever a window is open",
+  [IDS.policyActors]: "the policy account and the watchers are neither the vault nor a daily key's account, and within the limit",
+  [IDS.emergencyWindow]: "emergency_until is within 7 days of the block time",
+  [IDS.safeChange]: "no safe-account change is waiting, or its unlock is within the delay window after the block time",
+  [IDS.proposals]: "every waiting proposal waits at least delay_secs, and no more than 8 wait",
+};
+
+const ATTEST_ROWS = [IDS.attestAgrees, IDS.productionBuild, IDS.safeAccount, IDS.policyActors, IDS.emergencyWindow, IDS.safeChange, IDS.proposals];
+
+/** ATTEST-1 to ATTEST-7: red on a finding, unchecked when attest() or a view it is compared with could not be read. */
 function attestRow(id, cross) {
   const name = ATTEST_NAMES[id];
   const mine = cross.findings.filter((f) => f.id === id);
@@ -338,7 +477,7 @@ function attestRow(id, cross) {
   if (mine.length) return red(id, name, mine.flatMap((f) => f.offenders), mine.map((f) => f.detail).join("; "));
   const open = cross.unchecked.filter((u) => u.id === id);
   if (open.length) return cond(id, name, UNKNOWN, `nothing disagrees, but ${open.map((u) => u.detail).join("; ")}`);
-  return cond(id, name, GREEN, id === IDS.attestAgrees ? "account_id, config, daily_keys, intents_keys and revoked_keys equal the vault's views" : "drill_build is false and delay_secs is not under min_delay_secs");
+  return cond(id, name, GREEN, ATTEST_GREEN[id]);
 }
 
 /** attest() evidence for one of the eight rows: it turns any status into RED, never the other way. */
@@ -357,7 +496,7 @@ const KEY_LIST_ROWS = new Set([IDS.classicalFullAccess, IDS.oneMlDsaAdmin, IDS.a
 const uncertified = (c, n) => (c.status === GREEN && KEY_LIST_ROWS.has(c.id) ? { ...c, status: UNKNOWN, detail: `the account has more keys than were read (list cut at ${n}); ${c.detail}` } : c);
 
 /**
- * The eight red conditions of ARCHITECTURE.md 2.8, then ATTEST-1 and ATTEST-2, as a pure function of what was read.
+ * The eight red conditions of ARCHITECTURE.md 2.8, then ATTEST-1 to ATTEST-7, as a pure function of what was read.
  * policy: { admin?, standInAdmin?, pinnedCodeHash?, maxAllowanceYocto?, extraMethods? }
  *   admin           the admin's key as the chain lists it; when given, the one ML-DSA full-access key must be it
  *   standInAdmin    SANDBOX ONLY: a classical key accepted in place of the ML-DSA admin (the sandbox admin is ed25519)
@@ -370,7 +509,7 @@ export function evaluateCage(facts, policy) {
   const attest = facts.attest ?? { status: "absent" };
   const cross = crossCheckAttest(attest, facts);
   const eight = [classicalFullAccess, oneAdmin, allowance, methodNames, scope, unrecorded, intentsKey, codeHash].map((row) => withFindings(row(ctx), cross.findings));
-  const rows = [...eight, attestRow(IDS.attestAgrees, cross), attestRow(IDS.productionBuild, cross)];
+  const rows = [...eight, ...ATTEST_ROWS.map((id) => attestRow(id, cross))];
   const conditions = facts.keys.truncated === true ? rows.map((c) => uncertified(c, facts.keys.length)) : rows;
   const verdict = conditions.some((c) => c.status === RED) ? RED : conditions.some((c) => c.status === UNKNOWN) ? UNKNOWN : GREEN;
   return {

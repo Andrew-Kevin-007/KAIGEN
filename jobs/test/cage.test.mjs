@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import {
   ATTEST_VERSION, CageUsage, DEFAULT_MAX_ALLOWANCE_YOCTO, IDS, cageCheck, crossCheckAttest, evaluateCage, exitCodeOf, normalizeCodeHash, parseAttestation, parseCageArgs, readAttest, readCageFacts, renderCage,
 } from "../src/cage.mjs";
+import { base58 } from "@scure/base";
 import { makeRpc } from "../src/rpc.mjs";
 import { codeHashOf } from "../src/verify.mjs";
 
@@ -49,6 +50,12 @@ const attestOf = (views, over = {}) => ({
   intents_keys: views.intents_keys ?? DEFAULT_VIEWS.intents_keys,
   revoked_keys: views.revoked_keys ?? DEFAULT_VIEWS.revoked_keys,
   queue_len: 0,
+  // The stretch fields (STRETCH-DESIGN.md): a vault with no policy path, no safe account, no watchers, no window.
+  policy_account: null,
+  safe_account: { current: null, pending: null },
+  watchers: [],
+  emergency_until: "0",
+  proposals: [],
   note: "informational",
   ...over,
 });
@@ -64,6 +71,8 @@ const cleanWorld = (over = {}) => {
   return { height: 100, acc: { amount: "1", code_hash: PIN }, keys: [key(ADMIN), D1, D2], ...over, views };
 };
 const NO_ATTEST = { attest: undefined };
+/** The five rows that read the stretch fields of attest(): UNKNOWN whenever attest() is absent, unreadable, newer or malformed. */
+const STRETCH = [IDS.safeAccount, IDS.policyActors, IDS.emergencyWindow, IDS.safeChange, IDS.proposals];
 const policy = (over = {}) => ({ pinnedCodeHash: PIN, ...over });
 
 /** JSON-RPC answers for a world, recording every request so a test can see what was asked. */
@@ -103,10 +112,10 @@ const states = (r) => ({
 
 // ---- the clean cage ------------------------------------------------------------------------------------------------
 
-test("cage-check: a clean cage is GREEN on all ten conditions, in doc order, and exits 0", async () => {
+test("cage-check: a clean cage is GREEN on all fifteen conditions, in doc order, and exits 0", async () => {
   const r = await run();
   assert.deepEqual(r.conditions.map((c) => [c.id, c.status]), Object.values(IDS).map((id) => [id, "GREEN"]));
-  assert.deepEqual(Object.values(IDS), [1, 2, 3, 4, 5, 6, 7, 8].map((n) => `ARCH-2.8-${n}`).concat(["ATTEST-1", "ATTEST-2"]), "the eight rows of ARCHITECTURE.md 2.8, then the two attest() rows");
+  assert.deepEqual(Object.values(IDS), [1, 2, 3, 4, 5, 6, 7, 8].map((n) => `ARCH-2.8-${n}`).concat(["ATTEST-1", "ATTEST-2", "ATTEST-3", "ATTEST-4", "ATTEST-5", "ATTEST-6", "ATTEST-7"]), "the eight rows of ARCHITECTURE.md 2.8, then the seven attest() rows");
   assert.equal(r.verdict, "GREEN");
   assert.equal(r.info.attest_cross_check, "agree");
   assert.equal(exitCodeOf(r), 0);
@@ -375,7 +384,7 @@ test("cage-check attest: matching attest() is GREEN on ATTEST-1 and ATTEST-2, an
 
 test("cage-check attest: an old v2 vault without attest() is UNCHECKED (UNKNOWN, exit 3), never GREEN; the eight rows still judge it", async () => {
   const v2 = await run({ views: NO_ATTEST });
-  assert.deepEqual(states(v2), { red: [], unknown: [IDS.attestAgrees, IDS.productionBuild] });
+  assert.deepEqual(states(v2), { red: [], unknown: [IDS.attestAgrees, IDS.productionBuild, ...STRETCH] });
   assert.equal(v2.verdict, "UNKNOWN");
   assert.equal(exitCodeOf(v2), 3);
   assert.deepEqual([v2.info.attest, v2.info.attest_cross_check], ["absent", "absent"]);
@@ -383,16 +392,16 @@ test("cage-check attest: an old v2 vault without attest() is UNCHECKED (UNKNOWN,
   const text = renderCage(v2);
   assert.doesNotMatch(text, /GREEN: all/);
   assert.match(text, /^UNKNOWN +ATTEST-1 /m);
-  assert.match(text, /UNKNOWN: nothing is red but 2 of 10 conditions could not be checked/);
+  assert.match(text, /UNKNOWN: nothing is red but 7 of 15 conditions could not be checked/);
   // The same v2 vault with a planted key is RED, not merely unchecked: a missing attest() hides nothing the RPC rows can see.
   const planted = await run({ views: NO_ATTEST, keys: [key(ADMIN), D1, D2, key("ed25519:PLANTED")] });
-  assert.deepEqual(states(planted), { red: [IDS.classicalFullAccess], unknown: [IDS.attestAgrees, IDS.productionBuild] });
+  assert.deepEqual(states(planted), { red: [IDS.classicalFullAccess], unknown: [IDS.attestAgrees, IDS.productionBuild, ...STRETCH] });
   assert.equal(exitCodeOf(planted), 1);
 });
 
 test("cage-check attest: an attest() that fails for another reason is UNKNOWN, not absent and not green", async () => {
   const r = await run({ views: { attest: new Error("ProhibitedInView: attest") } });
-  assert.deepEqual(states(r), { red: [], unknown: [IDS.attestAgrees, IDS.productionBuild] });
+  assert.deepEqual(states(r), { red: [], unknown: [IDS.attestAgrees, IDS.productionBuild, ...STRETCH] });
   assert.equal(r.info.attest, "error");
   assert.match(row(r, IDS.attestAgrees).detail, /attest\(\) could not be read: .*ProhibitedInView/);
   assert.equal(exitCodeOf(r), 3);
@@ -514,7 +523,7 @@ test("cage-check attest: an answer that is not Mamori's attest of this version i
   };
   for (const [what, raw] of Object.entries(bad)) {
     const r = await run({ views: { attest: raw } });
-    assert.deepEqual(states(r), { red: [IDS.attestAgrees], unknown: [IDS.productionBuild] }, what);
+    assert.deepEqual(states(r), { red: [IDS.attestAgrees], unknown: [IDS.productionBuild, ...STRETCH] }, what);
     assert.equal(exitCodeOf(r), 1, what);
     assert.equal(r.info.attest_cross_check, "malformed", what);
   }
@@ -522,7 +531,7 @@ test("cage-check attest: an answer that is not Mamori's attest of this version i
 
 test("cage-check attest: a newer attest_version is UNKNOWN (a field may have changed meaning), a new field at the same version is fine", async () => {
   const newer = await run({ views: { attest: attestOf(DEFAULT_VIEWS, { attest_version: ATTEST_VERSION + 1 }) } });
-  assert.deepEqual(states(newer), { red: [], unknown: [IDS.attestAgrees, IDS.productionBuild] });
+  assert.deepEqual(states(newer), { red: [], unknown: [IDS.attestAgrees, IDS.productionBuild, ...STRETCH] });
   assert.match(row(newer, IDS.attestAgrees).detail, /attest_version 2, this check reads 1/);
   assert.equal(newer.info.attest_cross_check, "unsupported");
   const extra = await run({ views: { attest: attestOf(DEFAULT_VIEWS, { a_field_added_later: { x: 1 } }) } });
@@ -582,10 +591,10 @@ test("cage-check text report: one line per condition by id, the verdict line, an
   for (const id of Object.values(IDS)) assert.match(text, new RegExp(`(RED|GREEN|UNKNOWN)\\s+${id}  `));
   assert.match(text, /^RED +ARCH-2\.8-1 /m);
   assert.match(text, /^GREEN +ARCH-2\.8-2 /m);
-  assert.match(text, /RED: 1 of 10 conditions fail\./);
+  assert.match(text, /RED: 1 of 15 conditions fail\./);
   assert.match(text, /limit: point in time/);
-  assert.match(renderCage(await run({})), /GREEN: all 10 conditions hold\./);
-  assert.match(renderCage(await run({}, { pinnedCodeHash: undefined })), /UNKNOWN: nothing is red but 1 of 10 conditions could not be checked; this is not a clean bill\./);
+  assert.match(renderCage(await run({})), /GREEN: all 15 conditions hold\./);
+  assert.match(renderCage(await run({}, { pinnedCodeHash: undefined })), /UNKNOWN: nothing is red but 1 of 15 conditions could not be checked; this is not a clean bill\./);
 });
 
 // ---- argument parsing ----------------------------------------------------------------------------------------------
@@ -671,7 +680,7 @@ test("cage-check command: exit 0 on a clean cage, 1 when a full-access key is pl
     await withNode(cleanWorld(), async (url) => {
       const ok = await cli([VAULT, "--rpc", url, "--wasm", wasm]);
       assert.equal(ok.code, 0, ok.stdout + ok.stderr);
-      assert.match(ok.stdout, /GREEN: all 10 conditions hold\./);
+      assert.match(ok.stdout, /GREEN: all 15 conditions hold\./);
       const json = await cli([VAULT, "--rpc", url, "--wasm", wasm, "--json"]);
       assert.equal(JSON.parse(json.stdout).verdict, "GREEN");
       const unpinned = await cli([VAULT, "--rpc", url]);
@@ -724,8 +733,12 @@ test("cage-check attest: the contract's real attest() output parses, agrees with
   const keysOf = (extra = []) => [key(ADMIN), ...daily.map((d) => key(d, fc({ receiver_id: account }))), ...extra];
   const real = (world, pol) => cageCheck({ rpc: rpcOf({ ...acct, keys: keysOf(), ...world }), account, policy: policy(pol) });
   const ok = await real({});
-  assert.equal(ok.verdict, "GREEN", JSON.stringify(ok.conditions.filter((c) => c.status !== "GREEN")));
-  assert.deepEqual([ok.info.allowlist_enforced, ok.info.max_strikes, ok.info.attest_cross_check], [true, 3, "agree"]);
+  // This capture predates the stretch items: no policy_account, safe_account, watchers, emergency_until or proposals. Everything the
+  // older answer can show is GREEN; the five rows that read the new fields say UNKNOWN (not GREEN), so the verdict is exit 3.
+  assert.deepEqual(states(ok), { red: [], unknown: STRETCH }, JSON.stringify(ok.conditions.filter((c) => c.status === "RED")));
+  assert.equal(ok.verdict, "UNKNOWN");
+  assert.match(row(ok, IDS.safeAccount).detail, /attest\(\) lacks safe_account, emergency_until \(a vault built before the stretch items\)/);
+  assert.deepEqual([ok.info.allowlist_enforced, ok.info.max_strikes, ok.info.attest_cross_check], [true, 3, "partial"], "partial: the stretch fields are not in this older answer");
   // The same answer with a field renamed or its type changed (what a contract edit would do) is not read as clean.
   const renamed = { ...raw, daily_keys: raw.daily_keys.map(({ public_key, strikes }) => ({ key: public_key, strikes })) };
   assert.deepEqual(states(await real({ views: { ...views, attest: renamed } })).red, [IDS.attestAgrees]);
@@ -734,4 +747,203 @@ test("cage-check attest: the contract's real attest() output parses, agrees with
   // A function-call key on the account that the real answer does not list is a row 6 red.
   const stranger = await real({ keys: keysOf([key("ed25519:STRANGER", fc({ receiver_id: account }))]) });
   assert.deepEqual(states(stranger).red, [IDS.unrecorded]);
+});
+
+// ---- the stretch rows ATTEST-3 .. ATTEST-7 (docs/v3/STRETCH-DESIGN.md; row table at the top of src/cage.mjs) -------------
+// Every row: GREEN on a sound answer, RED on the condition the design forbids, UNKNOWN when attest() lacks its fields.
+
+const NOW = 1_700_000_000_000_000_000n; // attestOf's block_timestamp
+const SEC = 1_000_000_000n;
+const DAY = 86_400n * SEC;
+const at = (ns) => String(ns);
+/** A world whose attest() carries `over` on top of the clean stretch fields. */
+const stretch = (over, views) => withAttest(over, views);
+const reds = async (over) => states(await run(stretch(over))).red;
+/** An attest() with these fields left out, as an older vault answers. */
+const without = (...names) => ({ views: { attest: Object.fromEntries(Object.entries(attestOf(DEFAULT_VIEWS)).filter(([k]) => !names.includes(k))) } });
+/** A real ed25519 key and the implicit account it names, so ATTEST-4 can be shown a policy account that is a daily key's own. */
+const REAL_KEY_BYTES = Buffer.alloc(32, 7);
+const REAL_KEY = `ed25519:${base58.encode(REAL_KEY_BYTES)}`;
+const REAL_KEY_ACCOUNT = REAL_KEY_BYTES.toString("hex");
+
+test("cage-check stretch rows: a vault that uses all of them soundly is GREEN on ATTEST-3 .. ATTEST-7", async () => {
+  const r = await run(stretch({
+    policy_account: "policy.test",
+    safe_account: { current: "safe.test", pending: { account: "next.test", effective_at: at(NOW + DAY / 2n) } },
+    watchers: ["w1.test", "w2.test"],
+    emergency_until: at(NOW + 7n * DAY),
+    proposals: [{ id: "0", change: { kind: "allow_recipient" }, proposed_at: at(NOW - DAY / 2n), executable_at: at(NOW + DAY / 2n), expires_at: at(NOW + DAY + DAY / 2n) }],
+  }));
+  assert.deepEqual(states(r), { red: [], unknown: [] });
+  assert.equal(r.verdict, "GREEN");
+  assert.deepEqual(STRETCH.map((id) => status(r, id)), ["GREEN", "GREEN", "GREEN", "GREEN", "GREEN"]);
+});
+
+test("cage-check ATTEST-3: the safe account (in force or waiting) being the vault is RED; an open window with no safe account in force is RED", async () => {
+  assert.deepEqual(await reds({ safe_account: { current: VAULT, pending: null } }), [IDS.safeAccount]);
+  assert.deepEqual(await reds({ safe_account: { current: "safe.test", pending: { account: VAULT, effective_at: at(NOW + DAY) } } }), [IDS.safeAccount]);
+  const armed = await run(stretch({ emergency_until: at(NOW + DAY), safe_account: { current: null, pending: { account: "next.test", effective_at: at(NOW + DAY) } } }));
+  assert.deepEqual(states(armed).red, [IDS.safeAccount]);
+  assert.match(row(armed, IDS.safeAccount).detail, /emergency window is open but no safe account is in force/);
+  assert.equal(exitCodeOf(armed), 1);
+  // Not red: no window and no safe account (a new vault), a window that closed, and a window with a safe account in force.
+  assert.deepEqual(await reds({}), []);
+  assert.deepEqual(await reds({ emergency_until: at(NOW) }), [], "at the block time a window is closed");
+  assert.deepEqual(await reds({ emergency_until: at(NOW + DAY), safe_account: { current: "safe.test", pending: null } }), []);
+  // attest() answering as another account does not hide it: the account asked about is the vault as well (ATTEST-1 is red too).
+  assert.ok((await reds({ account_id: "other.test", safe_account: { current: "other.test", pending: null } })).includes(IDS.safeAccount));
+});
+
+test("cage-check ATTEST-3: UNKNOWN when attest() lacks safe_account or emergency_until or block_timestamp", async () => {
+  for (const name of ["safe_account", "emergency_until", "block_timestamp"]) {
+    const r = await run(without(name));
+    assert.equal(status(r, IDS.safeAccount), "UNKNOWN", name);
+    assert.match(row(r, IDS.safeAccount).detail, new RegExp(`lacks .*${name}`));
+    assert.equal(exitCodeOf(r), 3, name);
+  }
+});
+
+test("cage-check ATTEST-4: the policy account or a watcher being the vault is RED", async () => {
+  const policyIsVault = await run(stretch({ policy_account: VAULT }));
+  assert.deepEqual(states(policyIsVault).red, [IDS.policyActors]);
+  assert.match(row(policyIsVault, IDS.policyActors).detail, /policy account is the vault itself/);
+  const watcherIsVault = await run(stretch({ watchers: ["w1.test", VAULT] }));
+  assert.deepEqual(states(watcherIsVault).red, [IDS.policyActors]);
+  assert.deepEqual(row(watcherIsVault, IDS.policyActors).offenders, [VAULT]);
+  assert.match(row(watcherIsVault, IDS.policyActors).detail, /watcher is the vault itself/);
+  assert.equal(exitCodeOf(watcherIsVault), 1);
+});
+
+test("cage-check ATTEST-4: a policy account or watcher that is a daily key's own (implicit) account is RED; a policy path that is off is not", async () => {
+  const views = { daily_keys: ["ed25519:D1", REAL_KEY] };
+  const keys = [key(ADMIN), D1, key(REAL_KEY, fc())];
+  const daily = DAILY("ed25519:D1", REAL_KEY);
+  const policyKey = await run({ ...stretch({ policy_account: REAL_KEY_ACCOUNT, daily_keys: daily }, views), keys });
+  assert.deepEqual(states(policyKey).red, [IDS.policyActors]);
+  assert.match(row(policyKey, IDS.policyActors).detail, new RegExp(`implicit account of the daily key ${REAL_KEY}`));
+  const watcherKey = await run({ ...stretch({ watchers: [REAL_KEY_ACCOUNT], daily_keys: daily }, views), keys });
+  assert.deepEqual(states(watcherKey).red, [IDS.policyActors]);
+  // A function-call key on the account that the vault does not record is read too (that is already ARCH-2.8-6 RED).
+  const planted = await run({ ...stretch({ policy_account: REAL_KEY_ACCOUNT }), keys: [key(ADMIN), D1, D2, key(REAL_KEY, fc())] });
+  assert.ok(states(planted).red.includes(IDS.policyActors));
+  assert.deepEqual(await reds({ policy_account: null, watchers: [] }), [], "policy path off: nothing to police");
+  assert.deepEqual(await reds({ policy_account: "policy.test", watchers: ["w.test"] }), []);
+});
+
+test("cage-check ATTEST-4: more than 4 watchers, or one listed twice, is RED", async () => {
+  assert.deepEqual(await reds({ watchers: ["a.test", "b.test", "c.test", "d.test"] }), [], "4 is the limit");
+  assert.deepEqual(await reds({ watchers: ["a.test", "b.test", "c.test", "d.test", "e.test"] }), [IDS.policyActors]);
+  const twice = await run(stretch({ watchers: ["a.test", "b.test", "a.test"] }));
+  assert.deepEqual(states(twice).red, [IDS.policyActors]);
+  assert.match(row(twice, IDS.policyActors).detail, /watcher listed twice: a\.test/);
+});
+
+test("cage-check ATTEST-4: UNKNOWN when attest() lacks policy_account or watchers (a null policy_account is a field, not an absence)", async () => {
+  for (const name of ["policy_account", "watchers"]) {
+    const r = await run(without(name));
+    assert.equal(status(r, IDS.policyActors), "UNKNOWN", name);
+    assert.match(row(r, IDS.policyActors).detail, new RegExp(`lacks ${name}`));
+  }
+  assert.equal(status(await run(stretch({ policy_account: null })), IDS.policyActors), "GREEN");
+});
+
+test("cage-check ATTEST-5: an emergency window ending more than 7 days after the block is RED; exactly 7 days or a closed one is not", async () => {
+  assert.equal(status(await run(stretch({ emergency_until: at(NOW + 7n * DAY), safe_account: { current: "safe.test", pending: null } })), IDS.emergencyWindow), "GREEN", "exactly 7 days is allowed");
+  const long = await run(stretch({ emergency_until: at(NOW + 7n * DAY + 1n), safe_account: { current: "safe.test", pending: null } }));
+  assert.deepEqual(states(long).red, [IDS.emergencyWindow]);
+  assert.match(row(long, IDS.emergencyWindow).detail, /ends 7 days after the block, the longest allowed is 7/);
+  assert.equal(exitCodeOf(long), 1);
+  const forever = await run(stretch({ emergency_until: at(NOW + 400n * DAY), safe_account: { current: "safe.test", pending: null } }));
+  assert.deepEqual(states(forever).red, [IDS.emergencyWindow]);
+  assert.match(row(forever, IDS.emergencyWindow).detail, /ends 400 days/);
+  assert.equal(status(await run(stretch({ emergency_until: "0" })), IDS.emergencyWindow), "GREEN");
+  assert.equal(status(await run(stretch({ emergency_until: at(NOW - DAY) })), IDS.emergencyWindow), "GREEN", "a window in the past is closed");
+});
+
+test("cage-check ATTEST-5: UNKNOWN when attest() lacks emergency_until or block_timestamp", async () => {
+  for (const name of ["emergency_until", "block_timestamp"]) assert.equal(status(await run(without(name)), IDS.emergencyWindow), "UNKNOWN", name);
+});
+
+test("cage-check ATTEST-6: a pending safe-account change that unlocks at or before the block time, or later than one delay after it, is RED", async () => {
+  const pend = (effective_at) => ({ safe_account: { current: "safe.test", pending: { account: "next.test", effective_at: at(effective_at) } } });
+  assert.deepEqual(await reds(pend(NOW + DAY)), [], "one delay after the block time is the latest a change set now can unlock");
+  assert.deepEqual(await reds(pend(NOW + 1n)), [], "waiting, nearly due");
+  const due = await run(stretch(pend(NOW)));
+  assert.deepEqual(states(due).red, [IDS.safeChange]);
+  assert.match(row(due, IDS.safeChange).detail, /not after the block time .*did not wait its delay/);
+  assert.deepEqual(row(due, IDS.safeChange).offenders, ["next.test"]);
+  assert.deepEqual(await reds(pend(1n)), [IDS.safeChange]);
+  const late = await run(stretch(pend(NOW + DAY + 1n)));
+  assert.deepEqual(states(late).red, [IDS.safeChange]);
+  assert.match(row(late, IDS.safeChange).detail, /more than delay_secs 86400 after the block time/);
+  assert.equal(exitCodeOf(late), 1);
+  assert.equal(status(await run(stretch({ safe_account: { current: "safe.test", pending: null } })), IDS.safeChange), "GREEN");
+});
+
+test("cage-check ATTEST-6: the delay is the vault's own delay_secs; UNKNOWN when attest() lacks safe_account or block_timestamp", async () => {
+  const longDelay = { config: { era: "Calm", delay_secs: 3 * 86_400 } };
+  const world = (effective_at) => withAttest({ safe_account: { current: "safe.test", pending: { account: "next.test", effective_at: at(effective_at) } } }, longDelay);
+  assert.equal(status(await run(world(NOW + 3n * DAY)), IDS.safeChange), "GREEN");
+  assert.equal(status(await run(world(NOW + 3n * DAY + 1n)), IDS.safeChange), "RED");
+  for (const name of ["safe_account", "block_timestamp"]) assert.equal(status(await run(without(name)), IDS.safeChange), "UNKNOWN", name);
+});
+
+test("cage-check ATTEST-7: a proposal that can run sooner than one delay after it was proposed, or more than 8 waiting, is RED", async () => {
+  const prop = (id, proposed_at, executable_at) => ({ id: String(id), change: { kind: "allow_recipient", account: "x.test" }, proposed_at: at(proposed_at), executable_at: at(executable_at), expires_at: at(executable_at + DAY) });
+  assert.deepEqual(await reds({ proposals: [prop(0, NOW - DAY, NOW)] }), [], "exactly the delay");
+  const fast = await run(stretch({ proposals: [prop(0, NOW - DAY, NOW), prop(1, NOW - DAY / 2n, NOW + DAY / 2n - 1n)] }));
+  assert.deepEqual(states(fast).red, [IDS.proposals]);
+  assert.match(row(fast, IDS.proposals).detail, /proposal 1 can run 86399999999999 ns after it was proposed, under delay_secs 86400/);
+  assert.deepEqual(row(fast, IDS.proposals).offenders, ["proposal 1"]);
+  assert.equal(exitCodeOf(fast), 1);
+  const nine = Array.from({ length: 9 }, (_, i) => prop(i, NOW - DAY, NOW));
+  assert.deepEqual(await reds({ proposals: nine.slice(0, 8) }), [], "8 is the limit");
+  const crowded = await run(stretch({ proposals: nine }));
+  assert.deepEqual(states(crowded).red, [IDS.proposals]);
+  assert.match(row(crowded, IDS.proposals).detail, /9 proposals wait, the contract allows at most 8/);
+  assert.equal(status(await run(stretch({ proposals: [] })), IDS.proposals), "GREEN");
+});
+
+test("cage-check ATTEST-7: UNKNOWN when attest() lacks proposals", async () => {
+  const r = await run(without("proposals"));
+  assert.equal(status(r, IDS.proposals), "UNKNOWN");
+  assert.match(row(r, IDS.proposals).detail, /lacks proposals/);
+  assert.deepEqual(states(r), { red: [], unknown: [IDS.proposals] });
+  assert.equal(exitCodeOf(r), 3);
+});
+
+test("cage-check stretch rows: an older vault (none of the five fields) is UNKNOWN on exactly those rows and GREEN elsewhere, exit 3", async () => {
+  const r = await run(without("policy_account", "safe_account", "watchers", "emergency_until", "proposals"));
+  assert.deepEqual(states(r), { red: [], unknown: STRETCH });
+  assert.equal(r.verdict, "UNKNOWN");
+  assert.equal(exitCodeOf(r), 3);
+  assert.match(renderCage(r), /UNKNOWN: nothing is red but 5 of 15 conditions could not be checked/);
+});
+
+test("cage-check stretch rows: a field of the wrong shape makes attest() malformed (ATTEST-1 RED, the other attest rows UNKNOWN), never read as clean", async () => {
+  const bad = {
+    "policy_account as a number": { policy_account: 7 },
+    "safe_account as a string": { safe_account: "safe.test" },
+    "safe_account.pending without effective_at": { safe_account: { current: null, pending: { account: "n.test" } } },
+    "safe_account without pending": { safe_account: { current: null } },
+    "watchers as a string": { watchers: "w.test" },
+    "emergency_until as a number": { emergency_until: 5 },
+    "emergency_until as text": { emergency_until: "soon" },
+    "proposals as an object": { proposals: {} },
+    "a proposal without executable_at": { proposals: [{ id: "0", proposed_at: "1" }] },
+    "block_timestamp as a number": { block_timestamp: 1 },
+  };
+  for (const [what, over] of Object.entries(bad)) {
+    const r = await run(stretch(over));
+    assert.deepEqual(states(r), { red: [IDS.attestAgrees], unknown: [IDS.productionBuild, ...STRETCH] }, what);
+    assert.equal(r.info.attest_cross_check, "malformed", what);
+    assert.equal(exitCodeOf(r), 1, what);
+  }
+});
+
+test("cage-check stretch rows never make a result greener: a planted key stays RED with sound stretch fields, a v2 vault stays UNKNOWN on every stretch row", async () => {
+  const planted = await run({ keys: [key(ADMIN), D1, D2, key("ed25519:PLANTED")], ...stretch({ policy_account: "policy.test", safe_account: { current: "safe.test", pending: null }, watchers: ["w.test"] }) });
+  assert.deepEqual(states(planted), { red: [IDS.classicalFullAccess], unknown: [] });
+  const v2 = await run({ views: NO_ATTEST });
+  assert.deepEqual(STRETCH.map((id) => status(v2, id)), ["UNKNOWN", "UNKNOWN", "UNKNOWN", "UNKNOWN", "UNKNOWN"]);
 });

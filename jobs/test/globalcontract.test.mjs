@@ -255,7 +255,7 @@ function viewsOf(w, vault) {
   const acc = w.accounts.get(vault);
   const cfg = w.config.get(vault);
   if (!acc?.global_contract_hash || !cfg) return null;
-  const attest = { attest_version: 1, contract: "mamori", drill_build: false, account_id: vault, block_height: String(w.height), block_timestamp: "1", config: cfg, min_delay_secs: 86_400, allowlist_enforced: false, allowlist_len: 0, daily_keys: [], intents_keys: [], revoked_keys: [], queue_len: 0, note: "informational" };
+  const attest = { attest_version: 1, contract: "mamori", drill_build: false, account_id: vault, block_height: String(w.height), block_timestamp: "1", config: cfg, min_delay_secs: 86_400, allowlist_enforced: false, allowlist_len: 0, daily_keys: [], intents_keys: [], revoked_keys: [], queue_len: 0, note: "informational", policy_account: null, safe_account: { current: null, pending: null }, watchers: [], emergency_until: "0", proposals: [] };
   return { config: cfg, daily_keys: [], intents_keys: [], revoked_keys: [], attest };
 }
 
@@ -704,7 +704,7 @@ test("run: publish, create, attach in that order; init rides in the SAME transac
   assert.match(renderRun(out), /MEASURED publishing cost for \d+ bytes of code:[\s\S]*of which gas 0\.002000000 NEAR \(20000000000000 gas units x 100000000 yoctoNEAR\)/);
   assert.equal(measured.yoctoPerByte, (10n ** 20n).toString(), "the per-byte price is storage burn / bytes");
   assert.equal(measured.yoctoPerByteRemainder, "0");
-  assert.match(renderRun(out), /GREEN: all 10 conditions hold/);
+  assert.match(renderRun(out), /GREEN: all 15 conditions hold/);
 });
 
 test("run: refuses --yes without a funder, with another account's funder file, or when the preflight fails; nothing is sent in any of them", async () => {

@@ -78,9 +78,9 @@ export async function provision({ outDir, wasmDir, funderFile, log = () => {} })
   } else {
     funder = await faucetAccount("funder", outDir, log);
   }
-  // Sized for storage (about 0.00001 NEAR per byte, so 261 KB and 373 KB of v3 drill code) plus working balance.
+  // Sized for storage (about 0.00001 NEAR per byte, so 260 KB and 433 KB of v3 drill code with the stretch items) plus working balance.
   const kz = await subAccount("kizashi", funder, 3000, outDir, log);
-  const vault = await subAccount("vault", funder, 4300, outDir, log);
+  const vault = await subAccount("vault", funder, 4900, outDir, log);
   const keeper = await subAccount("keeper", funder, 600, outDir, log);
   const supplier = await subAccount("supplier", funder, 100, outDir, log);
 

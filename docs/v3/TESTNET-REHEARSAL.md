@@ -37,6 +37,22 @@ Fire tests (drill omens): PASS with the ed25519 omen (claim tx GzyhfXutRrNQ9cHa1
 
 All nine checks passed: preflight (calm, omen alive, Kizashi holds only its own key); delete Kizashi's own full-access key; no keys left; the views still answer; the deleted key can no longer sign; a third party claims with a valid drill omen; the claim raised the era and killed the omen; a third party resets the drill Kizashi; Kizashi is calm again and still has no access keys.
 
+## Second run: the final build, with the stretch items (2026-11-04)
+
+Same commands, on commit cb62c80 and a fresh funder (`kaigen-funder-a00266.testnet`; the first funder's Kizashi had no keys left after its `zerokey`, so its account name could not be reused).
+
+| item | value |
+|---|---|
+| `out/drill/kizashi.wasm` | 260,275 bytes, sha256 810f864b2c6c38947c34bdc9c4d9909c8e21a8e3668657beb9bda6d413eb9c91 |
+| `out/drill/mamori.wasm` | 432,749 bytes, sha256 5a4b09133dc0feddc93f4d69f0c65e2bb77d8feaa6ae4a5d39d78bc2f9c0d882 |
+| Kizashi deploy and init | tx BwB9sAxYDvXvjSVGxg9AtrY5NZsxuYxuxE1b32hr8AW |
+| Mamori deploy and init | tx DmamTU9mtt86yBwJgnjJ5MeiJHMzYmRXdzARULbXSLSB |
+| honest payment | tx 2jjExtnTgWruTLcSwDp2nDw1RhRWbcWdV3NBK5xFpzwk |
+| fire test ed25519 omen | claim tx CGTTWSsZeYHMW4mxDFR6zemU4c6ezexGvobhS2dHAbnd |
+| fire test secp256k1 omen | claim tx 4q4seLZdZduXKn4CqnDWNwT2s9UmM1nrEy1bf53d5DSc |
+
+All 10 defence steps HELD ("every attack was stopped"), both fire tests PASS, and all 9 `zerokey` checks PASS, as in the first run. The sweep and policy paths are covered by unit tests only; this rehearsal does not call `sweep_to_safe` or `propose_*` on chain.
+
 ## Not covered
 
 - The production builds were not deployed. The drill builds differ from production by the `drill` feature (a Kizashi `reset`, and a Mamori era that follows Kizashi down).
