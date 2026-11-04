@@ -268,15 +268,15 @@ Sandbox: one validator, nearcore 2.14.0, protocol 88, 128 ms blocks, ed25519 adm
 | 6 | New payee through `request_withdraw` | PASS | 5 NEAR queued with no strike. Execute before unlock: "still locked". Cancelled 11 blocks later. 0 NEAR to the payee. [section 7] |
 | 7 | Decimal-misread sends | PASS | Token (6 decimals, cap 100): 55.005 tokens held by the attacker in total, within the bound of 1,100 tokens. NEAR: 0.5 NEAR. The NEP-141 used is a look-alike fixture, not a real token. [section 8] |
 | 8 | Planted full-access and null-allowance keys | PASS | cage-check RED on each planted key (ARCH-2.8-1, ARCH-2.8-3, ARCH-2.8-6), GREEN after removal. Stand-in admin, not a production result. [section 9] |
-| 9 | Cross-key grief: key A uses the cap, honest key B | PASS (9, 9b) | B refused 11 times with 0 strikes. B succeeded 86,524 chain seconds after A's spend. A control with counted refusals burned at strike 3. [section 10] |
+| 9 | Cross-key grief: key A uses the cap, honest key B | PASS (9, 9b) | B refused 11 times with 0 strikes. B succeeded 86,525 chain seconds after A's spend. A control with counted refusals burned at strike 3. [section 10] |
 
 ### Blocks to key deletion
 
 | Case | Burn decision block | DeleteKey receipt block (key off the account) | Last callback block |
 | --- | --- | --- | --- |
-| Burn by 3 over-cap sends | 247 | 248 | 250 |
-| Burn by 3 unlisted-payee sends | 317 | 318 | 320 |
-| Burn by 10 over-cap sends | 430 | 431 | 433 |
+| Burn by 3 over-cap sends | 88 | 89 | 91 |
+| Burn by 3 unlisted-payee sends | 159 | 160 | 162 |
+| Burn by 10 over-cap sends | 272 | 273 | 275 |
 
 [ATTACK-RESULTS.md section 11.1]
 
