@@ -8,6 +8,8 @@
 //              --release: the mainnet gate (two RPC hosts, one block, writes a gate file); --pre-lock before the lock
 //   mainnet    help | gates | plan | execute --stage N --yes | lock --i-understand-this-is-irreversible
 //              dry-run by default; nothing is sent without the confirmation flag and a key file (KAIGEN_DEPLOYER_KEY_FILE)
+//   zerokey    testnet only: the rehearsal Kizashi deletes its own full-access key, then claim, reset and views are checked
+//              (dry run unless --yes; needs the rehearsal that `testnet` provisioned, KAIGEN_TESTNET_DIR)
 //   cage-check read-only: is the cage around a vault intact? RED or GREEN per condition of docs/v3/ARCHITECTURE.md 2.8
 //              (exit 1 on any red, 3 when something could not be checked; run it with no arguments for the options)
 //
@@ -22,8 +24,8 @@ import { adminCanceller, agentCaller, classicalSubmitter, loadDeployerKey, makeD
 import { renderDemo, runInjectionDemo } from "./demo.mjs";
 import { mainnetHelp } from "./help.mjs";
 import { judge, renderJudge } from "./judge.mjs";
-import { provision, recycle, rehearse, renderRehearsal } from "./testnet.mjs";
-import { runFireTest } from "./firetest.mjs";
+import { provision, recycle, rehearse, renderRehearsal, zeroKey } from "./testnet.mjs";
+import { renderZeroKey, runFireTest, ZeroKeyError } from "./firetest.mjs";
 import { record, snapshot } from "./hinomi.mjs";
 import { NO_VAULTS, runKeeper, tripOnce } from "./keeper.mjs";
 import { buildPlan, executeStage, findLatestGate, loadInputs, lockKizashi, Refused, renderPlan, runGates } from "./mainnet.mjs";
@@ -131,6 +133,31 @@ ${text}`);
   /** Returns a previous testnet run's balances to its funder so the funder can be reused. */
   async recycle() {
     await recycle({ outDir: process.env.KAIGEN_TESTNET_DIR ?? path.join(root, ".kaigen-testnet"), log: (e) => console.log(JSON.stringify(e)) });
+  },
+
+  /**
+   * Zero-key Kizashi, on a rehearsal that `testnet` already provisioned. Deletes the Kizashi's own full-access key (testnet,
+   * throwaway, irreversible), then checks: no keys left, views answer, the old key cannot sign, a third party's claim with a
+   * drill omen works, a third party's reset works. No faucet, no new account. Dry run unless --yes.
+   */
+  async zerokey() {
+    const outDir = process.env.KAIGEN_TESTNET_DIR ?? path.join(root, ".kaigen-testnet");
+    const stateFile = path.join(outDir, "state.json");
+    if (!fs.existsSync(stateFile)) throw new Error(`no provisioned rehearsal in ${outDir} (state.json is missing): run \`node jobs/src/bin.mjs testnet\` first, or set KAIGEN_TESTNET_DIR to the folder it used`);
+    const state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+    const log = (e) => console.log(JSON.stringify(e));
+    try {
+      const out = await zeroKey({ state, outDir, yes: process.argv.includes("--yes"), log });
+      if (out.dryRun) {
+        console.log(`zero-key Kizashi ${out.cfg.kizashi}: calm, omen ${out.cfg.omenId} alive, ${out.alreadyKeyless ? "it already has no access keys" : `its only key is its own full-access key ${out.cfg.ownKey}`}.`);
+        console.log("\nDRY RUN: nothing was sent. Run it for real (irreversible for this testnet Kizashi) with:\n  node jobs/src/bin.mjs zerokey --yes");
+        return;
+      }
+      console.log(`${renderZeroKey(out.rec)}\n\nRESULT: Kizashi has no access keys, and its views, a third party's claim and a third party's reset still work.`);
+    } catch (e) {
+      if (e instanceof ZeroKeyError && e.record) console.error(`${renderZeroKey(e.record)}${e.record.cleanup ? `\ncleanup after the claim: ${JSON.stringify(e.record.cleanup)}` : ""}\n`);
+      throw e;
+    }
   },
 
   /** The reproducibility screen: runs every offline claim and prints a structured report. */
@@ -308,7 +335,7 @@ ${text}`);
 
 const cmd = process.argv[2];
 if (!commands[cmd]) {
-  console.error("usage: kaigen-jobs hinomi | keeper [--loop] | watch | firetest | demo | testnet | recycle | judge | verify [--release [--pre-lock]] | cage-check <account> | mainnet gates|plan|execute|lock");
+  console.error("usage: kaigen-jobs hinomi | keeper [--loop] | watch | firetest | demo | testnet | recycle | zerokey [--yes] | judge | verify [--release [--pre-lock]] | cage-check <account> | mainnet gates|plan|execute|lock");
   process.exit(2);
 }
 commands[cmd]().catch((e) => {

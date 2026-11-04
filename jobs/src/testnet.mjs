@@ -11,9 +11,9 @@ import { actions, createFundedTestnetAccount, sendTx } from "@fastnear/api";
 import { privateKeyFromRandom, publicKeyFromPrivate, signerFromPrivateKey } from "@fastnear/utils";
 import { generateSigner, signerFromSeed } from "@fastnear/ml-dsa-65";
 import { drillOmens } from "../../scripts/omens.mjs";
-import { adminCaller, adminCanceller, agentCaller, classicalSubmitter, hashOf, makeDrillChain } from "./chain.mjs";
+import { adminCaller, adminCanceller, agentCaller, classicalSubmitter, hashOf, makeDrillChain, makeZeroKeyChain } from "./chain.mjs";
 import { renderDemo, runInjectionDemo } from "./demo.mjs";
-import { runFireTest } from "./firetest.mjs";
+import { hasNoKeys, runFireTest, runZeroKey, zeroKeyPreflight } from "./firetest.mjs";
 import { makeRpc } from "./rpc.mjs";
 
 export const NETWORK = "testnet";
@@ -216,8 +216,14 @@ export async function recycle({ outDir, log = () => {} }) {
   const seeds = JSON.parse(fs.readFileSync(state.adminSeedsPath, "utf8"));
   const funder = state.vault.slice(state.vault.indexOf(".") + 1);
   const del = (id, signer) => send(id, signer, id, [actions.deleteAccount({ beneficiaryId: funder })]);
+  // After `zerokey` the Kizashi has no key left, so nothing can delete it: its balance stays on it (testnet, no value).
+  const kizashiKeyless = hasNoKeys(await makeRpc(TESTNET_RPC).accessKeys(state.kizashi));
 
   for (const id of [state.kizashi, state.keeper.id, state.supplier]) {
+    if (id === state.kizashi && kizashiKeyless) {
+      log({ step: "account kept: it has no access keys (zero-key rehearsal), so its balance cannot be returned", id });
+      continue;
+    }
     await del(id, signerFromPrivateKey(keys[id].privateKey));
     log({ step: "account deleted, balance returned", id, to: funder });
   }
@@ -229,4 +235,52 @@ export async function recycle({ outDir, log = () => {} }) {
     pq.destroy();
   }
   fs.renameSync(path.join(outDir, "state.json"), path.join(outDir, "state.recycled.json"));
+}
+
+/** The drill Kizashi's own omen used by the zero-key claim (the same one the fire test starts with). */
+export const ZEROKEY_OMEN = "drill-ed25519-omen";
+
+/**
+ * Zero-key Kizashi on an already provisioned rehearsal: Kizashi deletes its own full-access key, then the checks in
+ * `runZeroKey` run (no keys left, views answer, the old key cannot sign, a third party's claim with a drill omen works,
+ * a third party resets). Needs no faucet and no new account: the keeper that the rehearsal already funded makes the claim.
+ *
+ * Irreversible for that Kizashi (testnet, throwaway). Without `yes` it only reads the chain and says what it would do.
+ * `rpc`, `submit` (the keeper's transactions), `send` (Kizashi's own transactions) and `opts` (polling) are injectable so a
+ * test can run the whole path offline.
+ */
+export async function zeroKey({ state, outDir, yes = false, rpc = makeRpc(TESTNET_RPC), submit, send, opts, log = () => {} }) {
+  if (state.network !== NETWORK || !String(state.kizashi).endsWith(".testnet")) {
+    throw new Error(`zerokey only runs on a testnet rehearsal; ${state.kizashi} (network ${state.network}) is not one`);
+  }
+  const keysFile = path.join(outDir, "accounts.json");
+  const own = fs.existsSync(keysFile) ? JSON.parse(fs.readFileSync(keysFile, "utf8"))[state.kizashi] : undefined;
+  if (!own?.privateKey) throw new Error(`${keysFile} has no key for ${state.kizashi}, so this step has nothing to delete`);
+
+  const cfg = { kizashi: state.kizashi, vaults: [state.vault], submitter: state.keeper.id, omenId: ZEROKEY_OMEN, ownKey: publicKeyFromPrivate(own.privateKey) };
+  const keeper = submit ?? classicalSubmitter({ network: NETWORK, account: state.keeper.id, privateKey: state.keeper.privateKey });
+  const drill = makeDrillChain({
+    rpc,
+    submit: keeper,
+    network: NETWORK,
+    cfg,
+    drillSecretsPath: state.drillSecretsPath,
+    adminSeedsPath: state.adminSeedsPath,
+    dailyKeys: { [state.vault]: state.daily.publicKey },
+    omens: state.omens,
+  });
+  const chain = makeZeroKeyChain({ rpc, drill, kizashi: state.kizashi, privateKey: own.privateKey, network: NETWORK, send });
+
+  if (!yes) return { dryRun: true, cfg, ...(await zeroKeyPreflight({ chain, cfg })) };
+
+  // Failed attempts are kept too, so a failure is never overwritten by the next run.
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  try {
+    const rec = await runZeroKey({ chain, cfg, opts });
+    fs.writeFileSync(path.join(outDir, `zerokey-${stamp}.json`), JSON.stringify(rec, null, 2));
+    return { rec };
+  } catch (e) {
+    if (e.record) fs.writeFileSync(path.join(outDir, `zerokey-${stamp}.failed.json`), JSON.stringify(e.record, null, 2));
+    throw e;
+  }
 }

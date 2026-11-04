@@ -203,3 +203,41 @@ export function adminCanceller(opts) {
     await call("cancel", { id });
   };
 }
+
+/**
+ * Chain interface for `runZeroKey` (firetest.mjs): the drill Kizashi deleting its OWN full-access key, then the checks
+ * an unrelated account can make against it. `drill` is `makeDrillChain(...)` for the same rehearsal: `claim` and `reset`
+ * are signed by its submitter, never by Kizashi. `privateKey` is the key Kizashi was created with. `send` is `sendTx`,
+ * injectable so a test can see the actions without a network.
+ */
+export function makeZeroKeyChain({ rpc, drill, kizashi, privateKey, network = "testnet", send = sendTx }) {
+  const signer = signerFromPrivateKey(privateKey);
+  const publicKey = publicKeyFromPrivate(privateKey);
+  const asKizashi = (acts) => send({ signerId: kizashi, signer, receiverId: kizashi, actions: acts, waitUntil: "FINAL", network });
+
+  return {
+    ownKey: publicKey,
+    accessKeys: drill.accessKeys,
+    blockHeight: drill.blockHeight,
+    claim: drill.claim,
+    reset: drill.reset,
+    views: async (k) => {
+      const [era, omens, bounty] = await Promise.all([rpc.view(k, "era"), rpc.view(k, "omens"), rpc.view(k, "bounty")]);
+      return { era, omens, bounty };
+    },
+    // Kizashi signs with the key it deletes: the transaction is checked before its actions run, so this is valid even
+    // when it is the account's only key.
+    deleteOwnKey: async () => hashOf(await asKizashi([actions.deleteKey({ publicKey })])),
+    // A harmless 1 yoctoNEAR self-transfer signed with the deleted key. It must be refused. If a node accepts it the key
+    // still works, and that is reported as `accepted`.
+    probeDeletedKey: async () => {
+      try {
+        return { accepted: true, hash: hashOf(await asKizashi([actions.transfer("1")])) };
+      } catch (e) {
+        const error = String(e?.message ?? e);
+        // `hashOf` says "transaction failed" for a transaction that was included and then failed: the key signed it, so the key worked.
+        return { accepted: /^transaction failed/.test(error), error };
+      }
+    },
+  };
+}
