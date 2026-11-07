@@ -193,7 +193,7 @@ Evidence (`revoked_cap.rs`, 8 tests). The 16th record is accepted and the 17th r
 
 ## 9. The stretch items: the policy path and sweeps
 
-Added 2026-11-04. Code: `contracts/mamori/src/lib.rs` (`apply`, `sweep_to_safe` and the settings around them). Design, reasons and the attack each rule is for: STRETCH-DESIGN.md. Tests: `tests/sweep.rs`, `tests/policy.rs`, and the extended `tests/loss_bound.rs`. Unit VM for the model; on 2026-11-07 `sweep_to_safe` and the policy path also ran on a testnet drill vault (10 s delay), see 9.5. The derivation below is an argument plus property tests, like sections 1 to 8.
+Added 2026-11-04. Code: `contracts/mamori/src/lib.rs` (`apply`, `sweep_to_safe` and the settings around them). Design, reasons and the attack each rule is for: STRETCH-DESIGN.md. Tests: `tests/sweep.rs`, `tests/policy.rs`, and the extended `tests/loss_bound.rs`. Unit VM for the model; on 2026-11-07 and 2026-11-08 `sweep_to_safe`, the policy path, the watcher path and a NEP-141 sweep also ran on a testnet drill vault (10 s delay), see 9.5. The derivation below is an argument plus property tests, like sections 1 to 8.
 
 ### 9.1 What changed in what the bound reads
 
@@ -251,7 +251,7 @@ Mutation checks (each removes or weakens one line of `lib.rs`; the file was rest
 
 ### 9.5 Not done
 
-* The testnet run of 2026-11-07 covered `sweep_to_safe`, `apply` and the policy account on a drill vault with a 10 s delay [TESTNET-REHEARSAL.md, third run]. It did not cover the watcher path, a NEP-141 sweep or three of the four `propose_*` methods. The gas of `apply` and `sweep_to_safe` is not measured per method (the shape is that of `add_daily_key` and `execute`); the only figure is the vault's total fall for one sweep, 0.010704 NEAR, including gas.
+* The testnet runs of 2026-11-07 and 2026-11-08 covered `sweep_to_safe`, `apply`, the policy path with a separate policy account, the watcher path, all four `propose_*` methods and a NEP-141 sweep on a drill vault with a 10 s delay [TESTNET-REHEARSAL.md, third and extended runs]. The NEP-141 sweep used a look-alike fixture, not a real token. Not covered on a chain: a watcher's NEP-141 sweep and a sweep of an expired request. The gas of `apply` and `sweep_to_safe` is not measured per method (the shape is that of `add_daily_key` and `execute`); the only figure is the vault's total fall for one sweep, 0.010704 NEAR, including gas.
 * A limit that falls during a window is not in the model (9.2).
 * A swept NEP-141 request whose safe account is not registered with the token fails and is not put back; the value stays in the vault and the request is gone.
 * The property test cannot show a stolen watcher or policy account being outside the vault's control; that is the account's own keys (A13).

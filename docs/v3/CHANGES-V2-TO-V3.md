@@ -8,7 +8,7 @@ Status: 2026-11-03. Testnet only. No audit. Nothing here has run on mainnet. Eac
 - **Kizashi.** A new state field `usdc_epoch: u64` was added. A v2-testnet instance cannot be upgraded in place. Redeploy. [V3-KIZASHI-PROGRESS.md step 2]
 - **Fallback.** The git tag `v2-testnet` holds the v2 code. The M1 log rebuilt it from `git archive` and it passed the same burn tests. [git tag -l; V3-M1-PROGRESS.md (c)]
 - **Build artefact.** `out/prod/mamori.wasm` (323,974 bytes) is not a build of the `v2-testnet` tag. Burned keys were removed from it, but a burned key's queued withdrawals stayed queued. Do not use it as a reference for either version. [V3-M1-PROGRESS.md (d)]
-- **No v3 contract has run on testnet.** [ATTACK-RESULTS.md section 13; ROADMAP.md section 3]
+- **v3 builds have run on testnet, in rehearsals only.** The drill and production-mode builds ran on testnet on 2026-11-04, 2026-11-07 and 2026-11-08. The attack numbers are sandbox numbers. [TESTNET-REHEARSAL.md; ATTACK-RESULTS.md section 13]
 
 ## 2. Mamori behaviour changes
 
@@ -28,7 +28,7 @@ Status: 2026-11-03. Testnet only. No audit. Nothing here has run on mainnet. Eac
 | Non-zero allowance | Enforced. | Unchanged. Regression test added. | ARCHITECTURE.md 2.5 |
 | `ft_transfer_call` | Not called. | Still not called. No new value-moving export. | ARCHITECTURE.md 2.3, 2.6 |
 
-**Stretch items (built, 2026-11-04; not run on a chain).** Policy path: `set_policy_account`, four `propose_*` methods, a permissionless `apply` after `delay_secs`, `cancel_proposal`. The policy actor is an account identified by predecessor, not a function-call key on the vault; this departs from ARCHITECTURE.md section 6 (STRETCH-DESIGN.md D1). Sweep path: `set_safe_account` (after the delay), up to 4 watchers, `set_emergency` (at most 7 days), and `sweep_to_safe(id)` with no destination argument. Bound: C + P unchanged; executes plus sweeps at most 2P; everything that leaves the vault at most C + 2P; sweeps go only to the admin-set safe account [LOSS-BOUND.md sections 9.2 and 9.3; STRETCH-DESIGN.md sections 1 and 2].
+**Stretch items (built, 2026-11-04; run on a testnet drill vault on 2026-11-07 and 2026-11-08, with the limits in LOSS-BOUND.md section 9.5).** Policy path: `set_policy_account`, four `propose_*` methods, a permissionless `apply` after `delay_secs`, `cancel_proposal`. The policy actor is an account identified by predecessor, not a function-call key on the vault; this departs from ARCHITECTURE.md section 6 (STRETCH-DESIGN.md D1). Sweep path: `set_safe_account` (after the delay), up to 4 watchers, `set_emergency` (at most 7 days), and `sweep_to_safe(id)` with no destination argument. Bound: C + P unchanged; executes plus sweeps at most 2P; everything that leaves the vault at most C + 2P; sweeps go only to the admin-set safe account [LOSS-BOUND.md sections 9.2 and 9.3; STRETCH-DESIGN.md sections 1 and 2].
 
 Two v2 facts that v3 does not change: the stored `max_strikes` range is 1 to 10 [lib.rs `set_max_strikes`], and the default pending limit is 10 times the cap [lib.rs `PENDING_LIMIT_MULTIPLE` = 10].
 

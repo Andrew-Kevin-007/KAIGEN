@@ -14,9 +14,9 @@ An optional omen contract (Kizashi) lets anyone who discloses a break of a class
 - The v3 numbers come from one single-validator nearcore 2.14.0 sandbox (protocol 88, 128 ms blocks). The vault admin was an ed25519 key standing in for ML-DSA. [ATTACK-RESULTS.md section 0]
 - The timed attacks used a fast-forwarded chain clock. [ATTACK-RESULTS.md section 14]
 - The hash-pinned global contract for Mamori (M6): tooling is built. On testnet protocol 88 the mechanism is proven with a 1,024-byte module (publish, create and attach accepted; global_contract_hash equals the published hash). The real Mamori publish is not run. Init in the same transaction as the attach is not exercised. Mainnet availability is unconfirmed. [GLOBAL-CONTRACT.md sections 3, 6a and 7; MAINNET-READS.md]
-- Testnet rehearsal (`testnet` and `zerokey`) passed twice: on commit 5107d48, then on the final build with the stretch items (commit cb62c80). On 2026-11-07, `stretchdrill` ran the stretch items on a real testnet chain (drill vault, 10 s delay): the sweep moved exactly its amount to the safe account, the refusals held, and `apply` ran only after the delay. A production-mode vault (`prodvault`, 24 h delay) is on testnet: cage-check is GREEN on all 15 conditions, and RED on a planted full-access key until that key is removed. [TESTNET-REHEARSAL.md, second and third runs]
+- Testnet rehearsal (`testnet` and `zerokey`) passed twice: on commit 5107d48, then on the final build with the stretch items (commit cb62c80). On 2026-11-07 and 2026-11-08, `stretchdrill` ran all eight steps of the stretch items on a real testnet chain (drill vault, 10 s delay): the safe account, `sweep_to_safe` and its refusals, the policy path with a separate policy account, `cage-check` (ATTEST-2 is red by design on a drill build), the watcher path, the three other `propose_*` methods applied by a stranger, and a NEP-141 sweep with a look-alike token fixture, including the `sweep_failed` path. All eight passed. A production-mode vault (`prodvault`, 24 h delay) is on testnet: cage-check is GREEN on all 15 conditions, and RED on a planted full-access key until that key is removed. [TESTNET-REHEARSAL.md, second and third runs]
 - The Create vault page (`app/app/vault/create/`) has not been run against a chain. It is enabled on testnet only.
-- v2 was deployed as drill records on testnet. v3 has no testnet deployment in the sources. [LANDSCAPE.md section 3]
+- v2 was deployed as drill records on testnet [LANDSCAPE.md section 3]. v3 drill and production-mode vaults were deployed on testnet by the rehearsal commands, on 2026-11-04 and 2026-11-07 [TESTNET-REHEARSAL.md].
 
 [Source Code](https://github.com/Andrew-Kevin-007/KAIGEN). Demo post: `<!-- DEMO POST URL: Kevin adds after publishing -->`. There is no live demo yet; the app runs locally (see Getting Started).
 
@@ -70,7 +70,7 @@ Track: **`security`** (AI Security & Defense). Fallback: **`open`** (Open Innova
 
 | NEAR feature | Used for | State |
 | --- | --- | --- |
-| Function-call access keys with allowance | Daily keys can call only `send_small` and `request_withdraw` on the vault (`add_daily_key`). [LOSS-BOUND.md E6] | Tested on the sandbox (attacks 1 to 9). No v3 testnet run. |
+| Function-call access keys with allowance | Daily keys can call only `send_small` and `request_withdraw` on the vault (`add_daily_key`). [LOSS-BOUND.md E6] | Tested on the sandbox (attacks 1 to 9). On testnet, 2026-11-04: the agent's key was refused and burned after three refused attacks, and a retry with it failed as nonexistent [TESTNET-REHEARSAL.md, first run]. |
 | Full-access keys, AddKey and DeleteKey | Admin key rotation, and deleting keys on burn and at lockdown | Sandbox tested with an ed25519 admin. A burned key is removed from the account in the block after the burn decision. [V3-M1-PROGRESS.md; ATTACK-RESULTS.md section 11.1] |
 | ML-DSA-65 full-access keys | Post-quantum admin key | Proven on testnet protocol 88 only. Mainnet protocol 86 has not run it (gate G1). [ROADMAP.md section 3] |
 | Signature verification in the contract | Omen claims: ed25519 and secp256k1 (Kizashi) | Unit-tested in v3. The v2 testnet records are the only on-chain proof in the sources. `<!-- UNVERIFIED in v3 sources: "proven on testnet (fire-tests/0001.json to 0004.json)" -->` |
@@ -187,7 +187,7 @@ sequenceDiagram
 
 Admin methods require `predecessor == current account`. A daily key cannot reach them, because the runtime restricts a function-call key to two methods. [ARCHITECTURE.md section 2.2]
 
-**Stretch bound (built; unit and property tested; not exercised on a chain).** The policy account and the watchers are accounts identified by predecessor, not keys of the vault (STRETCH-DESIGN.md D1). With C and P unchanged: loss stays at most C + P when the delay is at least 24 h; executes plus sweeps are at most 2P per window; everything that leaves the vault is at most C + 2P; sweeps go only to the admin-set safe account. 230 default and 226 drill Mamori tests pass. [LOSS-BOUND.md sections 9.2 and 9.4]
+**Stretch bound (built; unit and property tested; the sweep, policy and watcher paths and a NEP-141 sweep ran on a testnet drill vault, see Limits of these numbers).** The policy account and the watchers are accounts identified by predecessor, not keys of the vault (STRETCH-DESIGN.md D1). With C and P unchanged: loss stays at most C + P when the delay is at least 24 h; executes plus sweeps are at most 2P per window; everything that leaves the vault is at most C + 2P; sweeps go only to the admin-set safe account. 230 default and 226 drill Mamori tests pass. [LOSS-BOUND.md sections 9.2 and 9.4]
 
 ---
 
@@ -233,7 +233,7 @@ Two codes share one text. Read the code, not the text, to tell them apart.
 | --- | --- | --- | --- |
 | Kizashi (v2 drill twin) | NEAR testnet | `kizashi.kaigen-g1-0170217f.testnet` `<!-- UNVERIFIED in v3 sources; v2 contract, not redeployed for v3 -->` | `fire-tests/0001.json` to `0004.json` (v2) |
 | Mamori vault (v2 drill) | NEAR testnet | `vault.kaigen-g1-0170217f.testnet` `<!-- UNVERIFIED in v3 sources; v2 contract -->` | `fire-tests/0001.json` to `0004.json` (v2) |
-| Mamori v3 | NEAR testnet | none deployed | Not in any source. v3 vaults must be deployed fresh. [CHANGES-V2-TO-V3.md section 1] |
+| Mamori v3 (drill and production-mode) | NEAR testnet | `pv-45cbcb96.kaigen-funder-ee0d56.testnet` (production-mode, 24 h delay); other drill vaults are in the gitignored testnet folder | v3 vaults must be deployed fresh, with no in-place upgrade [TESTNET-REHEARSAL.md, third run; CHANGES-V2-TO-V3.md section 1] |
 | Kizashi | NEAR mainnet | none deployed | `deployments.json` is not committed. `deployments.example.json` is the shape. |
 
 To create your own testnet accounts, run `node jobs/src/bin.mjs testnet`. It makes throwaway sub-accounts of one funded testnet account and prints their addresses. Nothing it creates is committed. `<!-- UNVERIFIED in v3 sources: CLI command -->`
@@ -326,7 +326,7 @@ These traces were written by us. They are not recorded agent behaviour. The mist
 - Not exercised on a chain: eight daily keys at once, registered intents keys, a non-NEAR token in the queue, the failed-transfer refund and requeue paths (covered by unit and property tests only), and the ML-DSA admin. [ATTACK-RESULTS.md section 13]
 - The timed attacks (2c, 5, 9b, and the strike lapse) moved the chain clock by a day with `sandbox_fast_forward`. The contract reads that clock, so the 24 h rules were exercised without waiting. [ATTACK-RESULTS.md section 14]
 - Admin response time (a person noticing and acting) was not measured. [ATTACK-RESULTS.md section 13]
-- The stretch items (policy path and `sweep_to_safe`) ran on a testnet chain on 2026-11-07, on a drill vault with a 10 s delay (`stretchdrill`). Not run on a chain: the watcher path, a NEP-141 sweep, three of the four `propose_*` methods, and a separate policy account with its own key. The drill delay is not the production 24 h. [LOSS-BOUND.md section 9.5; TESTNET-REHEARSAL.md third run]
+- The stretch items ran on a testnet chain on 2026-11-07 and 2026-11-08, on a drill vault with a 10 s delay (`stretchdrill`, eight steps, all passed). Still not covered on a chain: a real NEP-141 token (the look-alike fixture `ft-mock` was used); the failed-transfer path was shown with an oversized request, not with a safe account that is unregistered with the token; a watcher's NEP-141 sweep; a sweep of an expired request; and key custody (the policy and watcher keys are distinct key files in the gitignored testnet folder, which shows they are distinct, not how they are held). The drill delay is 10 s, not the production 24 h. [LOSS-BOUND.md section 9.5; TESTNET-REHEARSAL.md, third and extended runs]
 - Leash and near-agent-spend-guard were not run. This README makes no comparison with them. Running their code is for the owner to do. [ROADMAP.md M9; README.md]
 
 ---
@@ -451,7 +451,7 @@ Line numbers were removed. They moved when v3 was added. Use function names. For
 - Mainnet deployment, the mainnet drill pair, and the production Kizashi lock. [ROADMAP.md section 3]
 - Hash-pinned global contract for Mamori (M6, gate G2). Tooling built. Proven on testnet with a 1,024-byte module only. The real Mamori publish and mainnet are not run. [GLOBAL-CONTRACT.md sections 6a and 7; ROADMAP.md section 2]
 - A production withdrawal delay (owner decision). The floor is 24 h. [CHANGES-V2-TO-V3.md]
-- Policy-key split and `sweep_to_safe` are built (commit cb62c80; unit and property tested; run on a testnet drill vault on 2026-11-07, with the limits listed above). Design: [STRETCH-DESIGN.md](docs/v3/STRETCH-DESIGN.md). Sentinel and yield hold: stretch items, not promised. The fallback tag `v3-core-testnet` (pushed) points at d4342c0, one commit before the M6 tooling commit fe8d9d9. [git status; git ls-remote --tags; ARCHITECTURE.md section 6; ROADMAP.md section 2]
+- Policy-key split and `sweep_to_safe` are built (commit cb62c80; unit and property tested; run on a testnet drill vault on 2026-11-07 and 2026-11-08 with `stretchdrill`, with the limits listed above). Design: [STRETCH-DESIGN.md](docs/v3/STRETCH-DESIGN.md). Sentinel and yield hold: stretch items, not promised. The fallback tag `v3-core-testnet` (pushed) points at d4342c0, one commit before the M6 tooling commit fe8d9d9. [git status; git ls-remote --tags; ARCHITECTURE.md section 6; ROADMAP.md section 2]
 - The Create vault page is in `app/app/vault/create/`. It has not been run against a chain. `<!-- UNVERIFIED in v3 sources: "enabled on testnet only, mainnet stays off" -->`
 - A signed gate file for `make verify`. `<!-- UNVERIFIED in v3 sources -->`
 - The landing page in `site/` is being redesigned. It is described here only as the landing page. `<!-- UNVERIFIED in v3 sources -->`
@@ -599,7 +599,7 @@ Steps 1 and 2 need no funds and no chain. Step 4 needs one funded testnet accoun
 | 1 | `cargo test -p mamori` and `cargo test -p kizashi`, then `cd jobs && node --test test/*.test.mjs` | Every suite ends with `0 failed`. Counts at the last recorded run: Mamori 230 (226 drill), Kizashi 104 (105 drill), jobs 358 (2 skipped). [KIZASHI-REFUND-ORDER.md; owner's run, 2026-11-07; progress logs] |
 | 2 | `node jobs/src/bin.mjs judge` `<!-- UNVERIFIED in v3 sources -->` | A report of PASS or SKIPPED per claim, with the evidence line. It writes `judge-report.json`. A check that cannot run is SKIPPED with the reason, never PASS. |
 | 3 | Open `fire-tests/0003.json` `<!-- UNVERIFIED in v3 sources; v2 record -->` | Claim, trip, post-quantum send and re-arm transactions for a v2 drill vault. |
-| 4 | `node jobs/src/bin.mjs testnet` `<!-- UNVERIFIED in v3 sources; v2 rehearsal, needs out/drill and a funder file -->` | PASS or FAIL per step. Run for v3 on 2026-11-04 (twice), and `stretchdrill` on 2026-11-07 [TESTNET-REHEARSAL.md]. |
+| 4 | `node jobs/src/bin.mjs testnet` `<!-- UNVERIFIED in v3 sources; v2 rehearsal, needs out/drill and a funder file -->` | PASS or FAIL per step. Run for v3 on 2026-11-04 (twice), and `stretchdrill` on 2026-11-07 and 2026-11-08 [TESTNET-REHEARSAL.md]. |
 | 5 | Sandbox: `tests-integration\sandbox\start.ps1`, then the attack suite (see Test) | Nine attacks, each PASS or FAIL, with the measured numbers in `docs/v3/ATTACK-RESULTS.md`. |
 | 6 | `node jobs/src/bin.mjs cage-check <account>` (add `--stand-in-admin` on the sandbox) | GREEN, RED or UNKNOWN per row. Exit 0 GREEN, 1 RED, 3 UNKNOWN. |
 | 7 | `cd app && npm run dev`, open `/migrate` `<!-- UNVERIFIED in v3 sources -->` | An admin key is made in the browser, and an encrypted backup is required before anything else. |
@@ -616,7 +616,32 @@ Steps 1 and 2 need no funds and no chain. Step 4 needs one funded testnet accoun
 
 **AI-written code.** The code in this repository was written with Claude Code (Anthropic). Separate Claude review agents reviewed the Rust contracts, the security surface and the TypeScript. Review findings and their fixes are recorded in [docs/ARCHITECTURE-REVIEW.md](docs/ARCHITECTURE-REVIEW.md). `<!-- UNVERIFIED in v3 sources: review file not read for v3 -->` Kevin Andrew A owns every decision: the design, what ships, what is deployed, and what is claimed.
 
-**Build window.** `<!-- UNVERIFIED in v3 sources: the organiser's 19 Oct 2026 announcement and the 14 Nov 2026 close are from HACKATHON.md, which is not in the repository. ROADMAP.md gives the submission window as 1 Nov to 14 Nov 2026. -->` This folder is not a git repository in the copy I checked, so the baseline before 19 Oct is not shown by commit history. The v2 tag is `v2-testnet`. `<!-- BASELINE: Kevin to add the pre-window tag or branch before submission -->`
+**Build window.** `<!-- UNVERIFIED in v3 sources: the organiser's 19 Oct 2026 announcement and the 14 Nov 2026 close are from HACKATHON.md, which is not in the repository. ROADMAP.md gives the submission window as 1 Nov to 14 Nov 2026. -->` The first commit in this repository is the 2026-11-01 baseline (see Hackathon disclosure). The v2 tag is `v2-testnet`. `<!-- BASELINE: Kevin to add the pre-window tag or branch before submission -->`
+
+## Hackathon disclosure
+
+This section gives the disclosures the hackathon rules ask for (Q-002 and Q-005): the code window, libraries, AI-written code, NEAR features and third-party products. Versions are as written in each manifest.
+
+**Window.** The first commit in this repository is `33becb5`, dated 2026-11-01, with the message "chore: baseline of KAIGEN contracts, app, jobs and scripts". No commit in the history is dated earlier [git log --reverse]. The baseline commit contains work done before it was committed: the files in the working folder carry timestamps from 2026-10-28 onward (file timestamps, not git history), and git itself does not record when that work began. The hackathon counts code from 2026-10-19 to 2026-11-14 [https://nearhackathon.com/HACKATHON.md].
+
+**Libraries and frameworks.**
+- Contracts, `contracts/mamori/Cargo.toml` and `contracts/kizashi/Cargo.toml`: `near-sdk` 5.30 (both), `hex` 0.4 (kizashi). Dev-dependencies: `ed25519-dalek` 2, `k256` 0.13, `sha2` 0.10.
+- Integration tests, `tests-integration/Cargo.toml`: `near-workspaces` 0.24, `near-crypto` 0.38, `near-primitives` 0.38, `borsh` 1, `base64` 0.22, `reqwest` 0.13, `serde_json` 1, `tokio` 1.
+- Jobs, `jobs/package.json`: `@fastnear/api` ^2.5.0, `@fastnear/ml-dsa-65` ^2.5.0, `@fastnear/utils` ^2.5.0, `@noble/curves` ^2.4.0, `@noble/hashes` ^2.4.0, `@scure/base` ^2.4.0.
+- Scripts, `scripts/package.json`: `@noble/curves` ^2.4.0, `@noble/hashes` ^2.4.0.
+- App, `app/package.json`: Next.js ^16.4.3, React ^19.3.1, react-dom ^19.3.1, `@fastnear/api` ^2.5.0, `@fastnear/ml-dsa-65` ^2.5.0, `@fastnear/wallet` ^2.5.0, `@defuse-protocol/one-click-sdk-typescript` ^0.1.26. Dev: TypeScript ^5.9.3.
+
+**AI-written code.** Much of the code, tests, scripts and documentation in this repository was written with AI coding assistants (Claude Code). The owner, Kevin Andrew A, directed the work and reviewed it. The repository's own evidence verifies it: the unit and property tests, the mutation checks in [docs/v3/LOSS-BOUND.md], the sandbox attack suite in [docs/v3/ATTACK-RESULTS.md] and the testnet runs in [docs/v3/TESTNET-REHEARSAL.md].
+
+**NEAR features and third-party products.** [README.md, Track and NEAR tech used; contracts/mamori/src/lib.rs]
+- NEAR access keys: an admin full-access key, and function-call keys with an allowance for daily keys, which can call only `send_small` and `request_withdraw` [docs/v3/LOSS-BOUND.md E6].
+- ML-DSA-65 full-access keys: the admin key in the design. Proven on testnet protocol 88 only.
+- Promises and callbacks: transfers, and `#[private]` callbacks in the contracts, such as `on_sweep_done` [docs/v3/STRETCH-DESIGN.md].
+- `intents.near`: the contract calls `add_public_key` and `remove_public_key` there. A read-only check of the mainnet contract code found both exported, names only [docs/v3/MAINNET-READS.md]; the calls themselves have not run on chain.
+- 1Click (NEAR Intents): the app's bounty top-up uses `@defuse-protocol/one-click-sdk-typescript` [app/lib/topup.ts]. The USDC leg has not run on chain.
+- Wallet: `@fastnear/wallet` in the app [app/lib/wallet.tsx].
+
+**Landing page template.** A landing page built on a third-party website template (Family) may be added to the app. If it is, its assets will be listed in a file for replacement before publication. This section does not add it to the repository.
 
 ---
 

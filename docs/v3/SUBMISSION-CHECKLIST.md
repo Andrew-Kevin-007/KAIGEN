@@ -29,7 +29,7 @@ Status: 2026-11-07 (stretch items built; numbers refreshed). For Kevin only. Sou
 - [ ] **4. Decide the stretch items (policy-key split, `sweep_to_safe`, sentinel).**
   - Who: Kevin.
   - Command: none.
-  - Done when: each item is written in `docs/v3/ROADMAP.md` section 2 as built or as "document as not applicable". The stretch items are built (commit cb62c80). On 2026-11-07 the owner ran `stretchdrill` on a testnet drill vault: `sweep_to_safe` and the policy path worked on the chain. The watcher path, a NEP-141 sweep and three of the four `propose_*` methods did not run on a chain [TESTNET-REHEARSAL.md, third run]. Record them in ROADMAP section 2 as built. The fallback tag `v3-core-testnet` is the build without them. The design choices for the safe account and watchers (Q5) are recorded in `docs/v3/STRETCH-DESIGN.md` once it is final. [ROADMAP.md sections 2 and 4]
+  - Done when: each item is written in `docs/v3/ROADMAP.md` section 2 as built or as "document as not applicable". The stretch items are built (commit cb62c80). On 2026-11-07 the owner ran `stretchdrill` on a testnet drill vault: `sweep_to_safe` and the policy path worked on the chain. On 2026-11-08 the extended run added the watcher path, a NEP-141 sweep and the three other `propose_*` methods, and all eight steps passed [TESTNET-REHEARSAL.md, extended run]. Record them in ROADMAP section 2 as built. The fallback tag `v3-core-testnet` is the build without them. The design choices for the safe account and watchers (Q5) are recorded in `docs/v3/STRETCH-DESIGN.md` once it is final. [ROADMAP.md sections 2 and 4]
 
 - [ ] **5. Decide whether the peer comparison is wanted.**
   - Who: Kevin.
