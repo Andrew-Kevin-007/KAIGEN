@@ -1513,12 +1513,15 @@ fn claim_releases_stale_reservations_before_it_orders_its_read() {
 // any two of them. `explore` tries every such schedule (merging the ones that reach the same state) and checks the
 // books after every step.
 //
-// What the model assumes of the runtime, and has not checked against nearcore: a callback runs after the receipt
-// it waits for, and, unless a fixture turns `refund_may_come_first` on, the refund of a failed transfer reaches the
-// contract after that callback (the contract's own `retry_payout` message, "owed NEAR has not returned yet", relies on
-// the same order). With the refund free to come first the contract fails (see
-// `a_refund_that_reaches_the_contract_before_its_callback_is_swept_by_the_next_claim`). A storage deposit's refund is
-// a receipt of its own in any order when `deposit_refunds_come_late` is on, and cost-free otherwise.
+// What the model assumes of the runtime, and has not run against nearcore: a callback runs after the receipt it
+// waits for, and the refund of a failed transfer reaches the contract in the order a fixture's `RefundOrder` says. The
+// default, after the callback, is the order the contract's own `retry_payout` message ("owed NEAR has not returned
+// yet") assumes. Nearcore master creates the refund BEFORE the callback's data receipt (docs/v3/KIZASHI-REFUND-ORDER.md),
+// so `JustBeforeCallback` is the order to expect and the contract passes it. Only a transaction delivered between the
+// refund and the callback breaks it (`BeforeCallbackAnyTime`, see
+// `a_refund_that_reaches_the_contract_before_its_callback_is_swept_by_the_next_claim`), and no rule over the contract's
+// own state can close that (`a_refund_and_an_equal_top_up_look_the_same_to_the_next_claim`). A storage deposit's
+// refund is a receipt of its own in any order when `deposit_refunds_come_late` is on, and cost-free otherwise.
 
 use near_sdk::mock::MockAction;
 use std::collections::{BTreeMap, HashSet, VecDeque};
@@ -1540,6 +1543,8 @@ enum Step {
     NearResolve { to: AccountId, amount: u128 },
     /// The refund of a failed transfer, a receipt of its own: it may reach the contract before or after the callback.
     Refund(u128),
+    /// The token's refund of a storage deposit: NEAR that is the contract's to keep.
+    DepositRefund(u128),
     /// The token's `ft_balance_of`: the balance is read when this is delivered.
     Read,
     /// The contract's `on_usdc_balance`, with the balance the read before it returned and the epoch it was ordered under.
@@ -1577,6 +1582,22 @@ enum Op {
     Release,
     /// The clock reaches `IN_FLIGHT_TIMEOUT_NS`: a reservation made at time 0 turns stale between two other steps.
     TimeOut,
+    /// Someone sends NEAR to the contract: a plain transfer, no call, nothing the contract can see happen.
+    TopUp(u128),
+}
+
+/// Where the refund of a failed NEAR transfer reaches the contract, against the callback that waits for that transfer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RefundOrder {
+    /// After the callback: the order the contract's own retry message ("owed NEAR has not returned to the contract
+    /// yet") assumes.
+    AfterCallback,
+    /// Immediately before the callback, in one delivery: no transaction runs between the two. Nearcore creates the refund
+    /// receipt before the data receipt that runs the callback, and the two are delivered one after the other.
+    JustBeforeCallback,
+    /// Before the callback, as a receipt of its own that may be delivered at any time before it: transactions can run
+    /// between the two. Nothing in the Nomicon or in docs.near.org rules this out.
+    BeforeCallbackAnyTime,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1632,10 +1653,16 @@ struct World {
     /// time (on), or comes back at once (off: the deposit is taken to cost nothing). On multiplies the states to
     /// explore, so only the fixtures that are about it turn it on.
     deposit_refunds_come_late: bool,
-    /// Whether the refund of a failed NEAR transfer may reach the contract BEFORE the callback that waits for that
-    /// transfer. Off: the refund is made once the callback has run, the order the contract's own retry message
-    /// ("owed NEAR has not returned to the contract yet") assumes and nobody has checked against nearcore.
-    refund_may_come_first: bool,
+    /// Where the refund of a failed NEAR transfer reaches the contract, against the callback that waits for that transfer.
+    refund: RefundOrder,
+    /// NEAR the contract was funded with: `POT_NEAR` and every top-up. A refund is not new money.
+    pot_near: u128,
+    /// NEAR that reached the contract once every omen was dead (a top-up, a refund): nothing can claim it any more, so
+    /// it is meant to stay. What stays beyond this, and beyond what is owed, was stuck by a claim that took too little.
+    after_last_claim: u128,
+    /// The contract with a hold-back added: the NEAR of every payout that has not reported is taken out of the balance
+    /// the contract sees (see `holding_back_the_unresolved_payout_closes_the_gap_and_strands_a_top_up`).
+    hold_back: bool,
     /// For a reservation released while its transfer was still on the way: the contract cannot know, so it may
     /// schedule tokens that transfer is about to take. The token then refuses whichever comes second (`short`), and
     /// the checks that forbid exactly that are off. Everything else is still checked.
@@ -1778,10 +1805,42 @@ impl World {
             trust_stale_reads: false,
             news: 0,
             deposit_refunds_come_late: false,
-            refund_may_come_first: false,
+            refund: RefundOrder::AfterCallback,
+            pot_near: POT_NEAR,
+            after_last_claim: 0,
+            hold_back: false,
             overbooking_tolerated: false,
             errors: Vec::new(),
             trace: Vec::new(),
+        }
+    }
+
+    /// NEAR that reached the contract by itself: nothing the contract can tell from a refund, and nothing it is told.
+    fn receive(&mut self, amount: u128) {
+        self.near += amount;
+        if self.all_omens_dead() {
+            self.after_last_claim += amount;
+        }
+    }
+
+    fn all_omens_dead(&self) -> bool {
+        self.k.omens.values().all(|o| o.death.is_some())
+    }
+
+    /// With `hold_back`, the NEAR of every payout that has not reported yet: the contract is made to treat it as not
+    /// its own, whether or not the refund of a failed one has come back.
+    fn held_back(&self) -> u128 {
+        if !self.hold_back {
+            return 0;
+        }
+        let pending = self.chains.iter().flat_map(|c| c.steps.iter());
+        pending.map(|s| if let Step::NearResolve { amount, .. } = s { *amount } else { 0 }).sum()
+    }
+
+    /// Delivers everything that is on its way, oldest chain first.
+    fn settle(&mut self) {
+        while let Some(i) = self.chains.iter().position(|c| !c.steps.is_empty()) {
+            self.deliver(i);
         }
     }
 
@@ -1790,7 +1849,7 @@ impl World {
         let results = result
             .map(|ok| vec![if ok { PromiseResult::Successful(vec![]) } else { PromiseResult::Failed }])
             .unwrap_or_default();
-        set_env(predecessor, self.near, self.now, results);
+        set_env(predecessor, self.near.saturating_sub(self.held_back()), self.now, results);
         let out = f(&mut self.k);
         self.news += u32::from(logged("in_flight_released"));
         let (mut steps, mut leaves) = scheduled();
@@ -1833,6 +1892,10 @@ impl World {
                 let _ = k.release_stale_in_flight();
             }),
             Op::TimeOut => self.now = IN_FLIGHT_TIMEOUT_NS,
+            Op::TopUp(amount) => {
+                self.pot_near += amount;
+                self.receive(*amount);
+            }
         }));
         match run {
             Err(e) => {
@@ -1852,22 +1915,26 @@ impl World {
                 let ok = !self.dead.contains(&to);
                 if ok {
                     *self.paid_near.entry(to).or_default() += amount;
-                } else if self.refund_may_come_first {
-                    // The refund and the callback are both made when the failed transfer is processed; with this on,
-                    // either may reach the contract first, and the explorer tries both.
+                } else if self.refund == RefundOrder::BeforeCallbackAnyTime {
+                    // The refund and the callback are both made when the failed transfer is processed; with this
+                    // order either may be delivered first, and the explorer tries both.
                     self.chains.push(Chain::new([Step::Refund(amount)]));
                 }
                 self.chains[i].last_ok = ok;
             }
             Step::NearResolve { to, amount } => {
                 let ok = self.chains[i].last_ok;
+                if !ok && self.refund == RefundOrder::JustBeforeCallback {
+                    self.near += amount; // the refund, delivered straight before the callback
+                }
                 self.call(&accounts(0), Some(ok), |k| k.on_near_payout(to, U128(amount)));
-                if !ok && !self.refund_may_come_first {
+                if !ok && self.refund == RefundOrder::AfterCallback {
                     self.chains.push(Chain::new([Step::Refund(amount)])); // after the callback
                 }
             }
-            Step::Register(amount) => self.chains.push(Chain::new([Step::Refund(amount)])),
+            Step::Register(amount) => self.chains.push(Chain::new([Step::DepositRefund(amount)])),
             Step::Refund(amount) => self.near += amount,
+            Step::DepositRefund(amount) => self.receive(amount),
             Step::Read => {
                 self.chains[i].snapshot = self.tok;
                 self.chains[i].news_at_read = self.news;
@@ -1936,7 +2003,7 @@ impl World {
             self.chains.iter().filter(|c| !c.steps.is_empty()).map(|c| format!("{c:?}")).collect();
         chains.sort();
         format!(
-            "{started}|{}|{}|{}|{owed:?}|{in_flight:?}|{}|{omens:?}|{chains:?}|{:?}|{:?}|{:?}|{}|{:?}|{}|{}",
+            "{started}|{}|{}|{}|{owed:?}|{in_flight:?}|{}|{omens:?}|{chains:?}|{:?}|{:?}|{:?}|{}|{:?}|{}|{}|{}",
             self.near,
             self.tok,
             self.now,
@@ -1947,7 +2014,8 @@ impl World {
             self.short,
             self.refuse,
             self.errors.len(),
-            self.news
+            self.news,
+            self.after_last_claim
         )
     }
 
@@ -1955,8 +2023,11 @@ impl World {
     fn broken(&self) -> Vec<String> {
         let mut out = self.errors.clone();
         let (near_out, usdc_out) = (self.paid_near.values().sum::<u128>(), self.paid_usdc.values().sum::<u128>());
-        if near_out > POT_NEAR || usdc_out > POT_USDC {
-            out.push(format!("paid out more than there was: {near_out} NEAR of {POT_NEAR}, {usdc_out} USDC of {POT_USDC}"));
+        if near_out > self.pot_near || usdc_out > POT_USDC {
+            out.push(format!(
+                "paid out more than there was: {near_out} NEAR of {}, {usdc_out} USDC of {POT_USDC}",
+                self.pot_near
+            ));
         }
         // USDC the contract has promised away (scheduled and unreported, or owed on a verified read) cannot be
         // more than the token holds, counting what it has already sent and the contract has not heard of.
@@ -1990,12 +2061,25 @@ impl World {
             for a in who {
                 self.start(&Op::Retry(a));
             }
-            while let Some(i) = self.chains.iter().position(|c| !c.steps.is_empty()) {
-                self.deliver(i);
-            }
+            self.settle();
         }
         if self.short > 0 && !self.overbooking_tolerated {
             out.push(format!("the token refused {} transfer(s) for want of tokens", self.short));
+        }
+        if self.all_omens_dead() {
+            // Every claim has been made, so nothing sweeps NEAR any more: what is on the contract beyond its storage
+            // reserve, its margin and what it owes was either sent after the last claim or left behind by a claim that
+            // took too little.
+            let owed_near: u128 = self.k.owed.values().map(|o| o.near).sum();
+            let kept = storage_reserve() + STORAGE_MARGIN.as_yoctonear();
+            let left = self.near.saturating_sub(kept).saturating_sub(owed_near);
+            if left > self.after_last_claim {
+                out.push(format!(
+                    "NEAR stuck: {left} sits on the contract beyond its reserve, margin and debts with every omen dead, \
+                     {} of it sent after the last claim",
+                    self.after_last_claim
+                ));
+            }
         }
         for (a, o) in self.k.owed.iter() {
             if o.usdc > 0 || o.usdc_unread {
@@ -2124,7 +2208,14 @@ fn w_owed_verified_usdc_deposit_refund_late() -> World {
 /// The same, but the refund of the failed transfer may reach the contract before the callback that books it.
 fn x_cannot_receive_near_refund_first() -> World {
     let mut m = x_cannot_receive_near();
-    m.refund_may_come_first = true;
+    m.refund = RefundOrder::BeforeCallbackAnyTime;
+    m
+}
+
+/// The same, with the refund delivered straight before the callback, in one step.
+fn x_cannot_receive_near_refund_just_before_its_callback() -> World {
+    let mut m = x_cannot_receive_near();
+    m.refund = RefundOrder::JustBeforeCallback;
     m
 }
 
@@ -2198,9 +2289,9 @@ fn claim_b(by: AccountId) -> Op {
     Op::Claim { omen: 1, by }
 }
 
-/// Every ordered pair of `pool`, started in that order, with every schedule of the steps they leave behind. Panics with
-/// the schedules that broke the books.
-fn matrix(make: fn() -> World, pool: &[Op]) {
+/// Every ordered pair of `pool`, started in that order, with every schedule of the steps they leave behind. Returns the
+/// schedules that broke the books, each with its pair, and the number of states visited.
+fn run_pairs(make: fn() -> World, pool: &[Op]) -> (Vec<String>, usize) {
     let (mut broken, mut states) = (Vec::new(), 0);
     for (i, first) in pool.iter().enumerate() {
         for (j, second) in pool.iter().enumerate().filter(|(j, _)| *j != i) {
@@ -2210,8 +2301,14 @@ fn matrix(make: fn() -> World, pool: &[Op]) {
             assert!(seen > 1, "pair {i}/{j} explored nothing");
         }
     }
-    assert!(broken.is_empty(), "{} schedule(s) broke the books:\n{}", broken.len(), broken.join("\n"));
     assert!(states >= pool.len() * (pool.len() - 1) * 3, "only {states} states: the model is not running the paths");
+    (broken, states)
+}
+
+/// `run_pairs`, which must find nothing. Panics with the schedules that broke the books.
+fn matrix(make: fn() -> World, pool: &[Op]) {
+    let (broken, _) = run_pairs(make, pool);
+    assert!(broken.is_empty(), "{} schedule(s) broke the books:\n{}", broken.len(), broken.join("\n"));
 }
 
 /// Two claims of different omens and `more`.
@@ -2257,21 +2354,90 @@ fn matrix_the_storage_deposit_refund_is_a_receipt_of_its_own() {
 
 #[test]
 fn a_refund_that_reaches_the_contract_before_its_callback_is_swept_by_the_next_claim() {
-    // KNOWN GAP, pinned. `on_near_payout` books a failed NEAR transfer as owed, and the refund that gives the money
-    // back is a receipt of its own. If the refund lands first, a claim that starts before the callback sees the
-    // refunded NEAR as free and pays it to someone else, and the callback then books a debt nothing backs. The
-    // contract is only right if the callback runs first; the model shows both orders and the contract passes one.
-    // When this contract is changed to hold the NEAR from the moment it is scheduled, this test must start failing,
-    // and `matrix_a_claimants_near_payout_fails_and_comes_back_owed` is then to be run with the refund free to come
-    // first (`x_cannot_receive_near_refund_first`).
-    let ops = [claim_a(x()), claim_b(y())];
-    let (bad, _) = explore(&x_cannot_receive_near_refund_first, &ops, 5);
+    // KNOWN GAP, pinned, and not closable inside the contract (docs/v3/KIZASHI-REFUND-ORDER.md). `on_near_payout` books a
+    // failed NEAR transfer as owed, and the refund that gives the money back is a receipt of its own. If the refund
+    // lands first and a claim is delivered before the callback, that claim sees the refunded NEAR as free and pays it to
+    // someone else, and the callback then books a debt nothing backs. The contract is right when the callback runs
+    // first, and right when nothing runs between the refund and the callback (the order nearcore creates them in).
+    // It is wrong for exactly one pair out of the pool below: a claim, then a claim of another omen.
+    // If a change makes this test fail, check it against `a_top_up_while_a_payout_is_on_its_way_is_swept_by_the_claim_that_follows`
+    // and `a_refund_and_an_equal_top_up_look_the_same_to_the_next_claim` before calling the gap closed.
+    let pool = pool(&[Op::Retry(x()), claim_a(y()), Op::Release]);
+    let (bad, _) = run_pairs(x_cannot_receive_near_refund_first, &pool);
+    let pair = format!("{:?} then {:?}: ", claim_a(x()), claim_b(y()));
+    assert!(bad.iter().all(|b| b.starts_with(&pair)), "a pair other than claim, claim broke the books: {bad:?}");
     assert!(
-        bad.iter().any(|b| b.contains("NEAR owed twice")),
+        bad.iter().any(|b| b[pair.len()..].starts_with("NEAR owed twice")),
         "the model did not find the debt that nothing backs: {bad:?}"
     );
-    let (bad, _) = explore(&x_cannot_receive_near, &ops, 5);
-    assert!(bad.is_empty(), "with the refund after the callback the same two claims break nothing: {bad:?}");
+    matrix(x_cannot_receive_near, &pool); // the refund after the callback: nothing breaks
+}
+
+/// Claim, a top-up, claim: the top-up lands while the first payout is on its way.
+fn a_top_up_between_two_claims() -> [Op; 3] {
+    [claim_a(x()), Op::TopUp(1_000_000_000_000_000_000_000_000), claim_b(y())]
+}
+
+#[test]
+fn a_top_up_while_a_payout_is_on_its_way_is_swept_by_the_claim_that_follows() {
+    let (bad, seen) = explore(&World::new, &a_top_up_between_two_claims(), 5);
+    assert!(bad.is_empty(), "{bad:?}");
+    assert!(seen > 10, "only {seen} states");
+}
+
+#[test]
+fn holding_back_the_unresolved_payout_closes_the_gap_and_strands_a_top_up() {
+    // The hold-back: while a NEAR payout has not reported, its amount is taken out of the balance the contract sees.
+    let held = |mut m: World| {
+        m.hold_back = true;
+        m
+    };
+    let (bad, _) = explore(&|| held(x_cannot_receive_near_refund_first()), &[claim_a(x()), claim_b(y())], 5);
+    assert!(bad.is_empty(), "the hold-back should close the gap: {bad:?}");
+    // The price: a top-up that lands in that window is held back as well, and when the claim that follows is the last
+    // one there is nobody left to sweep it. No payout failed in this fixture.
+    let (bad, _) = explore(&|| held(World::new()), &a_top_up_between_two_claims(), 5);
+    assert!(bad.iter().any(|b| b.contains("NEAR stuck")), "the model did not see NEAR stuck: {bad:?}");
+}
+
+#[test]
+fn a_refund_and_an_equal_top_up_look_the_same_to_the_next_claim() {
+    // Two worlds, alike for everything the contract can read. In R the first payout failed and its refund has come
+    // back. In T the first payout failed too but its refund is still on its way, and someone has sent the same amount.
+    // A refund is a plain transfer, no call, so nothing tells them apart. R must not pay that NEAR out (it is owed to
+    // the first claimant); T must (nobody else will ever sweep it).
+    let p = POT_NEAR;
+    let mut r = x_cannot_receive_near_refund_first();
+    r.start(&claim_a(x()));
+    r.deliver(0); // the transfer to x fails; its refund is a receipt of its own
+    r.deliver(1); // R: the refund reaches the contract, before the callback
+    let mut t = x_cannot_receive_near_refund_first();
+    t.start(&claim_a(x()));
+    t.deliver(0);
+    t.start(&Op::TopUp(p)); // T: a top-up of the same amount, the refund still on its way
+    let view = |w: &World| {
+        let owed: Vec<_> = w.k.owed.iter().map(|(a, o)| (a.clone(), o.near, o.usdc, o.usdc_unread)).collect();
+        let in_flight: Vec<_> = w.k.in_flight.iter().map(|f| (f.claimant.clone(), f.amount, f.at)).collect();
+        (w.near, owed, in_flight, w.k.usdc_epoch, w.now)
+    };
+    assert_eq!(view(&r), view(&t), "the two worlds must look alike to the contract");
+    r.start(&claim_b(y()));
+    t.start(&claim_b(y()));
+    let paid = |w: &World| w.chains.last().expect("the second claim scheduled its payout").steps.clone();
+    assert_eq!(paid(&r), paid(&t), "alike to the contract, so the second claim does the same in both");
+    assert_eq!(paid(&r).front(), Some(&Step::NearPay { to: y(), amount: p }), "and it sweeps the whole refund");
+    r.settle();
+    t.settle();
+    let (r_bad, t_bad) = (r.broken_at_rest(), t.broken_at_rest());
+    assert!(r_bad.iter().any(|b| b.contains("NEAR owed twice")), "R: {r_bad:?}");
+    assert!(t_bad.is_empty(), "T: {t_bad:?}");
+}
+
+#[test]
+fn matrix_the_refund_of_a_failed_payout_comes_just_before_its_callback() {
+    // Nearcore creates the refund before the callback's data receipt (docs/v3/KIZASHI-REFUND-ORDER.md) and delivers the
+    // two one after the other: in this order the books balance for every pair of transactions.
+    matrix(x_cannot_receive_near_refund_just_before_its_callback, &pool(&[Op::Retry(x()), claim_a(y()), Op::Release]));
 }
 
 #[test]
