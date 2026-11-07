@@ -2,25 +2,77 @@
 
 # KAIGEN: Keys that retire themselves
 
-> **v3: testnet only, measured in a single-validator sandbox, no audit, not on mainnet.** A NEAR account whose hot keys cap themselves and burn after repeated refusals. The admin key is meant to be a post-quantum ML-DSA-65 key. The v3 sandbox used an ed25519 stand-in.
+KAIGEN is an on-chain vault for an AI agent's NEAR account: the agent holds only a function-call key, the contract caps what that key can move in any 24 hours at the cap plus the pending limit (11 times the cap at the default setting), and after three counted bad requests the contract schedules a DeleteKey for that key. [LOSS-BOUND.md section 1 and line 23; ATTEST-CHECK.md section 4; ATTACK-RESULTS.md section 11.1]
 
-KAIGEN is a set of NEAR smart contracts and Node tooling for accounts that defend their hot keys. The account keeps an admin key. Any number of hot keys (for a person or an AI agent) are function-call keys. Each hot key is limited by a per-token cap over 24 hours, a queue with a delay for larger sends, an optional allowlist, and a strike count that deletes the key after repeated refusals.
+**Status: testnet only.** No outside audit. Nothing has run on mainnet. Sandbox numbers come from one local single-validator node, with an ed25519 admin key standing in for the ML-DSA-65 admin. [ROADMAP.md section 3; ATTACK-RESULTS.md section 0]
 
-An optional omen contract (Kizashi) lets anyone who discloses a break of a classical curve trigger a lockdown of opted-in vaults. The omen path has no oracle. Kizashi keeps an admin until its own lock, which is not done. [ARCHITECTURE.md section 1; THREAT-MODEL.md section 6; ROADMAP.md section 1 item 8]
+[Source Code](https://github.com/Andrew-Kevin-007/KAIGEN). No hosted demo; the app runs locally (see Getting Started). Design documents for v3 are in [docs/v3/](docs/v3/README.md).
 
-**Status (v3, 2026-11-03).**
+## Try it (no keys, no chain, no wallet)
 
-- Testnet only. No outside audit. Nothing is deployed to mainnet. KAIGEN has not run on mainnet. [ROADMAP.md section 3]
-- The v3 numbers come from one single-validator nearcore 2.14.0 sandbox (protocol 88, 128 ms blocks). The vault admin was an ed25519 key standing in for ML-DSA. [ATTACK-RESULTS.md section 0]
-- The timed attacks used a fast-forwarded chain clock. [ATTACK-RESULTS.md section 14]
-- The hash-pinned global contract for Mamori (M6): tooling is built. On testnet protocol 88 the mechanism is proven with a 1,024-byte module (publish, create and attach accepted; global_contract_hash equals the published hash). The real Mamori publish is not run. Init in the same transaction as the attach is not exercised. Mainnet availability is unconfirmed. [GLOBAL-CONTRACT.md sections 3, 6a and 7; MAINNET-READS.md]
-- Testnet rehearsal (`testnet` and `zerokey`) passed twice: on commit 5107d48, then on the final build with the stretch items (commit cb62c80). On 2026-11-07 and 2026-11-08, `stretchdrill` ran all eight steps of the stretch items on a real testnet chain (drill vault, 10 s delay): the safe account, `sweep_to_safe` and its refusals, the policy path with a separate policy account, `cage-check` (ATTEST-2 is red by design on a drill build), the watcher path, the three other `propose_*` methods applied by a stranger, and a NEP-141 sweep with a look-alike token fixture, including the `sweep_failed` path. All eight passed. A production-mode vault (`prodvault`, 24 h delay) is on testnet: cage-check is GREEN on all 15 conditions, and RED on a planted full-access key until that key is removed. [TESTNET-REHEARSAL.md, second and third runs]
-- The Create vault page (`app/app/vault/create/`) has not been run against a chain, as far as the repository records show. It is enabled on testnet only.
-- v2 was deployed as drill records on testnet [LANDSCAPE.md section 3]. v3 drill and production-mode vaults were deployed on testnet by the rehearsal commands, on 2026-11-04 and 2026-11-07 [TESTNET-REHEARSAL.md].
+Needs Node 22.18 or later (24 recommended) and, for step 2, Rust via rustup (the repo pins 1.99.1 and fetches it). No keys, no funder file, no WSL, no `out/` folder. On Windows, run `set AWS_LC_SYS_PREBUILT_NASM=1` (PowerShell: `$env:AWS_LC_SYS_PREBUILT_NASM=1`) before step 2 if the build asks for NASM; Linux and macOS need nothing extra. Clone with LF line endings (default on Linux and macOS). Steps 1 and 2 download packages, crates and the pinned toolchain only. Step 3 reads a public testnet vault over RPC, read-only, and holds no key.
 
-[Source Code](https://github.com/Andrew-Kevin-007/KAIGEN). There is no live demo yet; the app runs locally (see Getting Started).
+```sh
+# 1. install (about 30 s). jobs/ imports scripts/, so both need their packages
+(cd scripts && npm ci) && (cd jobs && npm ci)
 
-Design documents for v3 are in [docs/v3/](docs/v3/README.md). The v2 to v3 change list, including the breaking change, is in [docs/v3/CHANGES-V2-TO-V3.md](docs/v3/CHANGES-V2-TO-V3.md).
+# 2. the headline scene, offline: an injected agent is refused three times, then its key is burned (about 2.5 min cold)
+cargo test -p mamori demo_story -- --nocapture
+#   ...  [4] REFUSED  ... strike 3/3 | KEY BURNED
+#   ...  [6] REFUSED  the burned key's next attempt: not a recorded daily key
+#   ...  HELD: 0.1 NEAR moved, all 3 attacks refused, the key is gone
+#   ...  test result: ok. 1 passed; 0 failed
+
+# 3. check a live testnet vault, read-only, no keys (1.5 s)
+node jobs/src/bin.mjs cage-check pv-45cbcb96.kaigen-funder-ee0d56.testnet --rpc https://rpc.testnet.fastnear.com \
+  --admin ml-dsa-65-hash:BrXHPEEZqnGA3x39K381CKgNG3o1gH9i8x1pCEBMuCdo --code-hash AoxPd3zABfzDRoPsE14ReAzMrzq5o5rMFj8FZXn9zKoQ
+#   ...  GREEN: all 15 conditions hold.      (exit code 0)
+
+# 4. the rest of the suite
+(cd jobs && node --test test/*.test.mjs)     # at least 373 tests, 372 pass, 1 skipped (needs built artifacts), about 13 s
+(cd scripts && node --test *.test.mjs)       # at least 20 tests, 19 pass, 1 skipped
+cargo test --workspace                       # kizashi at least 104, mamori at least 231, about 2.5 min cold
+```
+
+## Live on testnet
+
+Point in time: re-run before relying on it. The explorer pages sit behind a browser check that automated tools cannot pass, so these links were not opened by the author's tooling.
+
+| Account | What it is | Explorer |
+| --- | --- | --- |
+| `pv-45cbcb96.kaigen-funder-ee0d56.testnet` | Production-mode vault: production wasm, 24 h delay, ML-DSA-only admin, cage-check GREEN on 15 conditions | https://testnet.nearblocks.io/address/pv-45cbcb96.kaigen-funder-ee0d56.testnet |
+| `vault.kaigen-funder-a00266.testnet` | Drill vault: drill build, 10 s delay, drill omens; used by the stretch run | https://testnet.nearblocks.io/address/vault.kaigen-funder-a00266.testnet |
+| `kizashi.kaigen-funder-a00266.testnet` | Drill Kizashi: drill omens, no production omens | https://testnet.nearblocks.io/address/kizashi.kaigen-funder-a00266.testnet |
+
+Cage-check for the production-mode vault is the step 3 command above. [TESTNET-REHEARSAL.md third run]
+
+## What is proven, where
+
+| Claim | Where to check | Result |
+| --- | --- | --- |
+| Headline scene, offline | `cargo test -p mamori demo_story -- --nocapture`; [contracts/mamori/src/tests/demo_story.rs](contracts/mamori/src/tests/demo_story.rs) | Real contract code in the NEAR unit VM. The DeleteKey receipt is scheduled, not executed (executed on chain below). |
+| Nine scripted attacks, measured | [docs/v3/ATTACK-RESULTS.md](docs/v3/ATTACK-RESULTS.md) | Sandbox only. Attack 2 loses exactly one cap (1 NEAR) with zero strikes. Attack 1 moves 0 NEAR to the attacker. |
+| Loss bound | [docs/v3/LOSS-BOUND.md](docs/v3/LOSS-BOUND.md) sections 4 and 5 | Property tests check the bound after every step; mutation checks show each condition is needed. |
+| Testnet rehearsal and zero-key Kizashi | [docs/v3/TESTNET-REHEARSAL.md](docs/v3/TESTNET-REHEARSAL.md), 2026-11-04 runs | Ten defence steps held on chain; the burned key was removed and then refused. |
+| Stretch items on a real chain | Same file, "Third run" section | Eight steps passed on a drill vault with a 10 s delay. |
+| cage-check red and green with a planted key | Same file, third run; [ATTACK-RESULTS.md](docs/v3/ATTACK-RESULTS.md) attack 8 | A planted ed25519 full-access key turns cage-check RED (ARCH-2.8-1); removing it returns GREEN. |
+| 90-second demo script | [docs/v3/DEMO-SCRIPT.md](docs/v3/DEMO-SCRIPT.md) | Shot list, commands, numbers to read out, and the caveat it must say aloud. |
+
+## What is NOT proven
+
+- No outside audit. [ROADMAP.md section 3]
+- Testnet only. Mainnet availability of the global-contract mechanism is unconfirmed. [GLOBAL-CONTRACT.md section 7]
+- The real Mamori global-contract publish was not run; the mechanism was shown with a 1,024-byte module. [GLOBAL-CONTRACT.md sections 6a and 7]
+- Sandbox attacks use an ed25519 admin stand-in. The ML-DSA admin flow is not covered by these numbers. [ATTACK-RESULTS.md sections 0 and 13]
+- The live rehearsal used drill builds (10 s delay, drill omens). The production-mode vault had no withdrawal, strike or fire test. [TESTNET-REHEARSAL.md third run]
+- Peer projects were not run, so this README makes no comparison with them. [README.md, Limits of these numbers]
+- The Kizashi refund-ordering gap is documented and unfixed: a refund that reaches the contract before its callback, with a claim in between, can book NEAR owed twice. [KIZASHI-REFUND-ORDER.md]
+
+## Track
+
+**Track:** AI Security & Defense. The entry covers function-call access keys, an attack demo with a log, a recipient allowlist as the counterparty check (off by default), and the vault as the last line. The Kizashi omen bounty is an optional extra, not the headline. [LOSS-BOUND.md section 1; THREAT-MODEL.md section 6]
+
+## Reference
 
 ---
 
