@@ -70,7 +70,7 @@ Cage-check for the production-mode vault is the step 3 command above. [TESTNET-R
 
 ## Track
 
-**Track:** AI Security & Defense. The entry covers function-call access keys, an attack demo with a log, a recipient allowlist as the counterparty check (off by default), and the vault as the last line. The Kizashi omen bounty is an optional extra, not the headline. [LOSS-BOUND.md section 1; THREAT-MODEL.md section 6]
+**Track:** AI Security & Defense. The entry covers function-call access keys, an attack demo with a log, a read-only counterparty check (`node jobs/src/bin.mjs counterparty <vault> <to>`: account age, contract and recent code change, past payments and a blocklist with evidence; a signal it cannot read counts as a warning, never as a pass; advisory only [docs/v3/COUNTERPARTY.md](docs/v3/COUNTERPARTY.md)), a recipient allowlist enforced by the contract (off by default), and the vault as the last line. The Kizashi omen bounty is an optional extra, not the headline. [LOSS-BOUND.md section 1; THREAT-MODEL.md section 6]
 
 ## Reference
 

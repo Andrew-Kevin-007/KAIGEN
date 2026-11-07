@@ -29,3 +29,6 @@ data/
 docs/internal/
 
 .kaigen-testnet*/
+
+# Shared counterparty blocklist (jobs/src/counterparty.mjs): local reports, never committed
+data/blocklist.json

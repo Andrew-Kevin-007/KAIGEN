@@ -12,6 +12,10 @@
 //              (dry run unless --yes; needs the rehearsal that `testnet` provisioned, KAIGEN_TESTNET_DIR)
 //   cage-check read-only: is the cage around a vault intact? RED or GREEN per condition of docs/v3/ARCHITECTURE.md 2.8
 //              (exit 1 on any red, 3 when something could not be checked; run it with no arguments for the options)
+//   counterparty <vault> <to>  read-only advisory check before an agent pays: allow, warn or block, with every reason and, per signal, its
+//              data source and whether it was known or unknown (exit 0 allow, 1 block, 3 warn or mostly unknown, 2 usage)
+//   counterparty-report <account> --reason <text> --evidence <url-or-tx>  append to the shared blocklist file (KAIGEN_BLOCKLIST,
+//              default data/blocklist.json); the only command here that writes, and only to that file
 //   globalcontract  testnet only (M6): publish Mamori as a global contract BY CODE HASH, create a vault and attach it with
 //              init in the same transaction, verify over RPC (dry run unless --yes; run it with no arguments for the options)
 //              `globalcontract publish --wasm <file>`: publish-only, any valid wasm, no init, prints the MEASURED cost
@@ -32,10 +36,11 @@ import { fileURLToPath } from "node:url";
 import { productionOmens } from "../../scripts/omens.mjs";
 import { CAGE_USAGE, cageCheck, CageUsage, exitCodeOf, parseCageArgs, renderCage } from "./cage.mjs";
 import { adminCanceller, agentCaller, classicalSubmitter, loadDeployerKey, makeDrillChain, makeSendTrip } from "./chain.mjs";
+import { addReport, assessCounterparty, COUNTERPARTY_USAGE, CounterpartyUsage, exitCodeOf as counterpartyExitCode, loadBlocklist, looksLikeEvidence, parseCounterpartyArgs, parseReportArgs, renderCounterparty } from "./counterparty.mjs";
 import { renderDemo, runInjectionDemo } from "./demo.mjs";
 import { mainnetHelp } from "./help.mjs";
 import { judge, renderJudge } from "./judge.mjs";
-import { provision, recycle, rehearse, renderRehearsal, zeroKey } from "./testnet.mjs";
+import { provision, recycle, rehearse, renderRehearsal, TESTNET_RPC, zeroKey } from "./testnet.mjs";
 import { renderZeroKey, runFireTest, ZeroKeyError } from "./firetest.mjs";
 import { defaultSeedFile, describeWasm, GLOBAL_USAGE, GlobalUsage, parseGlobalArgs, planGlobalContract, measurePublishTx, planPublishOnly, renderMeasured, renderRun, runGlobalContract, verifyVault } from "./globalcontract.mjs";
 import { adminSigner, loadFunder, makeSender, newClassicalKey } from "./globaltx.mjs";
@@ -258,6 +263,64 @@ ${text}`);
     const result = await cageCheck({ rpc: makeRpc(url), account: opts.account, policy: opts.policy });
     console.log(opts.json ? JSON.stringify(result, null, 2) : renderCage(result));
     process.exitCode = exitCodeOf(result);
+  },
+
+  /** Read-only, advisory. Does not need deployments.json when --rpc or KAIGEN_RPC is given. See counterparty.mjs and docs/v3/COUNTERPARTY.md. */
+  async counterparty() {
+    let o;
+    try {
+      o = parseCounterpartyArgs(process.argv.slice(3));
+    } catch (e) {
+      if (!(e instanceof CounterpartyUsage)) throw e;
+      console.error(`${e.message}\n${COUNTERPARTY_USAGE}`);
+      process.exitCode = 2;
+      return;
+    }
+    const dep = fs.existsSync(depPath) ? JSON.parse(fs.readFileSync(depPath, "utf8")) : {};
+    const url = o.rpc ?? process.env.KAIGEN_RPC ?? dep.rpc ?? (dep.network === "testnet" ? TESTNET_RPC : undefined);
+    if (!url) {
+      console.error(`no RPC url: pass --rpc, set KAIGEN_RPC or set rpc in ${depPath}\n${COUNTERPARTY_USAGE}`);
+      process.exitCode = 2;
+      return;
+    }
+    const archivalUrl = o.archival ?? process.env.KAIGEN_ARCHIVAL_RPC ?? dep.archivalRpc;
+    const rpc = makeRpc(url);
+    const result = await assessCounterparty({
+      rpc,
+      // Fewer retries than the default: an archival node answers some old heights with a 500, which a long retry loop would only turn into a wait.
+      archival: archivalUrl && archivalUrl !== url ? makeRpc(archivalUrl, { retries: 4, backoffMs: 1000 }) : rpc,
+      vault: o.vault,
+      to: o.to,
+      history: o.history,
+      blocklist: loadBlocklist(process.env.KAIGEN_BLOCKLIST ?? path.join(dataDir, "blocklist.json")),
+    });
+    console.log(o.json ? JSON.stringify(result, null, 2) : renderCounterparty(result, { to: o.to, vault: o.vault }));
+    process.exitCode = counterpartyExitCode(result);
+  },
+
+  /** Appends one report to the shared blocklist file. The evidence is required. */
+  async "counterparty-report"() {
+    let o;
+    try {
+      o = parseReportArgs(process.argv.slice(3));
+    } catch (e) {
+      if (!(e instanceof CounterpartyUsage)) throw e;
+      console.error(`${e.message}\n${COUNTERPARTY_USAGE}`);
+      process.exitCode = 2;
+      return;
+    }
+    const file = process.env.KAIGEN_BLOCKLIST ?? path.join(dataDir, "blocklist.json");
+    let entry;
+    try {
+      entry = addReport({ file, ...o, reportedBy: o.reportedBy ?? process.env.KAIGEN_REPORTER });
+    } catch (e) {
+      if (!(e instanceof CounterpartyUsage)) throw e;
+      console.error(`${e.message}\n${COUNTERPARTY_USAGE}`);
+      process.exitCode = 2;
+      return;
+    }
+    if (!looksLikeEvidence(entry.evidence)) console.error("note: the evidence is neither an http(s) URL nor a transaction hash; it was stored exactly as given");
+    console.log(`reported ${entry.account} in ${file}: ${entry.reason} (evidence: ${entry.evidence}; by ${entry.reportedBy}; ${entry.reportedAt})`);
   },
 
   /**
@@ -617,7 +680,7 @@ DRY RUN: nothing was signed or sent. To do it for real (testnet, drill vault, a 
 
 const cmd = process.argv[2];
 if (!commands[cmd]) {
-  console.error("usage: kaigen-jobs hinomi | keeper [--loop] | watch | firetest | demo | testnet | recycle | zerokey [--yes] | judge | verify [--release [--pre-lock]] | cage-check <account> | globalcontract [publish --wasm <file>] --kizashi <account> [--yes] | prodvault --kizashi <account> --funder-file <file> [--yes] | plant-key <vault> --kind ed25519-full|null-allowance [--remove <publickey>] [--yes] | stretchdrill [--safe <account>] [--yes] | mainnet gates|plan|execute|lock");
+  console.error("usage: kaigen-jobs hinomi | keeper [--loop] | watch | firetest | demo | testnet | recycle | zerokey [--yes] | judge | verify [--release [--pre-lock]] | cage-check <account> | counterparty <vault> <to> | counterparty-report <account> --reason <text> --evidence <url-or-tx> | globalcontract [publish --wasm <file>] --kizashi <account> [--yes] | prodvault --kizashi <account> --funder-file <file> [--yes] | plant-key <vault> --kind ed25519-full|null-allowance [--remove <publickey>] [--yes] | stretchdrill [--safe <account>] [--yes] | mainnet gates|plan|execute|lock");
   process.exit(2);
 }
 commands[cmd]().catch((e) => {
