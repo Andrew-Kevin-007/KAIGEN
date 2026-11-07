@@ -14,7 +14,7 @@ An optional omen contract (Kizashi) lets anyone who discloses a break of a class
 - The v3 numbers come from one single-validator nearcore 2.14.0 sandbox (protocol 88, 128 ms blocks). The vault admin was an ed25519 key standing in for ML-DSA. [ATTACK-RESULTS.md section 0]
 - The timed attacks used a fast-forwarded chain clock. [ATTACK-RESULTS.md section 14]
 - The hash-pinned global contract for Mamori (M6): tooling is built. On testnet protocol 88 the mechanism is proven with a 1,024-byte module (publish, create and attach accepted; global_contract_hash equals the published hash). The real Mamori publish is not run. Init in the same transaction as the attach is not exercised. Mainnet availability is unconfirmed. [GLOBAL-CONTRACT.md sections 3, 6a and 7; MAINNET-READS.md]
-- Testnet rehearsal (`testnet` and `zerokey`) passed twice: on commit 5107d48, then on the final build with the stretch items (commit cb62c80). The sweep and policy paths were not called on chain. [TESTNET-REHEARSAL.md]
+- Testnet rehearsal (`testnet` and `zerokey`) passed twice: on commit 5107d48, then on the final build with the stretch items (commit cb62c80). On 2026-11-07, `stretchdrill` ran the stretch items on a real testnet chain (drill vault, 10 s delay): the sweep moved exactly its amount to the safe account, the refusals held, and `apply` ran only after the delay. A production-mode vault (`prodvault`, 24 h delay) is on testnet: cage-check is GREEN on all 15 conditions, and RED on a planted full-access key until that key is removed. [TESTNET-REHEARSAL.md, second and third runs]
 - The Create vault page (`app/app/vault/create/`) has not been run against a chain. It is enabled on testnet only.
 - v2 was deployed as drill records on testnet. v3 has no testnet deployment in the sources. [LANDSCAPE.md section 3]
 
@@ -321,12 +321,12 @@ These traces were written by us. They are not recorded agent behaviour. The mist
 
 ### Limits of these numbers
 
-- Testnet was not run. Mainnet was not run. Every number is from one sandbox. Block counts carry over to testnet. The chain-millisecond figures do not. [ATTACK-RESULTS.md section 13]
+- The attack numbers were not run on testnet. Mainnet was not run. Every attack number is from one sandbox; the testnet rehearsal is a separate record. Block counts carry over to testnet. The chain-millisecond figures do not. [ATTACK-RESULTS.md section 13]
 - The admin was ed25519. The ML-DSA admin flow is not covered by these numbers. [ATTACK-RESULTS.md section 13]
 - Not exercised on a chain: eight daily keys at once, registered intents keys, a non-NEAR token in the queue, the failed-transfer refund and requeue paths (covered by unit and property tests only), and the ML-DSA admin. [ATTACK-RESULTS.md section 13]
 - The timed attacks (2c, 5, 9b, and the strike lapse) moved the chain clock by a day with `sandbox_fast_forward`. The contract reads that clock, so the 24 h rules were exercised without waiting. [ATTACK-RESULTS.md section 14]
 - Admin response time (a person noticing and acting) was not measured. [ATTACK-RESULTS.md section 13]
-- The stretch items (policy path and `sweep_to_safe`) were not run on a chain. The testnet rehearsal does not call `sweep_to_safe` or `propose_*`. [LOSS-BOUND.md section 9.5; TESTNET-REHEARSAL.md]
+- The stretch items (policy path and `sweep_to_safe`) ran on a testnet chain on 2026-11-07, on a drill vault with a 10 s delay (`stretchdrill`). Not run on a chain: the watcher path, a NEP-141 sweep, three of the four `propose_*` methods, and a separate policy account with its own key. The drill delay is not the production 24 h. [LOSS-BOUND.md section 9.5; TESTNET-REHEARSAL.md third run]
 - Leash and near-agent-spend-guard were not run. This README makes no comparison with them. Running their code is for the owner to do. [ROADMAP.md M9; README.md]
 
 ---
@@ -418,7 +418,7 @@ Line numbers were removed. They moved when v3 was added. Use function names. For
 - cage-check is a point-in-time check. It cannot see a key added one block later. Row 2 (exactly one ML-DSA admin key) is UNKNOWN when the admin is given as a full key, because the hash format is not in the sources. [V3-W2-CAGE-PROGRESS.md; ARCHITECTURE.md section 2.8]
 - cage-check does not check `intents.near` for keys that were not recorded. Method names are unconfirmed (G4). [V3-W2-CAGE-PROGRESS.md]
 - Kizashi: a reservation released by the 10 minute timeout can still be double-spent by a read ordered after the release. This is documented, not fixed. [V3-KIZASHI-PROGRESS.md step 3]
-- Kizashi: a NEAR refund that beats its callback can let a second claim sweep refunded NEAR, while the callback books an unbacked debt. This is unfixed and pinned by a test. nearcore's real receipt order was not checked. [docs/internal/V3-OPEN-KIZASHI-PROGRESS.md step 5]
+- Kizashi: a NEAR refund that beats its callback can let a second claim sweep refunded NEAR, while the callback books an unbacked debt. This is pinned by a test and deliberately not fixed in the contract: a hold-back fix strands a top-up and adds state, and a refund and an equal top-up look the same to the contract. nearcore master creates a failed transfer's refund receipt before the callback's data receipt, but no NEAR docs page promises that nothing runs between them. The order was read in source, not checked on a chain. The Kizashi wasm is unchanged (104 default and 105 drill tests). [KIZASHI-REFUND-ORDER.md; docs/internal/V3-OPEN-KIZASHI-PROGRESS.md step 5]
 
 **Known gaps from the code and review (open or partly open).** Rows marked UNVERIFIED are from the old v2 README and are not in the v3 sources.
 
@@ -451,7 +451,7 @@ Line numbers were removed. They moved when v3 was added. Use function names. For
 - Mainnet deployment, the mainnet drill pair, and the production Kizashi lock. [ROADMAP.md section 3]
 - Hash-pinned global contract for Mamori (M6, gate G2). Tooling built. Proven on testnet with a 1,024-byte module only. The real Mamori publish and mainnet are not run. [GLOBAL-CONTRACT.md sections 6a and 7; ROADMAP.md section 2]
 - A production withdrawal delay (owner decision). The floor is 24 h. [CHANGES-V2-TO-V3.md]
-- Policy-key split and `sweep_to_safe` are built (commit cb62c80; unit and property tested, not run on a chain). Design: [STRETCH-DESIGN.md](docs/v3/STRETCH-DESIGN.md). Sentinel and yield hold: stretch items, not promised. The fallback tag `v3-core-testnet` (pushed) points at d4342c0, one commit before the M6 tooling commit fe8d9d9. [git status; git ls-remote --tags; ARCHITECTURE.md section 6; ROADMAP.md section 2]
+- Policy-key split and `sweep_to_safe` are built (commit cb62c80; unit and property tested; run on a testnet drill vault on 2026-11-07, with the limits listed above). Design: [STRETCH-DESIGN.md](docs/v3/STRETCH-DESIGN.md). Sentinel and yield hold: stretch items, not promised. The fallback tag `v3-core-testnet` (pushed) points at d4342c0, one commit before the M6 tooling commit fe8d9d9. [git status; git ls-remote --tags; ARCHITECTURE.md section 6; ROADMAP.md section 2]
 - The Create vault page is in `app/app/vault/create/`. It has not been run against a chain. `<!-- UNVERIFIED in v3 sources: "enabled on testnet only, mainnet stays off" -->`
 - A signed gate file for `make verify`. `<!-- UNVERIFIED in v3 sources -->`
 - The landing page in `site/` is being redesigned. It is described here only as the landing page. `<!-- UNVERIFIED in v3 sources -->`
@@ -541,13 +541,13 @@ cd site && npm run dev       # landing page
 ```sh
 cargo test -p mamori                       # 230 tests (default, after the stretch items)
 cargo test -p mamori --features drill      # 226 tests (drill)
-cargo test -p kizashi                      # 88 tests
-cargo test -p kizashi --features drill     # 89 tests
-cd jobs && node --test test/*.test.mjs     # 210 tests
+cargo test -p kizashi                      # 104 tests
+cargo test -p kizashi --features drill     # 105 tests
+cd jobs && node --test test/*.test.mjs     # 358 tests (2 skipped)
 cargo test -p mamori loss_bound::the_loss_bound -- --nocapture   # the property test (about 15 s)
 ```
 
-Mamori counts are from LOSS-BOUND.md section 9.4 (2026-11-04). Other counts are from the progress logs: [V3-W2-EDITH-PROGRESS.md; V3-KIZASHI-PROGRESS.md; V3-W2-CAGE-PROGRESS.md]. Re-run to confirm. The Windows PowerShell form sets `$env:PATH` to the toolchain and `$env:AWS_LC_SYS_PREBUILT_NASM='1'` first. [LOSS-BOUND.md section 4]
+Mamori counts are from LOSS-BOUND.md section 9.4 (2026-11-04). Kizashi counts are from KIZASHI-REFUND-ORDER.md (2026-11-07). The jobs count is from the owner's run of 2026-11-07. Other counts are from the progress logs: [V3-W2-EDITH-PROGRESS.md; V3-KIZASHI-PROGRESS.md; V3-W2-CAGE-PROGRESS.md]. Re-run to confirm. The Windows PowerShell form sets `$env:PATH` to the toolchain and `$env:AWS_LC_SYS_PREBUILT_NASM='1'` first. [LOSS-BOUND.md section 4]
 
 Sandbox tests (need WSL and the sandbox running):
 
@@ -577,6 +577,17 @@ The drill build for testnet (`out/drill`) is not in the Makefile. The Cargo feat
 
 Redeploy note. v3 vaults and v3 Kizashi instances must be deployed fresh. v2 instances cannot be upgraded in place. The v2 code is at the tag `v2-testnet`. [CHANGES-V2-TO-V3.md section 1]
 
+### Testnet and check commands
+
+Testnet only. Each command below is a dry run unless it is given `--yes`, except `cage-check`, which only reads. Run from the repository root. [jobs/src/bin.mjs header and usage; prodvault.mjs, plantkey.mjs, stretchdrill.mjs and cage.mjs usage text]
+
+- `zerokey [--yes]`: a rehearsal Kizashi deletes its own full-access key, then the claim, reset and view checks run.
+- `globalcontract publish --wasm <file> [--yes]`: publishes any valid wasm as a global contract by code hash, with no init, and prints the measured cost. `globalcontract --kizashi <account> [--yes]` publishes Mamori as a global contract and attaches it to a new vault (M6).
+- `prodvault --kizashi <account> --funder-file <file> [--yes]`: makes a production-build vault (24 h delay, ML-DSA-only admin, one agent key, one allowlisted supplier) and runs cage-check on it.
+- `plant-key <vault> --kind ed25519-full|null-allowance [--yes]`, or `plant-key <vault> --remove <publickey> [--yes]`: plants a key the cage must not have, or removes one, signed by the vault's ML-DSA admin seed.
+- `stretchdrill [--safe <account>] [--yes]`: runs the stretch items (safe account, `sweep_to_safe`, policy proposals) on the drill rehearsal vault.
+- `cage-check <account> [--rpc <url>] [--wasm <file>]`: read-only. Prints GREEN, RED or UNKNOWN per condition. Exit 0 GREEN, 1 RED, 3 UNKNOWN.
+
 ---
 
 ## Judge demo
@@ -585,10 +596,10 @@ Steps 1 and 2 need no funds and no chain. Step 4 needs one funded testnet accoun
 
 | # | Do this | You should see |
 | --- | --- | --- |
-| 1 | `cargo test -p mamori` and `cargo test -p kizashi`, then `cd jobs && node --test test/*.test.mjs` | Every suite ends with `0 failed`. Counts at the last recorded run: Mamori 230 (226 drill), Kizashi 88 (89 drill), jobs 210. [progress logs] |
+| 1 | `cargo test -p mamori` and `cargo test -p kizashi`, then `cd jobs && node --test test/*.test.mjs` | Every suite ends with `0 failed`. Counts at the last recorded run: Mamori 230 (226 drill), Kizashi 104 (105 drill), jobs 358 (2 skipped). [KIZASHI-REFUND-ORDER.md; owner's run, 2026-11-07; progress logs] |
 | 2 | `node jobs/src/bin.mjs judge` `<!-- UNVERIFIED in v3 sources -->` | A report of PASS or SKIPPED per claim, with the evidence line. It writes `judge-report.json`. A check that cannot run is SKIPPED with the reason, never PASS. |
 | 3 | Open `fire-tests/0003.json` `<!-- UNVERIFIED in v3 sources; v2 record -->` | Claim, trip, post-quantum send and re-arm transactions for a v2 drill vault. |
-| 4 | `node jobs/src/bin.mjs testnet` `<!-- UNVERIFIED in v3 sources; v2 rehearsal, needs out/drill and a funder file -->` | PASS or FAIL per step. Not run for v3. |
+| 4 | `node jobs/src/bin.mjs testnet` `<!-- UNVERIFIED in v3 sources; v2 rehearsal, needs out/drill and a funder file -->` | PASS or FAIL per step. Run for v3 on 2026-11-04 (twice), and `stretchdrill` on 2026-11-07 [TESTNET-REHEARSAL.md]. |
 | 5 | Sandbox: `tests-integration\sandbox\start.ps1`, then the attack suite (see Test) | Nine attacks, each PASS or FAIL, with the measured numbers in `docs/v3/ATTACK-RESULTS.md`. |
 | 6 | `node jobs/src/bin.mjs cage-check <account>` (add `--stand-in-admin` on the sandbox) | GREEN, RED or UNKNOWN per row. Exit 0 GREEN, 1 RED, 3 UNKNOWN. |
 | 7 | `cd app && npm run dev`, open `/migrate` `<!-- UNVERIFIED in v3 sources -->` | An admin key is made in the browser, and an encrypted backup is required before anything else. |

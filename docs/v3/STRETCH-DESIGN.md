@@ -1,6 +1,6 @@
 # KAIGEN v3 stretch items as built: the policy-key split and `sweep_to_safe`
 
-Status: 2026-11-04. Code: `contracts/mamori/src/lib.rs`. Tests: `src/tests/sweep.rs`, `src/tests/policy.rs`, and the extended `src/tests/loss_bound.rs`, `admin_surface.rs`, `attest_check.rs`. Unit-test VM only: nothing here ran on a chain, no sandbox, no testnet, no mainnet. No audit. Nothing is committed. Sources of the design: ROADMAP.md (stretch row, Q2, Q5), ARCHITECTURE.md (2.2, 2.8, 5, 6), THREAT-MODEL.md, LOSS-BOUND.md, ATTEST-CHECK.md. Where the owner decided a question (the safe account), the decision is applied as given; where the docs left a choice open, the most conservative reading was taken and is listed below with the reason and the attack it prevents.
+Status: 2026-11-04. Code: `contracts/mamori/src/lib.rs`. Tests: `src/tests/sweep.rs`, `src/tests/policy.rs`, and the extended `src/tests/loss_bound.rs`, `admin_surface.rs`, `attest_check.rs`. Unit-test VM until 2026-11-07, when the owner ran `sweep_to_safe` and the policy path on a testnet drill vault with `stretchdrill` (10 s delay) [TESTNET-REHEARSAL.md, third run]. No sandbox run, no mainnet. No audit. Nothing is committed. Sources of the design: ROADMAP.md (stretch row, Q2, Q5), ARCHITECTURE.md (2.2, 2.8, 5, 6), THREAT-MODEL.md, LOSS-BOUND.md, ATTEST-CHECK.md. Where the owner decided a question (the safe account), the decision is applied as given; where the docs left a choice open, the most conservative reading was taken and is listed below with the reason and the attack it prevents.
 
 ## 1. What exists
 
@@ -57,7 +57,7 @@ Each row: the choice, the reason, the attack it prevents, and what was eliminate
 
 ## 4. Unverified and residual
 
-* **Nothing ran on a chain.** A real receipt order, the gas of `apply` and `sweep_to_safe` (the same shape as `add_daily_key` and `execute`, not measured), and `PromiseOrValue<()>` as a return type on the real runtime are unverified. `cargo check --target wasm32-unknown-unknown` passes.
+* **Testnet run, 2026-11-07 (drill vault, 10 s delay).** `sweep_to_safe` moved exactly the request's amount (0.0100 NEAR) to the safe account, and the refusals held. `apply` before the delay was refused, and `apply` after it ran, so `PromiseOrValue<()>` ran on the real runtime. Not run on a chain: the watcher path, a NEP-141 sweep, three of the four `propose_*` methods, and a separate policy account with its own key. No per-method gas figure is in the sources; the vault's total fall for one sweep was 0.010704 NEAR, the amount plus 0.000704 NEAR gas. `cargo check --target wasm32-unknown-unknown` passes. [TESTNET-REHEARSAL.md, third run]
 * The policy account and the watchers are accounts whose keys the vault cannot see. How they are held (a hardware wallet, a multisig, a hot server) is the owner's decision and sets the real strength of the split.
 * cage-check (`jobs/`) was not touched. The rows worth adding are in ATTEST-CHECK.md 2.3. With this design the key list it reads does not change, so the existing checks and the planted-key attack (8) are unaffected.
 * A swept NEP-141 request whose safe account is not registered with the token fails and is not put back (D12).
