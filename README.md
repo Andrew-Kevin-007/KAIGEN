@@ -14,6 +14,7 @@ An optional omen contract (Kizashi) lets anyone who discloses a break of a class
 - The v3 numbers come from one single-validator nearcore 2.14.0 sandbox (protocol 88, 128 ms blocks). The vault admin was an ed25519 key standing in for ML-DSA. [ATTACK-RESULTS.md section 0]
 - The timed attacks used a fast-forwarded chain clock. [ATTACK-RESULTS.md section 14]
 - The hash-pinned global contract for Mamori (M6): tooling is built. On testnet protocol 88 the mechanism is proven with a 1,024-byte module (publish, create and attach accepted; global_contract_hash equals the published hash). The real Mamori publish is not run. Init in the same transaction as the attach is not exercised. Mainnet availability is unconfirmed. [GLOBAL-CONTRACT.md sections 3, 6a and 7; MAINNET-READS.md]
+- Testnet rehearsal (`testnet` and `zerokey`) passed twice: on commit 5107d48, then on the final build with the stretch items (commit cb62c80). The sweep and policy paths were not called on chain. [TESTNET-REHEARSAL.md]
 - The Create vault page (`app/app/vault/create/`) has not been run against a chain. It is enabled on testnet only.
 - v2 was deployed as drill records on testnet. v3 has no testnet deployment in the sources. [LANDSCAPE.md section 3]
 
@@ -176,8 +177,17 @@ sequenceDiagram
 | `register_intents_key(key)` | Admin | Records a key on `intents.near`. Such a key signs there with no Mamori cap. [ARCHITECTURE.md section 2.6] |
 | `set_token_limit`, `set_pending_limit`, `set_min_send`, `allow_recipient`, `set_max_strikes`, `enforce_allowlist` | Admin | `set_max_strikes` accepts 1 to 10. [contracts/mamori/src/lib.rs] |
 | `trip()` | Anyone | Reads the era from Kizashi and applies it. |
+| `set_policy_account(account or null)` | Admin | Built (stretch). Names the one account whose `propose_*` calls are accepted. Clearing it drops every waiting proposal. [STRETCH-DESIGN.md section 1] |
+| `propose_add_daily_key`, `propose_set_token_limit`, `propose_set_pending_limit`, `propose_allow_recipient` | Policy account | Built. Each records a proposal and returns its id. Nothing changes until `apply`. [STRETCH-DESIGN.md section 1] |
+| `apply(id)` | Anyone | Built. Runs a proposal after `delay_secs` and before it lapses. [STRETCH-DESIGN.md sections 1 and 2, D6] |
+| `cancel_proposal(id)` | Admin | Built. Throws one proposal away, before or after its delay. [STRETCH-DESIGN.md section 1] |
+| `set_safe_account(account)`, `cancel_safe_account_change()` | Admin | Built. The change takes effect only after `delay_secs`, and can be cancelled until then. [STRETCH-DESIGN.md D9] |
+| `add_watcher(account)`, `remove_watcher(account)`, `set_emergency(secs)` | Admin | Built. Up to 4 watchers. An emergency window of at most 7 days, in which watchers may sweep (0 closes it). [STRETCH-DESIGN.md section 1, D13] |
+| `sweep_to_safe(id)` | Admin, or a watcher inside an emergency window | Built. No destination argument: the request's own token and amount go to the safe account in force. Refused for an expired request and while no safe account is set. A failed transfer is not put back. [STRETCH-DESIGN.md D10 to D12] |
 
 Admin methods require `predecessor == current account`. A daily key cannot reach them, because the runtime restricts a function-call key to two methods. [ARCHITECTURE.md section 2.2]
+
+**Stretch bound (built; unit and property tested; not exercised on a chain).** The policy account and the watchers are accounts identified by predecessor, not keys of the vault (STRETCH-DESIGN.md D1). With C and P unchanged: loss stays at most C + P when the delay is at least 24 h; executes plus sweeps are at most 2P per window; everything that leaves the vault is at most C + 2P; sweeps go only to the admin-set safe account. 230 default and 226 drill Mamori tests pass. [LOSS-BOUND.md sections 9.2 and 9.4]
 
 ---
 
@@ -284,15 +294,15 @@ Sandbox: one validator, nearcore 2.14.0, protocol 88, 128 ms blocks, ed25519 adm
 
 | Call | Gas (Tgas) |
 | --- | --- |
-| `send_small`, sent | about 5.6 |
+| `send_small`, sent | about 5.8 |
 | `send_small`, refused and uncounted | about 2.8 |
 | `send_small`, refused and counted (strike 1 or 2) | about 2.9 |
-| `send_small`, the burning refusal | 6.9 |
-| `request_withdraw` | 3.0 to 3.4 |
-| `add_daily_key` (admin) | 5.5 |
-| `remove_daily_key` (admin) | 6.1 |
+| `send_small`, the burning refusal | 7.1 |
+| `request_withdraw` | 3.1 to 3.5 |
+| `add_daily_key` (admin) | 5.7 |
+| `remove_daily_key` (admin) | 6.2 |
 
-[ATTACK-RESULTS.md section 11.2]
+[ATTACK-RESULTS.md section 11.2, 2026-11-04 rerun]
 
 ### Strike cost in a scripted honest trace
 
@@ -307,6 +317,7 @@ These traces were written by us. They are not recorded agent behaviour. The mist
 - Property test: sequences of up to nine daily keys, three tokens, and time jumps aimed at window edges. The bound held after every step. The default run is 300 seeds. The soak of 4,000 seeds had 0 violations. [LOSS-BOUND.md section 4]
 - Peaks in the soak: sends exactly 100% of the cap, queue executions exactly 100% of the pending limit, and the total exactly 100% of cap plus pending limit, never above. [LOSS-BOUND.md section 4]
 - Mutation checks: 16 mutations of `lib.rs`. Seven break the bound itself in a production build. One more (M06b, the request budgets) breaks it only in a drill build. The others are caught only by bookkeeping checks. [LOSS-BOUND.md section 5]
+- Stretch items (sweep and policy paths): 74 mutations of `lib.rs`, all caught. Soak of the default build over 4,000 seeds: 0 violations. Drill build over 3,000 seeds: 0 violations of the drill claims. [LOSS-BOUND.md section 9.4]
 
 ### Limits of these numbers
 
@@ -315,6 +326,7 @@ These traces were written by us. They are not recorded agent behaviour. The mist
 - Not exercised on a chain: eight daily keys at once, registered intents keys, a non-NEAR token in the queue, the failed-transfer refund and requeue paths (covered by unit and property tests only), and the ML-DSA admin. [ATTACK-RESULTS.md section 13]
 - The timed attacks (2c, 5, 9b, and the strike lapse) moved the chain clock by a day with `sandbox_fast_forward`. The contract reads that clock, so the 24 h rules were exercised without waiting. [ATTACK-RESULTS.md section 14]
 - Admin response time (a person noticing and acting) was not measured. [ATTACK-RESULTS.md section 13]
+- The stretch items (policy path and `sweep_to_safe`) were not run on a chain. The testnet rehearsal does not call `sweep_to_safe` or `propose_*`. [LOSS-BOUND.md section 9.5; TESTNET-REHEARSAL.md]
 - Leash and near-agent-spend-guard were not run. This README makes no comparison with them. Running their code is for the owner to do. [ROADMAP.md M9; README.md]
 
 ---
@@ -371,7 +383,7 @@ Line numbers were removed. They moved when v3 was added. Use function names. For
 | Mamori: views (`attest`, `check`, `strikes_of`, `config`) | `contracts/mamori/src/lib.rs` |
 | Mamori: tests (loss-bound property test, attest, check, events, admin surface) | `contracts/mamori/src/tests/` |
 | Kizashi: omen cap (`MAX_OMENS` 8), claim, signature check, payouts, `usdc_epoch` | `contracts/kizashi/src/lib.rs` |
-| cage-check (ten rows, exit codes) | `jobs/src/cage.mjs`, `jobs/src/bin.mjs` |
+| cage-check (15 rows: ARCH-2.8-1 to 8 and ATTEST-1 to 7; exit codes) | `jobs/src/cage.mjs`, `jobs/src/bin.mjs` |
 | Sandbox attack suite and results | `tests-integration/tests/attacks/`, `docs/v3/ATTACK-RESULTS.md` |
 | Sandbox start and stop (Windows, WSL) | `tests-integration/sandbox/start.ps1`, `stop.ps1` |
 | Mainnet tooling (dry-run by default) | `jobs/src/mainnet.mjs` |
@@ -406,13 +418,14 @@ Line numbers were removed. They moved when v3 was added. Use function names. For
 - cage-check is a point-in-time check. It cannot see a key added one block later. Row 2 (exactly one ML-DSA admin key) is UNKNOWN when the admin is given as a full key, because the hash format is not in the sources. [V3-W2-CAGE-PROGRESS.md; ARCHITECTURE.md section 2.8]
 - cage-check does not check `intents.near` for keys that were not recorded. Method names are unconfirmed (G4). [V3-W2-CAGE-PROGRESS.md]
 - Kizashi: a reservation released by the 10 minute timeout can still be double-spent by a read ordered after the release. This is documented, not fixed. [V3-KIZASHI-PROGRESS.md step 3]
+- Kizashi: a NEAR refund that beats its callback can let a second claim sweep refunded NEAR, while the callback books an unbacked debt. This is unfixed and pinned by a test. nearcore's real receipt order was not checked. [docs/internal/V3-OPEN-KIZASHI-PROGRESS.md step 5]
 
 **Known gaps from the code and review (open or partly open).** Rows marked UNVERIFIED are from the old v2 README and are not in the v3 sources.
 
 | Id | Where | Gap | Status |
 | --- | --- | --- | --- |
 | G1 | Admin flow | ML-DSA admin flow not run on mainnet protocol 86 | Open [ROADMAP.md G1] |
-| G2 | Global contracts | Global-contract publishing works on mainnet and its real cost is known. On testnet protocol 88, 0.0001 NEAR per byte was measured at 1,024 bytes. About 37.6 NEAR for the 376,192-byte mamori.wasm is an extrapolation, not measured. Mainnet is protocol 86; publishing there is unconfirmed. | Open [ROADMAP.md G2; GLOBAL-CONTRACT.md section 6a; MAINNET-READS.md] |
+| G2 | Global contracts | Global-contract publishing works on mainnet and its real cost is known. On testnet protocol 88, 0.0001 NEAR per byte was measured at 1,024 bytes. About 43.3 NEAR for the 432,906-byte mamori.wasm (1e20 yocto per byte) is an extrapolation, not measured. Mainnet is protocol 86; publishing there is unconfirmed. | Open [ROADMAP.md G2; GLOBAL-CONTRACT.md section 6a; MAINNET-READS.md] |
 | - | Storage | Each vault deploys Mamori (about 3 NEAR of storage). This was the old README's G2, which clashes with the ROADMAP id. `<!-- UNVERIFIED in v3 sources -->` | Open |
 | G3 | App | Wallet-signed path to add an ML-DSA key is untested; the harness uses a classical key. `<!-- UNVERIFIED in v3 sources -->` | Open |
 | G4 | Intents | `add_public_key` and `remove_public_key` names on `intents.near` unconfirmed | Open [ROADMAP.md G4] |
@@ -438,7 +451,7 @@ Line numbers were removed. They moved when v3 was added. Use function names. For
 - Mainnet deployment, the mainnet drill pair, and the production Kizashi lock. [ROADMAP.md section 3]
 - Hash-pinned global contract for Mamori (M6, gate G2). Tooling built. Proven on testnet with a 1,024-byte module only. The real Mamori publish and mainnet are not run. [GLOBAL-CONTRACT.md sections 6a and 7; ROADMAP.md section 2]
 - A production withdrawal delay (owner decision). The floor is 24 h. [CHANGES-V2-TO-V3.md]
-- Policy-key split and `sweep_to_safe` are in progress, not promised. Design: [STRETCH-DESIGN.md](docs/v3/STRETCH-DESIGN.md) (not yet committed). Sentinel and yield hold: stretch items, not promised. The fallback tag `v3-core-testnet` (pushed) points at d4342c0, one commit before the M6 tooling commit fe8d9d9. [git status; git ls-remote --tags; ARCHITECTURE.md section 6; ROADMAP.md section 2]
+- Policy-key split and `sweep_to_safe` are built (commit cb62c80; unit and property tested, not run on a chain). Design: [STRETCH-DESIGN.md](docs/v3/STRETCH-DESIGN.md). Sentinel and yield hold: stretch items, not promised. The fallback tag `v3-core-testnet` (pushed) points at d4342c0, one commit before the M6 tooling commit fe8d9d9. [git status; git ls-remote --tags; ARCHITECTURE.md section 6; ROADMAP.md section 2]
 - The Create vault page is in `app/app/vault/create/`. It has not been run against a chain. `<!-- UNVERIFIED in v3 sources: "enabled on testnet only, mainnet stays off" -->`
 - A signed gate file for `make verify`. `<!-- UNVERIFIED in v3 sources -->`
 - The landing page in `site/` is being redesigned. It is described here only as the landing page. `<!-- UNVERIFIED in v3 sources -->`
@@ -526,15 +539,15 @@ cd site && npm run dev       # landing page
 ### Test
 
 ```sh
-cargo test -p mamori                       # 170 tests at the last recorded run
-cargo test -p mamori --features drill      # 167 tests
+cargo test -p mamori                       # 230 tests (default, after the stretch items)
+cargo test -p mamori --features drill      # 226 tests (drill)
 cargo test -p kizashi                      # 88 tests
 cargo test -p kizashi --features drill     # 89 tests
 cd jobs && node --test test/*.test.mjs     # 210 tests
 cargo test -p mamori loss_bound::the_loss_bound -- --nocapture   # the property test (about 15 s)
 ```
 
-Counts are from the progress logs: [V3-W2-EDITH-PROGRESS.md; V3-KIZASHI-PROGRESS.md; V3-W2-CAGE-PROGRESS.md]. Re-run to confirm. The Windows PowerShell form sets `$env:PATH` to the toolchain and `$env:AWS_LC_SYS_PREBUILT_NASM='1'` first. [LOSS-BOUND.md section 4]
+Mamori counts are from LOSS-BOUND.md section 9.4 (2026-11-04). Other counts are from the progress logs: [V3-W2-EDITH-PROGRESS.md; V3-KIZASHI-PROGRESS.md; V3-W2-CAGE-PROGRESS.md]. Re-run to confirm. The Windows PowerShell form sets `$env:PATH` to the toolchain and `$env:AWS_LC_SYS_PREBUILT_NASM='1'` first. [LOSS-BOUND.md section 4]
 
 Sandbox tests (need WSL and the sandbox running):
 
@@ -572,7 +585,7 @@ Steps 1 and 2 need no funds and no chain. Step 4 needs one funded testnet accoun
 
 | # | Do this | You should see |
 | --- | --- | --- |
-| 1 | `cargo test -p mamori` and `cargo test -p kizashi`, then `cd jobs && node --test test/*.test.mjs` | Every suite ends with `0 failed`. Counts at the last recorded run: Mamori 170 (167 drill), Kizashi 88 (89 drill), jobs 210. [progress logs] |
+| 1 | `cargo test -p mamori` and `cargo test -p kizashi`, then `cd jobs && node --test test/*.test.mjs` | Every suite ends with `0 failed`. Counts at the last recorded run: Mamori 230 (226 drill), Kizashi 88 (89 drill), jobs 210. [progress logs] |
 | 2 | `node jobs/src/bin.mjs judge` `<!-- UNVERIFIED in v3 sources -->` | A report of PASS or SKIPPED per claim, with the evidence line. It writes `judge-report.json`. A check that cannot run is SKIPPED with the reason, never PASS. |
 | 3 | Open `fire-tests/0003.json` `<!-- UNVERIFIED in v3 sources; v2 record -->` | Claim, trip, post-quantum send and re-arm transactions for a v2 drill vault. |
 | 4 | `node jobs/src/bin.mjs testnet` `<!-- UNVERIFIED in v3 sources; v2 rehearsal, needs out/drill and a funder file -->` | PASS or FAIL per step. Not run for v3. |

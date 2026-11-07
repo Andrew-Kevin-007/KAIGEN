@@ -1,6 +1,6 @@
 # Submission checklist (owner: Kevin only)
 
-Status: 2026-11-04. For Kevin only. Sources: docs/v3/ROADMAP.md and docs/PLAN-submission-and-mainnet.md.
+Status: 2026-11-07 (stretch items built; numbers refreshed). For Kevin only. Sources: docs/v3/ROADMAP.md and docs/PLAN-submission-and-mainnet.md.
 
 ## Rules that apply
 
@@ -14,7 +14,7 @@ Status: 2026-11-04. For Kevin only. Sources: docs/v3/ROADMAP.md and docs/PLAN-su
 - [ ] **1. Run the zero-key harness.**
   - Who: Kevin.
   - Command: see that file (`docs/internal/V3-OPEN-CYBORG-PROGRESS.md` is not in the repo).
-  - Done when: a zero-key Kizashi run is recorded in a fire-test file, and a third-party claim still works. [PLAN section A, Tue 3 Nov; PLAN section B stage 4 item 2]
+  - Done when: a zero-key Kizashi run is recorded in a fire-test file, and a third-party claim still works. [PLAN section A, Tue 3 Nov; PLAN section B stage 4 item 2]. Status: `zerokey` passed in both rehearsal runs [TESTNET-REHEARSAL.md]; the fire-test record was not checked here.
 
 - [ ] **2. Review the UNVERIFIED README claims.**
   - Who: Kevin.
@@ -24,12 +24,12 @@ Status: 2026-11-04. For Kevin only. Sources: docs/v3/ROADMAP.md and docs/PLAN-su
 - [ ] **3. Real Mamori publish on testnet (M6, hash-pinned global contract).**
   - Who: Kevin, with one funded testnet account. No owner decision is needed to build; the tooling is built.
   - Command: `node jobs/src/bin.mjs globalcontract --kizashi <KIZASHI_ACCOUNT> --funder-file <FUNDER_FILE>` (dry run), then add `--yes`. [GLOBAL-CONTRACT.md section 4]
-  - Done when: the real Mamori publish is recorded, which needs about 39 NEAR on one testnet account (an estimate, see GLOBAL-CONTRACT.md section 4). If it is not wanted, state it as not run. [GLOBAL-CONTRACT.md sections 4 and 6a; ROADMAP.md section 2, M6 row]
+  - Done when: the real Mamori publish is recorded, which needs about 44.8 NEAR on one testnet account (an estimate: about 43.3 NEAR burnt for 432,906 bytes at 1e20 yocto per byte, plus 1 NEAR for the vault and a 0.5 NEAR margin; see GLOBAL-CONTRACT.md section 4). If it is not wanted, state it as not run. [GLOBAL-CONTRACT.md sections 4 and 6a; ROADMAP.md section 2, M6 row]
 
 - [ ] **4. Decide the stretch items (policy-key split, `sweep_to_safe`, sentinel).**
   - Who: Kevin.
   - Command: none.
-  - Done when: each item is written in `docs/v3/ROADMAP.md` section 2 as built or as "document as not applicable". The stretch items are being built (tag `v3-core-testnet` is the fallback without them); if they are dropped, Q2 recommends "document as not applicable". The design choices for the safe account and watchers (Q5) are recorded in `docs/v3/STRETCH-DESIGN.md` once it is final. [ROADMAP.md sections 2 and 4]
+  - Done when: each item is written in `docs/v3/ROADMAP.md` section 2 as built or as "document as not applicable". The stretch items are built (commit cb62c80, not run on a chain). Record them in ROADMAP section 2 as built. The fallback tag `v3-core-testnet` is the build without them. The design choices for the safe account and watchers (Q5) are recorded in `docs/v3/STRETCH-DESIGN.md` once it is final. [ROADMAP.md sections 2 and 4]
 
 - [ ] **5. Decide whether the peer comparison is wanted.**
   - Who: Kevin.
@@ -44,7 +44,7 @@ Status: 2026-11-04. For Kevin only. Sources: docs/v3/ROADMAP.md and docs/PLAN-su
 - [ ] **7. Record the demo.**
   - Who: Kevin.
   - Command: none.
-  - Done when: a recording exists and runs under 90 seconds. The demo runs attack 2, then attack 1, then attack 8. [ROADMAP.md Q1; ARCHITECTURE.md, demo paragraph]. docs/v3/DEMO-SCRIPT.md is not in the repo yet.
+  - Done when: a recording exists and runs under 90 seconds. The demo runs attack 2, then attack 1, then attack 8. [ROADMAP.md Q1; ARCHITECTURE.md, demo paragraph]. docs/v3/DEMO-SCRIPT.md is in the repo.
 
 - [ ] **8. Submit.**
   - Who: Kevin. He presses submit and posts on X.

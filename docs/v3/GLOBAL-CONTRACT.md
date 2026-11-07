@@ -51,7 +51,7 @@ Read-only re-check of an existing vault, and the same cage-check on its own:
 
 Files written by a real run (all under `.kaigen-testnet/`, which is gitignored): the vault's admin seed (`global-admin-seeds.json`, written BEFORE the key is put on the account; back it up, it is the only key of the vault) and a record `global-contract-<vault>.json` with the hashes, transaction ids, the measured cost and the verification result. The record holds no secret.
 
-Before running: pass `--wasm` the build whose hash you intend to publish. `out/` is not in git, and `docs/v3/REPRODUCIBLE-BUILD.md` does not exist yet, so the pinned hash is the hash of the file given. On 2026-11-04 `out/prod/mamori.wasm` is 376,192 bytes, sha256 `76abf7141d792199bd010bc7d8d84cdba6dafebc037e6a1bfb54a7c5a1d65532`, code hash `8zFCKcJBSNQhuVrm9sKWtugPEKMAySaas78LKVfvBaXb`. This replaces the 323,974 bytes that ROADMAP.md and ARCHITECTURE.md 2.9 quote.
+Before running: pass `--wasm` the build whose hash you intend to publish. `out/` is not in git, and `docs/v3/REPRODUCIBLE-BUILD.md` does not exist yet, so the pinned hash is the hash of the file given. The final build's `out/prod/mamori.wasm` (2026-11-04, with the stretch items) is 432,906 bytes, sha256 `91c0877d7463f3095e6c9babc0242ac41f590dd793c4dbf15587cc5e90f86713`. Its code hash was not recomputed. The earlier 376,192-byte build (code hash `8zFCKcJBSNQhuVrm9sKWtugPEKMAySaas78LKVfvBaXb`) is superseded. This replaces the 323,974 bytes that ROADMAP.md and ARCHITECTURE.md 2.9 quote.
 
 ## 4a. Publish-only mode and the order to run things in
 
@@ -85,7 +85,7 @@ Run in this order. Each command without `--yes` is the dry run (reads only, prin
 
 Done on 2026-11-04 (section 6a): 0.0001 NEAR per byte, 100000000000000000000 yoctoNEAR, exactly. For the byte size of the wasm to publish, multiply: the cost of step 1 of the full run is `bytes x 100000000000000000000` yoctoNEAR plus gas.
 
-(2) The full Mamori run (publish, vault with init, cage-check), after (1) has confirmed the price and the transaction path. Funds: about 39.12 NEAR available on ONE funder account at the estimated rate (37.6192 burnt for 376,192 bytes + 1 for the vault + 0.5 margin), plus gas. The tool uses one funder file and cannot pool two accounts: with about 19.8 NEAR spread over two funders the run is about 19.3 NEAR short, so first move the balance of one funder to the other with an ordinary transfer, and add faucet drops (about 10 NEAR each per IP per 12 h). After (1), replace 39.12 by `376192 x yoctoPerByte` NEAR plus 1.5.
+(2) The full Mamori run (publish, vault with init, cage-check), after (1) has confirmed the price and the transaction path. Funds: about 44.8 NEAR available on ONE funder account at the estimated rate (43.2906 burnt for 432,906 bytes + 1 for the vault + 0.5 margin), plus gas. The tool uses one funder file and cannot pool two accounts: the two-funder figures earlier in this section were computed for 39.12 NEAR and are not recomputed, so first move the balance of one funder to the other with an ordinary transfer, and add faucet drops (about 10 NEAR each per IP per 12 h). After (1), replace 44.8 by `432906 x yoctoPerByte` NEAR plus 1.5.
 
     node jobs/src/bin.mjs globalcontract --kizashi <KIZASHI_ACCOUNT> --funder-file <FUNDER_FILE>
     node jobs/src/bin.mjs globalcontract --kizashi <KIZASHI_ACCOUNT> --funder-file <FUNDER_FILE> --yes
@@ -98,7 +98,7 @@ Over RPC, after the attach: (1) `view_account` of the vault: `global_contract_ha
 
 ## 6. Cost
 
-ESTIMATE, not measured: publishing burns 0.0001 NEAR per byte of code (nearcore `near-parameters` 0.38.0, `77.yaml`: `global_contract_storage_amount_per_byte` set from a 999999999999999999999999999 yN placeholder to 0.0001 N), which is the docs' "10 NEAR per 100 KB, entirely burnt". For 376,192 bytes that is about 37.6192 NEAR. With the vault's 1 NEAR and a 0.5 NEAR margin the funder needs about 39.1 NEAR available, plus gas. The vault's own cost is a small reference ("typically under 0.001 NEAR" per the docs) plus its state.
+ESTIMATE, not measured: publishing burns 0.0001 NEAR per byte of code (nearcore `near-parameters` 0.38.0, `77.yaml`: `global_contract_storage_amount_per_byte` set from a 999999999999999999999999999 yN placeholder to 0.0001 N), which is the docs' "10 NEAR per 100 KB, entirely burnt". For 432,906 bytes that is about 43.2906 NEAR. With the vault's 1 NEAR and a 0.5 NEAR margin the funder needs about 44.8 NEAR available, plus gas. The vault's own cost is a small reference ("typically under 0.001 NEAR" per the docs) plus its state.
 
 MEASURED on testnet, 1,024 bytes: see section 6a. The faucet gives about 10 NEAR per request (see `testnet.mjs`), so a funder with 39 NEAR needs several consolidated drops or another source: that is the practical blocker for the full run.
 
@@ -129,7 +129,7 @@ Measured, from the funder's balances and the publish transaction's own outcome (
 
 This agrees with the estimate (0.0001 NEAR per byte, nearcore `77.yaml`; the docs' 10 NEAR per 100 KB) at this size. The `measured` block in that run's record file (`global-contract-gp-806e2476...json`) was written by the first version and shows gas = the whole fall and 0 per byte: it is wrong in those fields and right in the balances; `--cost-of` gives the correct split.
 
-EXTRAPOLATION to the 376,192-byte `out/prod/mamori.wasm`, NOT measured at that size: the deploy charge scales with bytes, 376,192 x 10^20 yocto = 37.6192 NEAR, burnt. Gas also grows with size: scaling the 1,024-byte figure linearly gives at most about 0.0244 NEAR (244 Tgas); the true figure is lower, since part of it is a fixed base cost. So the publish costs about 37.64 NEAR at most on this extrapolation; with the vault's 1 NEAR and the preflight's 0.5 NEAR margin the funder needs about 39.15 NEAR available. Whether the price stays 0.0001 NEAR per byte at 376 KB, and whether the publish fits the per-transaction and per-chunk gas limits at that size, is not shown by a 1,024-byte run.
+EXTRAPOLATION to the 432,906-byte `out/prod/mamori.wasm`, NOT measured at that size: the deploy charge scales with bytes, 432,906 x 10^20 yocto = 43.2906 NEAR, burnt. Gas also grows with size: scaling the 1,024-byte figure linearly gives at most about 0.0281 NEAR (about 281 Tgas); the true figure is lower, since part of it is a fixed base cost. So the publish costs about 43.32 NEAR at most on this extrapolation; with the vault's 1 NEAR and the preflight's 0.5 NEAR margin the funder needs about 44.82 NEAR available. Whether the price stays 0.0001 NEAR per byte at 376 KB, and whether the publish fits the per-transaction and per-chunk gas limits at that size, is not shown by a 1,024-byte run.
 
 ## 7. Verified, and not verified (2026-11-04)
 
@@ -149,7 +149,7 @@ EXTRAPOLATION to the 376,192-byte `out/prod/mamori.wasm`, NOT measured at that s
 | `UseGlobalContract` and `init` in one receipt work, and a failed init rolls the whole batch back | NOT verified (the fake world models it) | needs the real run |
 | The positive answer shape of `view_global_contract_code` (`code_base64`, `hash`) | Verified: the run's check that the code under the hash hashes to it passed, and `--cost-of` read the byte count from it | section 6a |
 | Cross-shard distribution delay between the publish and the attach | Not measured. In the one real run the attach followed the publish after the tool saw the code on the node, and worked; a failure there is resumable. | section 6a |
-| Testnet burn rate and the measured cost | Measured at 1,024 bytes: 0.0001 NEAR per byte exactly, gas 0.000066431 NEAR. At 376,192 bytes: an extrapolation (about 37.6192 NEAR plus gas), not measured | section 6a |
+| Testnet burn rate and the measured cost | Measured at 1,024 bytes: 0.0001 NEAR per byte exactly, gas 0.000066431 NEAR. At 432,906 bytes: an extrapolation (about 43.2906 NEAR plus gas), not measured | section 6a |
 | cage-check GREEN on the real vault | NOT run on a real vault | the offline test world is GREEN |
 
 ## 8. If something goes wrong

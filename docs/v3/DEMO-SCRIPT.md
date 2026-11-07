@@ -76,6 +76,7 @@ Only measured numbers are listed. Each one is labelled with where it was measure
 | Attack 8, cage check | Clean: exit 0 GREEN. Planted ed25519 full-access key: exit 1 RED, ARCH-2.8-1. Key removed: exit 0 GREEN. Planted null-allowance key: exit 1 RED, ARCH-2.8-3 and ARCH-2.8-6. Removed: exit 0 GREEN. Checker run time 360 to 467 ms wall. Stand-in admin, not a production result. | local sandbox | ATTACK-RESULTS.md section 9 |
 | Testnet rehearsal, 2026-11-04 | 10 of 10 demo steps held; both drill fire tests passed; v3 drill build | testnet, one run | Owner's statement for this script. Two fire-test records dated 2026-11-04 exist in the rehearsal folder (0001 and 0002, no `.failed` file). The run transcript is not in the repository, so the 10 of 10 result could not be checked from a file. The 10 steps are counted in jobs/src/demo.mjs. |
 | Property test, loss bound | 4,000 seeds, 0 violations | off-chain property test, not a chain | docs/v3/LOSS-BOUND.md section 4, soak row |
+| Property test, stretch sweep and policy paths | 4,000 seeds, 0 violations (default build) | off-chain property test, not a chain | docs/v3/LOSS-BOUND.md section 9.4, soak row |
 
 Do not read out gas or allowance figures; they are not needed for the 90 seconds. Do not read out any figure that is not in the table above.
 

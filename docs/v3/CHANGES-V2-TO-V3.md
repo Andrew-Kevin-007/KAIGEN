@@ -28,18 +28,20 @@ Status: 2026-11-03. Testnet only. No audit. Nothing here has run on mainnet. Eac
 | Non-zero allowance | Enforced. | Unchanged. Regression test added. | ARCHITECTURE.md 2.5 |
 | `ft_transfer_call` | Not called. | Still not called. No new value-moving export. | ARCHITECTURE.md 2.3, 2.6 |
 
+**Stretch items (built, 2026-11-04; not run on a chain).** Policy path: `set_policy_account`, four `propose_*` methods, a permissionless `apply` after `delay_secs`, `cancel_proposal`. The policy actor is an account identified by predecessor, not a function-call key on the vault; this departs from ARCHITECTURE.md section 6 (STRETCH-DESIGN.md D1). Sweep path: `set_safe_account` (after the delay), up to 4 watchers, `set_emergency` (at most 7 days), and `sweep_to_safe(id)` with no destination argument. Bound: C + P unchanged; executes plus sweeps at most 2P; everything that leaves the vault at most C + 2P; sweeps go only to the admin-set safe account [LOSS-BOUND.md sections 9.2 and 9.3; STRETCH-DESIGN.md sections 1 and 2].
+
 Two v2 facts that v3 does not change: the stored `max_strikes` range is 1 to 10 [lib.rs `set_max_strikes`], and the default pending limit is 10 times the cap [lib.rs `PENDING_LIMIT_MULTIPLE` = 10].
 
 ## 3. Kizashi change
 
 - **Race fix.** `on_usdc_balance` now refuses a token balance read that was ordered under an older `usdc_epoch`. `claim` and `retry_payout` pass the epoch they saw. The epoch rises when an in-flight payout is reported as landed, and when `release_stale` frees a reservation. [V3-KIZASHI-PROGRESS.md step 2]
 - **ABI.** Public methods and views are unchanged. The private callback `on_usdc_balance` gained an `epoch` argument. Nothing in `jobs/` or `app/` calls it. [V3-KIZASHI-PROGRESS.md step 2]
-- **Residuals** (not fixed): a reservation released by the 10 minute timeout can still be double-spent by a read ordered after the release. The refund ordering for a failed NEAR transfer was not checked against nearcore. Clippy was not run. [V3-KIZASHI-PROGRESS.md step 3]
+- **Residuals** (not fixed): a reservation released by the 10 minute timeout can still be double-spent by a read ordered after the release. The refund ordering was not checked against nearcore: a NEAR refund that beats its callback can let a second claim sweep refunded NEAR, and the callback books an unbacked debt. This is unfixed and pinned by a test [docs/internal/V3-OPEN-KIZASHI-PROGRESS.md step 5]. Clippy was not run. [V3-KIZASHI-PROGRESS.md step 3]
 - **Status.** Kizashi stays optional. [ROADMAP.md Q8; THREAT-MODEL.md section 6]
 
 ## 4. Tooling and checks added
 
-- **cage-check.** `node jobs/src/bin.mjs cage-check <account>`. Ten rows: ARCH-2.8-1 to 8, ATTEST-1 and ATTEST-2. Exit 0 is GREEN, 1 is RED, 3 is UNKNOWN (a row could not be checked, for example a v2 vault with no `attest()`). Exit 2 is not described in the sources. `--stand-in-admin` passes an ed25519 admin in the sandbox; the output is then marked "not a production result". [V3-W2-CAGE-PROGRESS.md; ATTACK-RESULTS.md attack 8]
+- **cage-check.** `node jobs/src/bin.mjs cage-check <account>`. 15 rows: ARCH-2.8-1 to 8, ATTEST-1 and ATTEST-2, and ATTEST-3 to 7 (safe account, policy actors, emergency window, safe-account change, proposals; the last five cover the stretch settings) [jobs/src/cage.mjs]. Exit 0 is GREEN, 1 is RED, 3 is UNKNOWN (a row could not be checked, for example a v2 vault with no `attest()`). Exit 2 is not described in the sources. `--stand-in-admin` passes an ed25519 admin in the sandbox; the output is then marked "not a production result". [V3-W2-CAGE-PROGRESS.md; ATTACK-RESULTS.md attack 8]
 - **Row 2 is UNKNOWN when the admin is given as a full ML-DSA public key.** The hash format is not in the sources. [V3-W2-CAGE-PROGRESS.md step 3 (a)]
 - **Attack suite.** `tests-integration/tests/attacks/`, run against a WSL sandbox. The timed test is `#[ignore]`. [V3-W3-ATTACKS-PROGRESS.md; ATTACK-RESULTS.md section 14]
 - **Sandbox.** nearcore 2.14.0, protocol 88, `init --fast` (128 ms blocks), WSL distro `kaigen-sandbox`. The vault admin is ed25519. [V3-M1-PROGRESS.md step 1; ATTACK-RESULTS.md section 0]
@@ -56,7 +58,7 @@ Items 1 to 7 were wrong or stale against the v3 sources and were fixed in the RE
 4. Gap id `G2` in the old README meant "storage cost, about 3 NEAR per vault". ROADMAP.md uses `G2` for global-contract publishing on mainnet. The old meaning is kept below, marked unverified, and the id clash is noted.
 5. The old "What makes KAIGEN unique" heading made a novelty framing. It is renamed. No novelty claim is made. [NOVELTY-CLAIMS.md section 3]
 6. The refusal sequence diagram listed only dust and no-limit refusals as uncounted. `cap_exhausted` is uncounted too. [ATTEST-CHECK.md section 4]
-7. The old test counts (Kizashi 60, Mamori 78, app 62, jobs 149, scripts 20) were from v2. Replaced with: Mamori 170 default and 167 drill, Kizashi 88 default and 89 drill, jobs 210. [V3-W2-EDITH-PROGRESS.md; V3-KIZASHI-PROGRESS.md; V3-W2-CAGE-PROGRESS.md] The app and scripts counts are not re-run and are removed.
+7. The old test counts (Kizashi 60, Mamori 78, app 62, jobs 149, scripts 20) were from v2. Replaced with: Mamori 230 default and 226 drill, Kizashi 88 default and 89 drill, jobs 210. [V3-W2-EDITH-PROGRESS.md; V3-KIZASHI-PROGRESS.md; V3-W2-CAGE-PROGRESS.md] The app and scripts counts are not re-run and are removed.
 8. Allowlist size (32) and omen cap (8) are not in the design docs. They were confirmed by grep of `MAX_ALLOWED` (32) and `MAX_OMENS` (8) in the code, at HEAD 44227f2.
 9. The three "Key Code" excerpts were v2 code with v2 line numbers. They are replaced by a list of function names. The code excerpt for `emit_refused` no longer matches the v3 signature, which takes the call.
 10. The old "Fixed in the current code" list and the old omen-limits paragraph were kept in the README and marked unverified, not removed. The K3 gap row and the old G2 storage row were restored after a first pass dropped them.
@@ -89,4 +91,4 @@ These are kept in the README, marked with an HTML comment where they appear. The
 - "No contract code of v3 exists yet" (THREAT-MODEL.md, status line). Wrong.
 - "near-sdk 5.30 PublicKey has no ML-DSA variant" and "a contract cannot verify an ML-DSA signature" (ARCHITECTURE.md 2.2, THREAT-MODEL.md sections 6 and 7). The progress log reports `CurveType::MLDSA65` and `env::ml_dsa_verify` in the locked near-sdk 5.30. What the host returns for an ML-DSA signer is still unverified.
 - "The 5 minute delay floor" (ARCHITECTURE.md and PLAN). Stale. The floor is 24 h.
-- `revoke_all_agent_keys()` and `sweep_to_safe` (ARCHITECTURE.md 3, ROADMAP.md). Not in the milestone logs. The implemented lockdown is `lock_down`.
+- `revoke_all_agent_keys()` (ARCHITECTURE.md 3, ROADMAP.md). Not in the milestone logs. The implemented lockdown is `lock_down`. `sweep_to_safe` is now built (section 2, stretch items).
