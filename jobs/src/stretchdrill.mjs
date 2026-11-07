@@ -11,6 +11,10 @@
 //   4 policy   set_policy_account, a propose_* that apply runs after its wait (and refuses before it), another proposal
 //              cancelled by cancel_proposal; attest() read after each
 //   5 cage     cage-check against the vault, rows printed. A drill vault is RED on ATTEST-2 by design (drill build, delay < 24 h).
+//   6 watcher  (stretchext.mjs) add_watcher, set_emergency, a watcher's sweep inside the window, refused outside it / for anything else
+//   7 proposals the other three propose_* methods, applied after the wait, effects read back
+//   8 ft       a NEP-141 sweep with the ft-mock fixture, and a failed transfer (sweep_failed, nothing lost)
+//   The policy actor (step 4), the watcher and the token are sub-accounts of the funder, each with its own key in KAIGEN_TESTNET_DIR.
 //
 // DRY RUN BY DEFAULT: without `yes` this only reads the chain and prints the plan and the preflight. Nothing here signs: the
 // senders are handed in (bin.mjs builds them from globaltx.mjs / chain.mjs), so a test drives the whole path with fakes.
@@ -19,41 +23,27 @@
 import { cageCheck, DEFAULT_MAX_ALLOWANCE_YOCTO, exitCodeOf, IDS, renderCage } from "./cage.mjs";
 import { formatNear, GlobalUsage, isAccountId, Refused, TESTNET_RPC } from "./globalcontract.mjs";
 import { chainCheck } from "./prodvault.mjs";
+import { ensureActor, extPlan, extPreflight, EXT_STEPS, runFt, runProposals, runWatcher } from "./stretchext.mjs";
+import { bal, call, check, executorsOf, freeYocto, gasBurntOf, logsOf, message, NEAR, refusalOf, SECRET_FREE } from "./stretchkit.mjs";
 import { report } from "./verify.mjs";
 
-const NEAR = 10n ** 24n;
+export { refusalOf };
+
 /** The request that gets swept: small, far under the pending limit (1 NEAR daily limit x its multiple). */
 export const SWEEP_YOCTO = NEAR / 100n;
 /** What the vault must hold beyond its code's storage and the sweep: it signs every admin transaction and pays their gas. */
-export const VAULT_WORKING_YOCTO = NEAR / 10n;
+export const VAULT_WORKING_YOCTO = (NEAR * 15n) / 100n;
 /** Gas the vault, as signer, may burn across the sweep (60 Tgas prepaid is about 0.006 NEAR; the rest is refunded). */
 export const SWEEP_GAS_SLACK_YOCTO = NEAR / 20n;
-const STORAGE_YOCTO_PER_BYTE = 10n ** 19n;
-const TGAS_ADMIN = 30;
 const TGAS_SWEEP = 60;
-const TGAS_DAILY = 100;
 /** A daily key's refusal: the chain's access-key layer (before the contract runs) or the contract's own gate. */
 export const ACCESS_KEY_REFUSAL_OR_CONTRACT = /MethodNameMismatch|method name|not permitted|not allowed|signer key|AccessKey|panicked|admin or watcher only/i;
-const SECRET_FREE = (s) => String(s).replace(/(ed25519|secp256k1|ml-dsa-65(-hash)?):[1-9A-HJ-NP-Za-km-z]{20,}/g, (m) => `${m.slice(0, m.indexOf(":") + 9)}...`);
-
-const message = (e) => String(e?.message ?? e);
 const sleepReal = (ms) => new Promise((r) => setTimeout(r, ms));
-const call = (method, args = {}, gasTgas = TGAS_ADMIN) => ({ type: "FunctionCall", method, args, gasTgas, depositYocto: 0 });
-const check = (name, ok, detail, tx = null) => ({ name, ok: !!ok, detail, tx });
-const bal = (acc) => (acc ? BigInt(acc.amount) : null);
-
-/** What a chain-level refusal looks like once the sender has thrown: `transaction <hash> failed: {... panicked: <text> ...}`. */
-export function refusalOf(e) {
-  const m = message(e);
-  const tx = /transaction ([1-9A-HJ-NP-Za-km-z]{32,50}) failed/.exec(m)?.[1] ?? null;
-  const text = /panicked: ?([^"\\}]*)/.exec(m)?.[1]?.trim() ?? null;
-  return { tx, text, raw: SECRET_FREE(m).slice(0, 300) };
-}
 
 // ---- the plan ----------------------------------------------------------------------------------------------------
 
 /** Pure: what the run would do, from the state file and the options. */
-export function planStretchDrill({ state, safe, recipient = "stretchdrill-<8 hex>.testnet" }) {
+export function planStretchDrill({ state, safe, recipient = "stretchdrill-<8 hex>.testnet", funderId, existingActors }) {
   if (state?.network !== "testnet") throw new Refused(`the rehearsal state says network ${JSON.stringify(state?.network)}: stretchdrill is testnet only`);
   for (const k of ["vault", "supplier", "kizashi"]) if (!isAccountId(state[k])) throw new Refused(`state.json has no usable ${k}`);
   for (const k of ["vault", "supplier", "kizashi"]) if (/(^|\.)near$/.test(state[k])) throw new Refused(`${state[k]} looks like a mainnet account: stretchdrill is testnet only`);
@@ -64,11 +54,16 @@ export function planStretchDrill({ state, safe, recipient = "stretchdrill-<8 hex
   if (safeId === state.vault) throw new Refused("the safe account must not be the vault itself (the contract refuses it too)");
   if (safeId === state.keeper.id) throw new Refused("the safe account must not be the keeper: the keeper pays gas in the refusal steps, so the sweep's balance check would not be exact");
   const payee = [state.kizashi, state.supplier].find((a) => a !== safeId) ?? null;
+  // The policy actor, the watcher and the token fixture are sub-accounts of the funder, each with its own key: custody of the policy key is
+  // shown as distinct from the stranger (the keeper).
+  const actors = extPlan({ funderId, existing: existingActors });
   return {
     vault: state.vault,
     safe: safeId,
     stranger: state.keeper.id,
-    policy: state.keeper.id,
+    policy: actors.policy.id,
+    funderId,
+    actors,
     payee,
     recipient,
     sweepYocto: SWEEP_YOCTO,
@@ -76,8 +71,9 @@ export function planStretchDrill({ state, safe, recipient = "stretchdrill-<8 hex
       { n: 1, id: "safe", title: `admin sets the safe account to ${safeId}, waits the withdrawal delay, attest() shows it in force` },
       { n: 2, id: "sweep", title: `a daily key queues ${formatNear(SWEEP_YOCTO)} NEAR (payee ${payee}), the admin calls sweep_to_safe: value moves only to ${safeId}` },
       { n: 3, id: "refuse", title: `refused: ${state.keeper.id} (a stranger) and the daily key calling sweep_to_safe; set_safe_account(vault)` },
-      { n: 4, id: "policy", title: `set_policy_account(${state.keeper.id}); propose_allow_recipient applied after its wait (refused before it); a second proposal cancelled` },
-      { n: 5, id: "cage", title: "cage-check against the vault, rows printed (a drill vault is RED on ATTEST-2 by design)" },
+      { n: 4, id: "policy", title: `set_policy_account(${actors.policy.id}, its own key); the keeper proposing is refused; propose_allow_recipient applied after its wait (refused before it); a second proposal cancelled` },
+      { n: 5, id: "cage", title: "cage-check against the vault, rows printed (a drill vault is RED on ATTEST-2 by design; runs last)" },
+      ...EXT_STEPS(actors, safeId),
     ],
   };
 }
@@ -85,7 +81,7 @@ export function planStretchDrill({ state, safe, recipient = "stretchdrill-<8 hex
 // ---- reads -------------------------------------------------------------------------------------------------------
 
 /** Read-only. Never throws for a failed read: that is a failed check. */
-export async function preflight({ rpc, plan, state, adminHandle, expectedChain = "testnet" }) {
+export async function preflight({ rpc, plan, state, adminHandle, io, expectedChain = "testnet" }) {
   const checks = [];
   const guarded = async (name, fn) => {
     try {
@@ -119,7 +115,7 @@ export async function preflight({ rpc, plan, state, adminHandle, expectedChain =
     const lim = BigInt(await rpc.view(plan.vault, "pending_limit", { token: null }));
     return check("the pending limit holds the sweep request", lim >= plan.sweepYocto, `pending limit ${formatNear(lim)} NEAR, request ${formatNear(plan.sweepYocto)} NEAR`);
   });
-  for (const [role, id] of [["safe", plan.safe], ["stranger / policy (keeper)", plan.stranger], ["payee", plan.payee]]) {
+  for (const [role, id] of [["safe", plan.safe], ["stranger (keeper)", plan.stranger], ["payee", plan.payee]]) {
     if (!id) continue;
     await guarded(`the ${role} account exists`, async () => check(`the ${role} account exists`, (await rpc.account(id)) !== null, id));
   }
@@ -129,12 +125,11 @@ export async function preflight({ rpc, plan, state, adminHandle, expectedChain =
     const need = plan.sweepYocto + VAULT_WORKING_YOCTO;
     return check("the vault's free balance (information)", true, `${formatNear(free)} NEAR free beyond storage, ${formatNear(need)} NEAR needed${free < need ? `: the funder will top it up by ${formatNear(need - free)} NEAR` : ""}`);
   });
+  const free0 = await rpc.account(plan.vault).then(freeYocto, () => 0n);
+  const need0 = plan.sweepYocto + VAULT_WORKING_YOCTO;
+  checks.push(...(await extPreflight({ rpc, plan, io, vaultTopUp: free0 < need0 ? need0 - free0 : 0n })));
   return { checks, ok: checks.every((c) => c.ok), attest };
 }
-
-const freeYocto = (acc) => BigInt(acc.amount) - BigInt(acc.storage_usage) * STORAGE_YOCTO_PER_BYTE;
-const logsOf = (outcome) => (outcome?.receipts_outcome ?? []).flatMap((r) => r.outcome?.logs ?? []);
-const executorsOf = (outcome) => new Set((outcome?.receipts_outcome ?? []).map((r) => r.outcome?.executor_id).filter(Boolean));
 
 // ---- the run -----------------------------------------------------------------------------------------------------
 
@@ -150,7 +145,7 @@ const executorsOf = (outcome) => new Set((outcome?.receipts_outcome ?? []).map((
  *   adminHandle                 the admin key as the chain lists it
  */
 export async function runStretchDrill({ plan, state, io, yes = false, expectedChain = "testnet", wasmHash = null, cage = cageCheck, sleep = sleepReal, log = () => {} }) {
-  const pre = await preflight({ rpc: io.rpc, plan, state, adminHandle: io.adminHandle, expectedChain });
+  const pre = await preflight({ rpc: io.rpc, plan, state, adminHandle: io.adminHandle, io, expectedChain });
   if (!yes) return { dryRun: true, plan, pre };
   if (!pre.ok) throw new Refused(`preflight failed, nothing was sent:\n${report(pre.checks).text}`);
 
@@ -167,7 +162,8 @@ export async function runStretchDrill({ plan, state, io, yes = false, expectedCh
   const waitNs = (target) => until(async () => (await io.nowNs()) >= target, { tries: 80, ms: 1000 });
   const attest = () => rpc.view(vault, "attest");
   const admin = (method, args, gas) => io.admin([call(method, args, gas)]);
-  const keeper = (method, args, gas) => io.keeper([call(method, args, gas)]);
+  const keeper = (method, args, gas, receiver) => io.keeper([call(method, args, gas)], receiver);
+  const asPolicy = (method, args, gas) => io.asActor("policy", vault, [call(method, args, gas)]);
   const refused = async (fn, re) => {
     try {
       await fn();
@@ -183,10 +179,13 @@ export async function runStretchDrill({ plan, state, io, yes = false, expectedCh
   const results = [];
   let dead = false;
   const state_ = { queueId: null, payee: null };
-  const runStep = async (s, fn) => {
+  // `needs` marks a step as independent of the cascade: it runs unless a step it really depends on did not pass, and its own failure
+  // does not stop the others (steps 6 to 8 are reported separately).
+  const runStep = async (s, fn, { needs = null } = {}) => {
     const out = { n: s.n, id: s.id, title: s.title, checks: [] };
     results.push(out);
-    if (dead && s.id !== "cage") {
+    const blocked = needs ? needs.some((id) => !results.find((r) => r.id === id)?.ok) : dead && s.id !== "cage";
+    if (blocked) {
       out.skipped = true;
       out.ok = false;
       return;
@@ -199,10 +198,11 @@ export async function runStretchDrill({ plan, state, io, yes = false, expectedCh
     }
     out.ok = out.checks.length > 0 && out.checks.every((c) => c.ok);
     out.txs = out.checks.map((c) => c.tx).filter(Boolean);
-    if (!out.ok) dead = true;
+    if (!out.ok && !needs) dead = true;
     log({ step: s.id, ok: out.ok, txs: out.txs });
   };
   const step = (id) => plan.steps.find((s) => s.id === id);
+  const ctx = { plan, io, rpc, vault, attest, admin, keeper, until, waitNs, refused, refusalCheck, sleep, results };
 
   // 1 safe account
   await runStep(step("safe"), async (cs) => {
@@ -300,8 +300,9 @@ export async function runStretchDrill({ plan, state, io, yes = false, expectedCh
       const id = state_.queueId;
       const swept = await admin("sweep_to_safe", { id }, TGAS_SWEEP);
       cs.push(check("the admin's sweep_to_safe is accepted", true, `request ${id}`, swept.hash));
+      ctx.sweepGasBurnt = gasBurntOf(swept.outcome) || null;
       const logs = logsOf(swept.outcome).join("\n");
-      cs.at(-1).evidence = [`sweep tx ${swept.hash}`, ...logsOf(swept.outcome).map((l) => `log: ${SECRET_FREE(l).slice(0, 400)}`)];
+      cs.at(-1).evidence = [`sweep tx ${swept.hash}`, `gas burnt by the whole sweep tx: ${(Number(ctx.sweepGasBurnt ?? 0n) / 1e12).toFixed(2)} Tgas (attached ${TGAS_SWEEP} Tgas)`, ...logsOf(swept.outcome).map((l) => `log: ${SECRET_FREE(l).slice(0, 400)}`)];
       const event = /sweep_to_safe/.test(logs) && logs.includes(plan.safe);
       cs.push(check("the sweep event is in the logs, naming the safe account", event, event ? "EVENT sweep_to_safe found" : "no sweep_to_safe event naming the safe account in the transaction's logs"));
       cs.push(check("no sweep_failed in the logs", !/sweep_failed/.test(logs), /sweep_failed/.test(logs) ? "the transfer FAILED" : "none"));
@@ -337,14 +338,23 @@ export async function runStretchDrill({ plan, state, io, yes = false, expectedCh
 
   // 4 policy
   await runStep(step("policy"), async (cs) => {
-    const set = await admin("set_policy_account", { account: plan.policy });
-    const a = await attest();
-    cs.push(check("set_policy_account is accepted and attest() shows it", a.policy_account === plan.policy, `policy_account ${a.policy_account}`, set.hash));
+    if (!(await ensureActor(ctx, "policy", cs))) return;
+    const polKey = io.actorKey("policy");
+    cs.push(check("the policy account's key is not the keeper's (the stranger's)", !io.keeperPublicKey || polKey.publicKey !== io.keeperPublicKey, `policy account ${plan.policy} holds ${polKey.publicKey}${io.keeperPublicKey ? `, keeper ${plan.stranger} holds ${io.keeperPublicKey}` : ""}`));
+    if ((await attest()).policy_account === plan.policy) {
+      cs.push(check("the policy account is already set (resumed run)", true, `policy_account ${plan.policy}`));
+    } else {
+      const set = await admin("set_policy_account", { account: plan.policy });
+      const a = await attest();
+      cs.push(check("set_policy_account is accepted and attest() shows it", a.policy_account === plan.policy, `policy_account ${a.policy_account}`, set.hash));
+    }
+    const imposter = await refused(() => keeper("propose_allow_recipient", { account: plan.recipient }), /policy account only/);
+    cs.push(refusalCheck(`the keeper (${plan.stranger}) proposing is refused: it is not the policy account`, imposter, "\"policy account only\""));
     const known = () => attest().then((x) => x.proposals.map((p) => String(p.id)));
     const newest = async (beforeIds) => (await attest()).proposals.find((p) => !beforeIds.includes(String(p.id)));
 
     let ids = await known();
-    const p1 = await keeper("propose_allow_recipient", { account: plan.recipient });
+    const p1 = await asPolicy("propose_allow_recipient", { account: plan.recipient });
     const one = await newest(ids);
     cs.push(check("propose_allow_recipient by the policy account is queued, nothing changed yet", !!one && BigInt(one.executable_at) > BigInt(one.proposed_at), one ? `proposal ${one.id}, runs from ${one.executable_at}` : "no new proposal in attest()", p1.hash));
     if (!one) return;
@@ -375,7 +385,7 @@ export async function runStretchDrill({ plan, state, io, yes = false, expectedCh
     }
 
     ids = await known();
-    const p2 = await keeper("propose_set_token_limit", { token: "stretchdrill-token.testnet", limit: "1000" });
+    const p2 = await asPolicy("propose_set_token_limit", { token: "stretchdrill-token.testnet", limit: "1000" });
     const two = await newest(ids);
     cs.push(check("a second proposal (propose_set_token_limit) is queued", !!two, two ? `proposal ${two.id}` : "no new proposal in attest()", p2.hash));
     if (!two) return;
@@ -395,7 +405,12 @@ export async function runStretchDrill({ plan, state, io, yes = false, expectedCh
     return;
   });
 
-  // 5 cage-check
+  // 6 watcher, 7 the other propose_* methods, 8 a NEP-141 sweep
+  await runStep(step("watcher"), (cs) => runWatcher(ctx, cs), { needs: ["safe"] });
+  await runStep(step("proposals"), (cs) => runProposals(ctx, cs), { needs: ["policy"] });
+  await runStep(step("ft"), (cs) => runFt(ctx, cs), { needs: ["safe"] });
+
+  // 5 cage-check (last: it reads the vault after everything above)
   await runStep(step("cage"), async () => {
     const onChain = (await rpc.account(vault))?.code_hash;
     const pinned = wasmHash ?? onChain;
@@ -408,6 +423,7 @@ export async function runStretchDrill({ plan, state, io, yes = false, expectedCh
     return [check("cage-check ran; the only RED row is ATTEST-2 (a drill vault, by design)", ok, `verdict ${result.verdict}, exit ${exitCodeOf(result)}; RED: ${red.join(", ") || "none"}; code hash pinned to ${wasmHash ? "the given wasm" : "the vault's own on-chain hash (no wasm given)"}`)];
   });
 
+  results.sort((a, b) => a.n - b.n);
   return { dryRun: false, plan, pre, results, cage: results.cage ?? null, ok: results.every((r) => r.ok) };
 }
 
@@ -415,7 +431,7 @@ export async function runStretchDrill({ plan, state, io, yes = false, expectedCh
 
 export function renderStretch(out) {
   const { plan } = out;
-  const lines = [`stretchdrill on ${plan.vault} (safe account ${plan.safe}; stranger and policy account ${plan.stranger})`, "", "steps:", ...plan.steps.map((s) => `  ${s.n}. ${s.title}`), "", "preflight (read-only):", report(out.pre.checks).text];
+  const lines = [`stretchdrill on ${plan.vault} (safe account ${plan.safe}; stranger ${plan.stranger}; policy account ${plan.policy}; watcher ${plan.actors.watcher.id}; token ${plan.actors.token.id})`, "", "steps:", ...plan.steps.map((s) => `  ${s.n}. ${s.title}`), "", "preflight (read-only):", report(out.pre.checks).text];
   if (!out.dryRun) {
     lines.push("");
     for (const r of out.results) {
@@ -434,25 +450,26 @@ export function renderStretch(out) {
 
 export const NOT_COVERED = [
   "a drill build with a delay of seconds on testnet: not the production 24 h delay, not mainnet, no audit",
-  "the watcher path (add_watcher / set_emergency / a watcher's sweep) and a NEP-141 sweep are not run here",
-  "the policy path ran one allow-recipient proposal; the other three propose_* methods were not run on a chain",
-  "the keeper doubles as the stranger and the policy account, so this does not show a separate policy account's key custody",
+  "the documented failure of an UNREGISTERED safe account: the ft-mock fixture has no storage_deposit, so the failed-transfer path (sweep_failed, request gone, value stays) was shown with an oversized request, the same code path, not with a real registration check",
+  "a real NEP-141 token (storage registration, ft_transfer_call, real decimals): the fixture is a look-alike; also not run: a watcher's NEP-141 sweep and a sweep of an expired request",
+  "key custody: the policy and watcher keys are files on this machine in the gitignored testnet folder; that shows they are distinct keys, not how a real owner holds them (hardware wallet, multisig)",
 ];
 
 // ---- command line ------------------------------------------------------------------------------------------------
 
 export const STRETCHDRILL_USAGE =
-  "usage: kaigen-jobs stretchdrill [--safe <account>] [--funder-file <file>] [--wasm <file>] [--rpc <url>] [--yes]\n" +
+  "usage: kaigen-jobs stretchdrill [--safe <account>] [--funder-file <file>] [--wasm <file>] [--ft-wasm <file>] [--rpc <url>] [--yes]\n" +
   "  Testnet only. Dry run unless --yes: it reads the chain and prints the plan and the preflight; nothing is signed.\n" +
   "  Runs against the DRILL rehearsal vault named by KAIGEN_TESTNET_DIR/state.json, signed by its ML-DSA admin seed.\n" +
   "  --safe         the safe account (default: the rehearsal's supplier). Never the vault or the keeper\n" +
-  "  --funder-file  JSON {\"account_id\",\"private_key\"} used only if the vault needs a top-up (default KAIGEN_FUNDER_FILE, then <dir>/funder.json)\n" +
+  "  --funder-file  JSON {\"account_id\",\"private_key\"}: creates the policy, watcher and token sub-accounts (<name>.<funder>), tops the vault up if short (default KAIGEN_FUNDER_FILE, then <dir>/funder.json)\n" +
+  "  --ft-wasm      the NEP-141 look-alike fixture (default FT_MOCK_WASM, then D:/HACK-Projects/toolchain/w3-wasm/ft_mock.wasm); deployed only if its account does not exist yet\n" +
   "  --wasm         the drill wasm cage-check pins the code hash to (default out/drill/mamori.wasm if present, else the vault's own on-chain hash)\n" +
   "  --rpc          default https://rpc.testnet.fastnear.com. A node that says it is mainnet is refused";
 
 /** `argv` is what follows `stretchdrill`. */
 export function parseStretchArgs(argv, defaults = {}) {
-  const valued = new Set(["--safe", "--funder-file", "--wasm", "--rpc", "--chain-id"]);
+  const valued = new Set(["--safe", "--funder-file", "--wasm", "--ft-wasm", "--rpc", "--chain-id"]);
   const seen = {};
   let yes = false;
   for (let i = 0; i < argv.length; i++) {
@@ -467,6 +484,6 @@ export function parseStretchArgs(argv, defaults = {}) {
   }
   const chainId = seen["--chain-id"] ?? "testnet";
   if (chainId === "mainnet") throw new GlobalUsage("--chain-id mainnet: this tool is testnet only");
-  return { safe: seen["--safe"], funderFile: seen["--funder-file"] ?? defaults.funderFile, wasm: seen["--wasm"] ?? defaults.wasm, rpc: seen["--rpc"] ?? TESTNET_RPC, chainId, yes };
+  return { safe: seen["--safe"], funderFile: seen["--funder-file"] ?? defaults.funderFile, wasm: seen["--wasm"] ?? defaults.wasm, ftWasm: seen["--ft-wasm"] ?? defaults.ftWasm, rpc: seen["--rpc"] ?? TESTNET_RPC, chainId, yes };
 }
 

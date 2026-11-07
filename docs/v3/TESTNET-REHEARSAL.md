@@ -69,9 +69,17 @@ Two more commands, both run by the project owner's session on testnet (protocol 
 | 4 policy path | `set_policy_account` accepted and shown by `attest()`; `propose_allow_recipient` queued with the allowlist unchanged; `apply` before the wait refused ("still locked"); a second proposal queued and removed with `cancel_proposal`; `apply` after the wait ran the first, the recipient is allowlisted and no proposal waits |
 | 5 `cage-check` | 14 of 15 rows GREEN; ATTEST-2 RED by design, because it is a drill build with a delay of seconds |
 
+An extended run on 2026-11-08 added three steps (the policy actor is now a separate account with its own key, `sd-policy`, distinct from the stranger), all PASS:
+
+| step | evidence |
+|---|---|
+| 6 watcher path | `add_watcher` registered `sd-watcher` (the vault itself is refused as a watcher); with no emergency window the watcher's sweep is refused ("watchers can sweep only in a declared window"); `set_emergency` over 7 days is refused; inside a declared window the watcher's `sweep_to_safe` is accepted (30 Tgas attached, the admin's sweep burnt 5.78 Tgas), the event names the watcher as caller and the safe account as destination, the vault fell by exactly the amount and the watcher paid the gas; the watcher is refused on `set_safe_account`, `set_emergency` and `cancel` ("admin only"); the window ended by itself and the watcher was refused again; after an admin closed a window the watcher was refused; `remove_watcher` emptied `watchers()` |
+| 7 remaining proposals | `propose_set_token_limit`, `propose_set_pending_limit` and `propose_add_daily_key` by the policy account were queued with the effect not yet in force, then applied after the wait by a stranger (the keeper) and read back: token limit and pending limit 100000, the daily key listed |
+| 8 NEP-141 sweep | with the look-alike token fixture `ft-mock` (not a real token): 100 token units swept, `ft_balance_of` of the safe account 0 to 100 and of the vault 1000 to 900, the sweep event names the token and the safe account, the payee, the stranger and the token contract unchanged; an oversized request (5000 units) went through the contract as `sweep_failed` and every balance was unchanged |
+
 A first run of this command failed step 4 because the check for "apply before the delay is refused" ran about 3.3 s after the proposal's run time (the delay is 10 s and other transactions ran in between). That was a test-ordering bug, confirmed from block timestamps; the check now runs right after the proposal.
 
-Not covered by this run: the watcher path (`add_watcher`, `set_emergency`, a watcher's sweep), a NEP-141 sweep, three of the four `propose_*` methods, and a separate policy account with its own key (the keeper acted as both stranger and policy account). The drill delay is 10 s, not the production 24 h.
+Still not covered: the documented failure of a safe account that is not registered with the token (the look-alike fixture has no storage registration, so the failed-transfer path was shown with an oversized request, the same code path); a real NEP-141 token (storage registration, `ft_transfer_call`, real decimals); a watcher's NEP-141 sweep; a sweep of an expired request; and how a real owner holds the policy and watcher keys (here they are files in the gitignored testnet folder, which shows they are distinct keys, not custody). The drill delay is 10 s, not the production 24 h. During the first extended run two checks failed on wrong expectations in the harness (a watcher-signed transaction legitimately executes a receipt on the signing account, and a watcher funded with 0.04 NEAR could not prepay the gas); both were harness fixes, not contract results.
 
 ## Not covered
 

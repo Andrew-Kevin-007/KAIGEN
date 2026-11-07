@@ -434,7 +434,7 @@ DRY RUN: nothing was signed or sent. To do it for real:
     const defaultFunder = process.env.KAIGEN_FUNDER_FILE ?? (fs.existsSync(path.join(dir, "funder.json")) ? path.join(dir, "funder.json") : undefined);
     let o;
     try {
-      o = parseStretchArgs(process.argv.slice(3), { funderFile: defaultFunder, wasm: fs.existsSync(path.join(root, "out", "drill", "mamori.wasm")) ? path.join(root, "out", "drill", "mamori.wasm") : undefined });
+      o = parseStretchArgs(process.argv.slice(3), { funderFile: defaultFunder, wasm: fs.existsSync(path.join(root, "out", "drill", "mamori.wasm")) ? path.join(root, "out", "drill", "mamori.wasm") : undefined, ftWasm: process.env.FT_MOCK_WASM ?? "D:/HACK-Projects/toolchain/w3-wasm/ft_mock.wasm" });
     } catch (e) {
       if (!(e instanceof GlobalUsage)) throw e;
       console.error(`${e.message}
@@ -446,20 +446,52 @@ ${STRETCHDRILL_USAGE}`);
     if (!fs.existsSync(stateFile)) throw new Error(`no provisioned rehearsal in ${dir} (state.json is missing): set KAIGEN_TESTNET_DIR to the folder \`testnet\` used`);
     const state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
     const rpc = makeRpc(o.rpc);
-    const plan = planStretchDrill({ state, safe: o.safe, recipient: `stretchdrill-${randomBytes(4).toString("hex")}.testnet` });
+    // The funder creates the policy, watcher and token sub-accounts; a dry run only needs its account id.
+    let funder = null;
+    if (o.funderFile) {
+      try {
+        funder = loadFunder(o.funderFile);
+      } catch (e) {
+        if (o.yes) throw e;
+      }
+    }
+    // Accounts an earlier run created are named in the actors file: they are reused (and topped up), whichever funder is given now.
+    const actorFile = path.join(dir, "stretchdrill-actors.json");
+    const readActors = () => (fs.existsSync(actorFile) ? JSON.parse(fs.readFileSync(actorFile, "utf8")) : {});
+    const existingActors = Object.fromEntries(["policy", "watcher", "token"].filter((r) => readActors()[r]?.account).map((r) => [r, readActors()[r].account]));
+    const plan = planStretchDrill({ state, safe: o.safe, recipient: `stretchdrill-${randomBytes(4).toString("hex")}.testnet`, funderId: funder?.accountId ?? "no-funder-file.testnet", existingActors });
     const sender = makeSender({ rpc });
+    // Own keys of the policy actor, the watcher, the token account and the added daily key: made here, saved in the gitignored folder BEFORE any NEAR moves.
+    const keyCache = new Map();
+    const actorKey = (role, { create = true, fresh = false } = {}) => {
+      const saved = readActors();
+      if (saved[role] && !fresh) {
+        if (!keyCache.has(saved[role].privateKey)) keyCache.set(saved[role].privateKey, signerFromPrivateKey(saved[role].privateKey));
+        return { publicKey: saved[role].publicKey, signer: keyCache.get(saved[role].privateKey) };
+      }
+      if (!create) return null;
+      const k = newClassicalKey();
+      fs.writeFileSync(actorFile, JSON.stringify({ ...saved, [role]: { account: plan.actors[role]?.id ?? null, privateKey: k.privateKey, publicKey: k.publicKey } }, null, 2), { mode: 0o600 });
+      keyCache.set(k.privateKey, k.signer);
+      return { publicKey: k.publicKey, signer: k.signer };
+    };
+    const ftWasm = o.ftWasm && fs.existsSync(o.ftWasm) ? new Uint8Array(fs.readFileSync(o.ftWasm)) : null;
     const admin = adminSigner({ seedFile: state.adminSeedsPath, vault: state.vault });
     if (!admin) throw new Error(`no admin seed for ${state.vault} in ${state.adminSeedsPath}`);
     const keeperSigner = signerFromPrivateKey(state.keeper.privateKey);
-    const funder = o.yes && o.funderFile ? loadFunder(o.funderFile) : null;
     const daily = agentCaller({ network: "testnet", vault: state.vault, privateKey: state.daily.privateKey });
     const io = {
       rpc,
       adminHandle: admin.publicKeyHandle,
       admin: (actions) => sender({ signerId: state.vault, signer: admin, receiverId: state.vault, actions }),
-      keeper: (actions) => sender({ signerId: state.keeper.id, signer: keeperSigner, receiverId: state.vault, actions }),
+      keeper: (actions, receiverId) => sender({ signerId: state.keeper.id, signer: keeperSigner, receiverId: receiverId ?? state.vault, actions }),
+      keeperPublicKey: keeperSigner.publicKey,
+      actorKey,
+      asActor: (role, receiverId, actions) => sender({ signerId: plan.actors[role].id, signer: actorKey(role).signer, receiverId, actions }),
+      funderSend: o.yes && funder ? (receiverId, actions) => sender({ signerId: funder.accountId, signer: funder.signer, receiverId, actions }) : null,
+      ftWasm,
       daily,
-      fund: funder ? (yocto) => sender({ signerId: funder.accountId, signer: funder.signer, receiverId: state.vault, actions: [{ type: "Transfer", yocto }] }) : null,
+      fund: o.yes && funder ? (yocto) => sender({ signerId: funder.accountId, signer: funder.signer, receiverId: state.vault, actions: [{ type: "Transfer", yocto }] }) : null,
       nowNs: async () => BigInt((await rpc.call("block", { finality: "final" })).header.timestamp_nanosec),
       // The block the vault's receipt ran in: its time is the `now` the contract saw.
       receiptNs: async (outcome) => {
