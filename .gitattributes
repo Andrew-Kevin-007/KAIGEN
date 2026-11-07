@@ -1,0 +1,11 @@
+# Normalise line endings so a Windows clone passes the same tests as a Linux one.
+* text=auto
+Makefile text eol=lf
+*.sha256 text eol=lf
+*.sh text eol=lf
+*.wasm binary
+*.mp4 binary
+*.png binary
+*.webp binary
+*.woff binary
+*.woff2 binary

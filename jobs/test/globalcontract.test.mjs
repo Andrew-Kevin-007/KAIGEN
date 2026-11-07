@@ -956,7 +956,10 @@ test("cli: usage errors exit 2 and print the usage, --yes without a funder file 
   assert.equal(cli(["--verify", VAULT, "--yes"]).status, 2);
   const started = Date.now();
   // The RPC is unreachable on purpose: if the refusal needed the network this would hang through the client's retries.
-  const noFunder = cli(["--kizashi", KIZASHI, "--rpc", "http://127.0.0.1:9", "--yes"]);
+  // --wasm is given on purpose: the default is out/prod/mamori.wasm, which a clean clone does not have (the missing-wasm refusal would come first).
+  const wasmFile = path.join(tmp("gc-nofunder-"), "mamori.wasm");
+  fs.writeFileSync(wasmFile, MAMORI);
+  const noFunder = cli(["--kizashi", KIZASHI, "--wasm", wasmFile, "--rpc", "http://127.0.0.1:9", "--yes"]);
   assert.equal(noFunder.status, 1);
   assert.match(noFunder.stderr, /--yes needs --funder-file/);
   assert.ok(Date.now() - started < 20_000, "refused without touching the network");

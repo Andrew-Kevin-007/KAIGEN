@@ -1,0 +1,91 @@
+# Keyless CI: every job runs with no secrets, no funder file, no chain and no prebuilt out/ folder.
+# The same commands, in the same order, are what docs/internal/V3-SCREENER-READY.md ran in a fresh clone on Windows.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Node 24: `node --test` runs app/lib/*.test.ts directly (type stripping), which older Node does not.
+  NODE_VERSION: "24"
+
+jobs:
+  contracts:
+    name: contracts (cargo test --workspace)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml pins the compiler and the wasm32 target; install exactly that, explicitly, because rustup
+      # 1.28+ no longer installs a pinned toolchain on first use. AWS_LC_SYS_PREBUILT_NASM (Makefile) is Windows-only.
+      - name: Install the pinned Rust toolchain
+        run: |
+          channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --target wasm32-unknown-unknown
+          rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test --workspace
+        run: cargo test --workspace --locked
+      - name: The offline headline demo (a prompt-injected agent's key is burned after three refusals)
+        run: cargo test --locked -p mamori demo_story -- --nocapture
+
+  jobs:
+    name: jobs (node --test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: jobs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            jobs/package-lock.json
+            scripts/package-lock.json
+      - run: npm ci
+      # jobs/ imports ../scripts/omens.mjs (and others), which need scripts/'s own dependencies.
+      - run: npm ci
+        working-directory: scripts
+      - run: node --test test/*.test.mjs
+
+  scripts:
+    name: scripts (node --test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: scripts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: scripts/package-lock.json
+      - run: npm ci
+      - run: node --test *.test.mjs
+
+  app:
+    name: app (tsc + unit tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm test
