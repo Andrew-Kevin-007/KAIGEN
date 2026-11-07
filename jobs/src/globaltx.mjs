@@ -17,7 +17,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { generateSigner, signerFromSeed } from "@fastnear/ml-dsa-65";
-import { bytesToBase64, decodeNearPublicKey, exp, fromBase58, NEAR_KEY_DESCRIPTORS, sha256, signerFromPrivateKey, toBase58 } from "@fastnear/utils";
+import { bytesToBase64, decodeNearPublicKey, exp, fromBase58, NEAR_KEY_DESCRIPTORS, privateKeyFromRandom, publicKeyFromPrivate, sha256, signerFromPrivateKey, toBase58 } from "@fastnear/utils";
 import { RpcError } from "./rpc.mjs";
 
 const TGAS = (n) => BigInt(n) * 10n ** 12n;
@@ -80,7 +80,9 @@ export function hashBytes(codeHash) {
 }
 
 /**
- * Plain-data action descriptors, the same shape mainnet.mjs plans with, plus the two global-contract ones:
+ * Plain-data action descriptors, the same shape mainnet.mjs plans with, plus the two global-contract ones
+ * (and, for prodvault / plant-key, { type: "DeployContract", code } and
+ * { type: "AddKeyFunctionCall", publicKey, allowanceYocto, receiverId, methods }):
  *   { type: "DeployGlobalContract", code: Uint8Array, mode: "CodeHash" }
  *   { type: "UseGlobalContract", codeHash: "<base58 sha256>" }
  * @returns the borsh value of one Action
@@ -95,6 +97,12 @@ export function mapAction(a) {
       return { addKey: { publicKey: publicKeyOf(a.publicKey), accessKey: { nonce: 0n, permission: { fullAccess: {} } } } };
     case "DeleteKey":
       return { deleteKey: { publicKey: publicKeyOf(a.publicKey) } };
+    case "DeployContract":
+      if (!(a.code instanceof Uint8Array) || a.code.length === 0) throw new Error("DeployContract needs the wasm bytes");
+      return { deployContract: { code: a.code } };
+    case "AddKeyFunctionCall":
+      // allowanceYocto null = unlimited (the shape cage-check's ARCH-2.8-3 calls red); plant-key builds it on purpose.
+      return { addKey: { publicKey: publicKeyOf(a.publicKey), accessKey: { nonce: 0n, permission: { functionCall: { allowance: a.allowanceYocto === null || a.allowanceYocto === undefined ? null : BigInt(a.allowanceYocto), receiverId: a.receiverId, methodNames: a.methods ?? [] } } } } };
     case "FunctionCall":
       return { functionCall: { methodName: a.method, args: new TextEncoder().encode(JSON.stringify(a.args ?? {})), gas: TGAS(a.gasTgas), deposit: BigInt(a.depositYocto ?? 0) } };
     case "DeployGlobalContract":
@@ -244,6 +252,12 @@ export function loadFunder(file) {
     throw new Error("the funder file's private_key is not a valid NEAR private key");
   }
   return { accountId: raw.account_id, publicKey: signer.publicKey, signer };
+}
+
+/** A fresh classical (ed25519) key: `{ privateKey, publicKey, signer }`. The private key is for the caller to put in a gitignored file, never to print. */
+export function newClassicalKey() {
+  const privateKey = privateKeyFromRandom();
+  return { privateKey, publicKey: publicKeyFromPrivate(privateKey), signer: signerFromPrivateKey(privateKey) };
 }
 
 /** `{ vault: hex of the 32-byte ML-DSA-65 seed }`, the format DEMO_ADMIN_SEEDS and the testnet rehearsal use. */

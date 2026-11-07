@@ -15,9 +15,14 @@
 //   globalcontract  testnet only (M6): publish Mamori as a global contract BY CODE HASH, create a vault and attach it with
 //              init in the same transaction, verify over RPC (dry run unless --yes; run it with no arguments for the options)
 //              `globalcontract publish --wasm <file>`: publish-only, any valid wasm, no init, prints the MEASURED cost
+//   prodvault  testnet only: a PRODUCTION-build vault (24 h delay) with an ML-DSA-only admin, one agent key and one allowlisted supplier,
+//              then cage-check per row (dry run unless --yes; run it with no arguments for the options). Keys go to KAIGEN_TESTNET_DIR
+//   plant-key  testnet only: plant a key the cage must not have (--kind ed25519-full|null-allowance) or take it off (--remove <publickey>),
+//              signed by the vault's ML-DSA admin seed; prints the cage-check command to run next (dry run unless --yes)
 //
 // Config: deployments.json (path in KAIGEN_DEPLOYMENTS, default ../deployments.json). Secrets only
 // come from the environment or files outside the repo; nothing secret is read from deployments.json.
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,10 +35,12 @@ import { judge, renderJudge } from "./judge.mjs";
 import { provision, recycle, rehearse, renderRehearsal, zeroKey } from "./testnet.mjs";
 import { renderZeroKey, runFireTest, ZeroKeyError } from "./firetest.mjs";
 import { defaultSeedFile, describeWasm, GLOBAL_USAGE, GlobalUsage, parseGlobalArgs, planGlobalContract, measurePublishTx, planPublishOnly, renderMeasured, renderRun, runGlobalContract, verifyVault } from "./globalcontract.mjs";
-import { adminSigner, loadFunder, makeSender } from "./globaltx.mjs";
+import { adminSigner, loadFunder, makeSender, newClassicalKey } from "./globaltx.mjs";
 import { record, snapshot } from "./hinomi.mjs";
 import { NO_VAULTS, runKeeper, tripOnce } from "./keeper.mjs";
 import { buildPlan, executeStage, findLatestGate, loadInputs, lockKizashi, Refused, renderPlan, runGates } from "./mainnet.mjs";
+import { PLANT_USAGE, parsePlantArgs, planPlantKey, renderPlant, runPlantKey } from "./plantkey.mjs";
+import { assertSecretsDir, parseProdVaultArgs, planProdVault, PRODVAULT_USAGE, renderRun as renderProdVault, runProdVault } from "./prodvault.mjs";
 import { makeRpc } from "./rpc.mjs";
 import { report, verifyAll, verifyRelease, writeGate } from "./verify.mjs";
 import { predeploy, report as predeployReport } from "../../scripts/predeploy.mjs";
@@ -321,6 +328,99 @@ ${out.rec.ok ? "ATTACHED AND VERIFIED" : "VERIFICATION FAILED: do not announce a
     process.exitCode = out.rec.ok ? 0 : 1;
   },
 
+  /**
+   * Testnet only: a production-build vault with an ML-DSA-only admin, one agent daily key and one allowlisted supplier, then cage-check.
+   * Dry run unless --yes (reads only). Keys go to KAIGEN_TESTNET_DIR (gitignored) and are never printed. See prodvault.mjs.
+   */
+  async prodvault() {
+    let o;
+    try {
+      o = parseProdVaultArgs(process.argv.slice(3), { wasm: path.join(root, "out", "prod", "mamori.wasm"), funderFile: process.env.KAIGEN_FUNDER_FILE });
+    } catch (e) {
+      if (!(e instanceof GlobalUsage)) throw e;
+      console.error(`${e.message}
+${PRODVAULT_USAGE}`);
+      process.exitCode = 2;
+      return;
+    }
+    const dir = assertSecretsDir(process.env.KAIGEN_TESTNET_DIR ?? path.join(root, ".kaigen-testnet"), root);
+    let wasm;
+    try {
+      wasm = fs.readFileSync(o.wasm);
+    } catch (e) {
+      throw new Error(`cannot read the wasm ${o.wasm}: ${e.code ?? e.message}`);
+    }
+    const funder = o.funderFile ? loadFunder(o.funderFile) : null;
+    const rpc = makeRpc(o.rpc);
+    const plan = planProdVault({ wasm, wasmPath: o.wasm, funderId: funder?.accountId ?? null, kizashi: o.kizashi, supplier: o.supplier, suffix: randomBytes(4).toString("hex") });
+    const out = await runProdVault({
+      plan,
+      rpc,
+      funder,
+      sender: makeSender({ rpc }),
+      newKey: newClassicalKey,
+      makeAdmin: (a) => adminSigner({ seedFile: path.join(dir, "admin-seeds.json"), ...a }),
+      dir,
+      yes: o.yes,
+      expectedChain: o.chainId,
+      log: (e) => console.log(JSON.stringify({ at: new Date().toISOString(), ...e })),
+    });
+    console.log(`
+${renderProdVault(out)}`);
+    if (out.dryRun) {
+      console.log(`
+DRY RUN: nothing was signed or sent. To do it for real (creates and funds a vault with 4.9 NEAR of the funder's testnet balance):
+  node jobs/src/bin.mjs prodvault --kizashi ${o.kizashi} --funder-file ${o.funderFile ?? "<funded testnet account file>"}${o.supplier ? ` --supplier ${o.supplier}` : ""} --yes`);
+      process.exitCode = out.pre.ok ? 0 : 1;
+      return;
+    }
+    console.log(`
+record (holds the agent key, keep it private): ${out.recordFile}; the vault's ML-DSA-65 admin seed is in ${path.join(dir, "admin-seeds.json")} (back it up: it is the only key of ${plan.vault})`);
+    process.exitCode = out.checks.every((c) => c.ok) ? exitCodeOf(out.cage) : 1;
+  },
+
+  /** Testnet only: plant (or remove) a key the cage must not have, signed by the vault's ML-DSA admin seed. Dry run unless --yes. See plantkey.mjs. */
+  async "plant-key"() {
+    const defaultDir = process.env.KAIGEN_TESTNET_DIR ?? path.join(root, ".kaigen-testnet");
+    let o;
+    let plan;
+    try {
+      o = parsePlantArgs(process.argv.slice(3), { seedFile: path.join(defaultDir, "admin-seeds.json") });
+      plan = planPlantKey({ vault: o.vault, kind: o.kind, remove: o.remove, receiver: o.receiver });
+    } catch (e) {
+      if (!(e instanceof GlobalUsage)) throw e;
+      console.error(`${e.message}
+${PLANT_USAGE}`);
+      process.exitCode = 2;
+      return;
+    }
+    const dir = assertSecretsDir(path.dirname(o.seedFile), root);
+    const rpc = makeRpc(o.rpc);
+    const out = await runPlantKey({
+      plan,
+      rpc,
+      sender: makeSender({ rpc }),
+      newKey: newClassicalKey,
+      makeAdmin: (a) => adminSigner({ seedFile: o.seedFile, ...a }),
+      dir,
+      yes: o.yes,
+      expectedChain: o.chainId,
+      rpcUrl: o.rpc,
+      wasmPath: o.wasm,
+      log: (e) => console.log(JSON.stringify({ at: new Date().toISOString(), ...e })),
+    });
+    console.log(`
+${renderPlant(out)}`);
+    if (out.dryRun) {
+      console.log(`
+DRY RUN: nothing was signed or sent. To do it for real:
+  node jobs/src/bin.mjs ${process.argv.slice(2).join(" ")} --yes`);
+      process.exitCode = out.pre.ok ? 0 : 1;
+      return;
+    }
+    process.exitCode = out.confirmed ? 0 : 1;
+  },
+
   /** Mainnet deploy tooling. Dry-run by default; see mainnet.mjs. */
   async mainnet() {
     const args = process.argv.slice(3);
@@ -412,7 +512,7 @@ ${out.rec.ok ? "ATTACHED AND VERIFIED" : "VERIFICATION FAILED: do not announce a
 
 const cmd = process.argv[2];
 if (!commands[cmd]) {
-  console.error("usage: kaigen-jobs hinomi | keeper [--loop] | watch | firetest | demo | testnet | recycle | zerokey [--yes] | judge | verify [--release [--pre-lock]] | cage-check <account> | globalcontract [publish --wasm <file>] --kizashi <account> [--yes] | mainnet gates|plan|execute|lock");
+  console.error("usage: kaigen-jobs hinomi | keeper [--loop] | watch | firetest | demo | testnet | recycle | zerokey [--yes] | judge | verify [--release [--pre-lock]] | cage-check <account> | globalcontract [publish --wasm <file>] --kizashi <account> [--yes] | prodvault --kizashi <account> --funder-file <file> [--yes] | plant-key <vault> --kind ed25519-full|null-allowance [--remove <publickey>] [--yes] | mainnet gates|plan|execute|lock");
   process.exit(2);
 }
 commands[cmd]().catch((e) => {

@@ -25,7 +25,7 @@ const call = (methodName, args, gasT = 30, deposit = "0") => actions.functionCal
 const send = async (signerId, signer, receiverId, acts) => hashOf(await sendTx({ signerId, signer, receiverId, actions: acts, waitUntil: "FINAL", network: NETWORK }));
 
 /** Keys are written the moment an account exists, so a failed run can never strand an account it created. */
-function saveKeys(outDir, account) {
+export function saveKeys(outDir, account) {
   const file = path.join(outDir, "accounts.json");
   const all = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
   all[account.id] = { privateKey: account.privateKey, publicKey: account.publicKey };

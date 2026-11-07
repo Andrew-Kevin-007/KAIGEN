@@ -305,7 +305,7 @@ export async function measurePublishTx({ rpc, txHash, signerId, bytes }) {
   return { codeHash, measured: measureFromOutcome({ outcome, bytes: n }) };
 }
 
-const availableYocto = (acc) => BigInt(acc.amount) - BigInt(acc.storage_usage) * STORAGE_YOCTO_PER_BYTE - BigInt(acc.locked ?? 0);
+export const availableYocto = (acc) => BigInt(acc.amount) - BigInt(acc.storage_usage) * STORAGE_YOCTO_PER_BYTE - BigInt(acc.locked ?? 0);
 const result = (name, ok, detail, extra = {}) => ({ name, ok, detail, ...extra });
 const guarded = async (name, fn) => {
   try {
