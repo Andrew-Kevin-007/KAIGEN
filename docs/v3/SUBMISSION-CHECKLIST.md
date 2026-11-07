@@ -13,7 +13,7 @@ Status: 2026-11-07 (stretch items built; numbers refreshed). For Kevin only. Sou
 
 - [ ] **1. Run the zero-key harness.**
   - Who: Kevin.
-  - Command: see that file (`docs/internal/V3-OPEN-CYBORG-PROGRESS.md` is not in the repo).
+  - Command: see that file ([V3-OPEN-CYBORG-PROGRESS.md](evidence/V3-OPEN-CYBORG-PROGRESS.md), copied to `docs/v3/evidence/`).
   - Done when: a zero-key Kizashi run is recorded in a fire-test file, and a third-party claim still works. [PLAN section A, Tue 3 Nov; PLAN section B stage 4 item 2]. Status: `zerokey` passed in both rehearsal runs [TESTNET-REHEARSAL.md]; the fire-test record was not checked here.
 
 - [ ] **2. Review the UNVERIFIED README claims.**
@@ -52,3 +52,10 @@ Status: 2026-11-07 (stretch items built; numbers refreshed). For Kevin only. Sou
   - Done when: the submission confirmation is saved. Aim Fri 13 Nov 2026. Hard close Sat 14 Nov 2026 23:59 UTC. [PLAN section A, Wed 11 to Fri 13 Nov; ROADMAP.md section 1 item 9]
 
 Not on this list: the Kizashi lock (PLAN stage 5). It is an irreversible step and is never done under time pressure. [PLAN ground rule 1]
+
+## Owner TODO (open items from the README review)
+
+- Demo post URL: add it to the README source line after publishing, or delete that line.
+- Baseline: say whether a pre-window tag or branch exists (the first commit is 2026-11-01), and state it in the README build window.
+- Track list: add the organiser's link for the `security` and `open` track ids.
+- Landing page: state the template origin, and whether `site/` comes back (it is not tracked in git).

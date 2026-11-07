@@ -69,14 +69,14 @@ Status: design draft. Testnet only as the target. No audit. v3 contract code exi
 
 ## 6. Relationship to Kizashi
 
-Kizashi stays optional. It is a circuit breaker for a break someone discloses. The omen key is not a canary. Nothing says it breaks before the keys beside it. It cannot catch a silent attacker or a first-to-break state actor who keeps the break private. Kizashi verifies classical omen signatures (ed25519 and secp256k1) with existing host functions. On in-contract ML-DSA verification the sources disagree. This design text says a contract cannot verify an ML-DSA signature, citing NEP-645 for on-chain verification host functions being out of scope (https://github.com/near/neps/pull/645). V3-W2-EDITH-PROGRESS.md reports that the locked near-sdk 5.30 has `env::ml_dsa_verify` (protocol 87 and later). Both are to re-verify against the near-sdk source before relying on them. Whether `contracts/mamori` calls `ml_dsa_verify` was not checked in this edit.
+Kizashi stays optional. It is a circuit breaker for a break someone discloses. The omen key is not a canary. Nothing says it breaks before the keys beside it. It cannot catch a silent attacker or a first-to-break state actor who keeps the break private. Kizashi verifies classical omen signatures (ed25519 and secp256k1) with existing host functions. On in-contract ML-DSA verification the sources disagree. This design text says a contract cannot verify an ML-DSA signature, citing NEP-645 for on-chain verification host functions being out of scope (https://github.com/near/neps/pull/645). [V3-W2-EDITH-PROGRESS.md](evidence/V3-W2-EDITH-PROGRESS.md) reports that the locked near-sdk 5.30 has `env::ml_dsa_verify` (protocol 87 and later). Both are to re-verify against the near-sdk source before relying on them. Whether `contracts/mamori` calls `ml_dsa_verify` was not checked in this edit.
 
 ## 7. What is unknown
 
 | Item | Status |
 |---|---|
 | Whether a contract can read its own account's key list | Inference: no host function found. The host-function list was not read. |
-| What `signer_account_pk` returns for an ML-DSA signer | Unverified. ARCHITECTURE.md 2.2 says near-sdk 5.30 has no ML-DSA key variant; V3-W2-EDITH-PROGRESS.md reports `CurveType::MLDSA65` in the locked near-sdk 5.30. To re-verify against the near-sdk source before relying on it. |
+| What `signer_account_pk` returns for an ML-DSA signer | Unverified. ARCHITECTURE.md 2.2 says near-sdk 5.30 has no ML-DSA key variant; [V3-W2-EDITH-PROGRESS.md](evidence/V3-W2-EDITH-PROGRESS.md) reports `CurveType::MLDSA65` in the locked near-sdk 5.30. To re-verify against the near-sdk source before relying on it. |
 | Wall-clock length of 200 blocks, yield payload limit | Unverified |
 | Gas keys with method restriction, ML-DSA gas-key support | Untested |
 | False-positive cost of a strike | No source documents it. We measure ours. |
@@ -84,4 +84,4 @@ Kizashi stays optional. It is a circuit breaker for a break someone discloses. T
 
 ## Corrections pending
 
-- ML-DSA support in near-sdk 5.30 (sections 6 and 7 above, and the `signer_account_pk` row of section 7): this file says a contract cannot verify ML-DSA and that near-sdk 5.30 has no ML-DSA key variant; V3-W2-EDITH-PROGRESS.md says `CurveType::MLDSA65` and `env::ml_dsa_verify` are in the locked near-sdk 5.30. Both are kept with their sources. Re-verify against the near-sdk source before relying on either. ARCHITECTURE.md section 2.2 carries the same disagreement.
+- ML-DSA support in near-sdk 5.30 (sections 6 and 7 above, and the `signer_account_pk` row of section 7): this file says a contract cannot verify ML-DSA and that near-sdk 5.30 has no ML-DSA key variant; [V3-W2-EDITH-PROGRESS.md](evidence/V3-W2-EDITH-PROGRESS.md) says `CurveType::MLDSA65` and `env::ml_dsa_verify` are in the locked near-sdk 5.30. Both are kept with their sources. Re-verify against the near-sdk source before relying on either. ARCHITECTURE.md section 2.2 carries the same disagreement.

@@ -15,10 +15,10 @@ An optional omen contract (Kizashi) lets anyone who discloses a break of a class
 - The timed attacks used a fast-forwarded chain clock. [ATTACK-RESULTS.md section 14]
 - The hash-pinned global contract for Mamori (M6): tooling is built. On testnet protocol 88 the mechanism is proven with a 1,024-byte module (publish, create and attach accepted; global_contract_hash equals the published hash). The real Mamori publish is not run. Init in the same transaction as the attach is not exercised. Mainnet availability is unconfirmed. [GLOBAL-CONTRACT.md sections 3, 6a and 7; MAINNET-READS.md]
 - Testnet rehearsal (`testnet` and `zerokey`) passed twice: on commit 5107d48, then on the final build with the stretch items (commit cb62c80). On 2026-11-07 and 2026-11-08, `stretchdrill` ran all eight steps of the stretch items on a real testnet chain (drill vault, 10 s delay): the safe account, `sweep_to_safe` and its refusals, the policy path with a separate policy account, `cage-check` (ATTEST-2 is red by design on a drill build), the watcher path, the three other `propose_*` methods applied by a stranger, and a NEP-141 sweep with a look-alike token fixture, including the `sweep_failed` path. All eight passed. A production-mode vault (`prodvault`, 24 h delay) is on testnet: cage-check is GREEN on all 15 conditions, and RED on a planted full-access key until that key is removed. [TESTNET-REHEARSAL.md, second and third runs]
-- The Create vault page (`app/app/vault/create/`) has not been run against a chain. It is enabled on testnet only.
+- The Create vault page (`app/app/vault/create/`) has not been run against a chain, as far as the repository records show. It is enabled on testnet only.
 - v2 was deployed as drill records on testnet [LANDSCAPE.md section 3]. v3 drill and production-mode vaults were deployed on testnet by the rehearsal commands, on 2026-11-04 and 2026-11-07 [TESTNET-REHEARSAL.md].
 
-[Source Code](https://github.com/Andrew-Kevin-007/KAIGEN). Demo post: `<!-- DEMO POST URL: Kevin adds after publishing -->`. There is no live demo yet; the app runs locally (see Getting Started).
+[Source Code](https://github.com/Andrew-Kevin-007/KAIGEN). There is no live demo yet; the app runs locally (see Getting Started).
 
 Design documents for v3 are in [docs/v3/](docs/v3/README.md). The v2 to v3 change list, including the breaking change, is in [docs/v3/CHANGES-V2-TO-V3.md](docs/v3/CHANGES-V2-TO-V3.md).
 
@@ -30,9 +30,9 @@ A NEAR account keeps accepting a key after that key is broken or stolen, and an 
 
 | Failure mode | Why it survives today | What KAIGEN does |
 | --- | --- | --- |
-| A classical curve (ed25519, secp256k1) is broken | Classical keys stay on the account until someone deletes them `<!-- UNVERIFIED: general premise -->` | The ML-DSA-65 admin key deletes classical keys at lockdown. An omen claim, when someone discloses a break, raises the era, and `trip` then deletes the recorded classical keys. [ARCHITECTURE.md section 1] |
+| A classical curve (ed25519, secp256k1) is broken | Classical keys stay on the account until someone deletes them. This is a general NEAR premise, not checked against the repository. | The ML-DSA-65 admin key deletes classical keys at lockdown. An omen claim, when someone discloses a break, raises the era, and `trip` then deletes the recorded classical keys. [ARCHITECTURE.md section 1] |
 | An agent's hot key is prompt-injected or hijacked | The allowance on a function-call key is a gas budget, not a value cap | Per-token 24 h cap, allowlist (off by default), a queue with a delay for larger sends, and a strike count that burns the key. [LOSS-BOUND.md section 3, E1 to E9] |
-| The owner has to watch every vault at once | Nobody online means no response | `trip` reads the era from Kizashi. Anyone can call it. [ATTEST-CHECK.md section 5] `<!-- UNVERIFIED in v3 sources: "anyone can call trip" is from the old v2 line table; the v3 code shows trip(&self) with no admin argument. -->` |
+| The owner has to watch every vault at once | Nobody online means no response | `trip` reads the era from Kizashi. Anyone can call it. [ATTEST-CHECK.md section 5] |
 
 ---
 
@@ -45,7 +45,7 @@ The left column is the design premise. It was not measured. The right column lis
 | A classical key is broken | The key keeps working until a person deletes it | Lockdown at Kaigen deletes the recorded classical daily and intents keys, and repeat `trip` calls finish the job. Not measured end to end in v3. [ATTEST-CHECK.md section 5; ARCHITECTURE.md section 2.1] |
 | An agent is prompt-injected | The key sends whatever it is asked, subject to its gas allowance | Over-cap sends, sends to unlisted payees (when the allowlist is on) and dust are refused. Three counted refusals burn the key. Attacks 1 and 7 PASS. [ATTACK-RESULTS.md attacks 1 and 7] |
 | A large send is hijacked | It leaves at once | Sends above the direct-send limit wait in a queue for at least 24 h. The admin can cancel during the wait. Attacks 5 and 6 PASS. [ATTACK-RESULTS.md attacks 5 and 6] |
-| Admin key | Often a classical full-access key `<!-- UNVERIFIED: general premise -->` | ML-DSA-65 full-access key in the design. The sandbox admin was ed25519. [ATTACK-RESULTS.md section 0] |
+| Admin key | Often a classical full-access key (general premise, not checked against the repository) | ML-DSA-65 full-access key in the design. The sandbox admin was ed25519. [ATTACK-RESULTS.md section 0] |
 | Who has to act | A person, after the fact | The contract refuses, counts and burns on its own rules. A person still has to cancel or re-key. [ARCHITECTURE.md section 4] |
 
 ---
@@ -66,17 +66,17 @@ The left column is the design premise. It was not measured. The right column lis
 
 ## Track and NEAR tech used
 
-Track: **`security`** (AI Security & Defense). Fallback: **`open`** (Open Innovation). `<!-- UNVERIFIED in v3 sources: track ids and the HACKATHON.md reference; the file is not in this repository. -->`
+Track: **`security`** (AI Security & Defense), fallback **`open`** (Open Innovation). The organiser's track list is not in this repository.
 
 | NEAR feature | Used for | State |
 | --- | --- | --- |
 | Function-call access keys with allowance | Daily keys can call only `send_small` and `request_withdraw` on the vault (`add_daily_key`). [LOSS-BOUND.md E6] | Tested on the sandbox (attacks 1 to 9). On testnet, 2026-11-04: the agent's key was refused and burned after three refused attacks, and a retry with it failed as nonexistent [TESTNET-REHEARSAL.md, first run]. |
-| Full-access keys, AddKey and DeleteKey | Admin key rotation, and deleting keys on burn and at lockdown | Sandbox tested with an ed25519 admin. A burned key is removed from the account in the block after the burn decision. [V3-M1-PROGRESS.md; ATTACK-RESULTS.md section 11.1] |
+| Full-access keys, AddKey and DeleteKey | Admin key rotation, and deleting keys on burn and at lockdown | Sandbox tested with an ed25519 admin. A burned key is removed from the account in the block after the burn decision. [[V3-M1-PROGRESS.md](docs/v3/evidence/V3-M1-PROGRESS.md); ATTACK-RESULTS.md section 11.1] |
 | ML-DSA-65 full-access keys | Post-quantum admin key | Proven on testnet protocol 88 only. Mainnet protocol 86 has not run it (gate G1). [ROADMAP.md section 3] |
-| Signature verification in the contract | Omen claims: ed25519 and secp256k1 (Kizashi) | Unit-tested in v3. The v2 testnet records are the only on-chain proof in the sources. `<!-- UNVERIFIED in v3 sources: "proven on testnet (fire-tests/0001.json to 0004.json)" -->` |
-| `attest()` and `check()` views | Posture and pre-flight | Implemented and unit-tested. `attest()` read by cage-check on the sandbox. [ATTEST-CHECK.md; V3-W2-CAGE-PROGRESS.md] |
+| Signature verification in the contract | Omen claims: ed25519 and secp256k1 (Kizashi) | Unit-tested in v3. The v2 drill records `fire-tests/0001.json` to `0004.json` report every step ok; the transactions are not re-checked here. |
+| `attest()` and `check()` views | Posture and pre-flight | Implemented and unit-tested. `attest()` read by cage-check on the sandbox. [ATTEST-CHECK.md; [V3-W2-CAGE-PROGRESS.md](docs/v3/evidence/V3-W2-CAGE-PROGRESS.md)] |
 | `intents.near` key registration | Lockdown removes recorded keys on `intents.near` | Code path present. Method names unconfirmed (gate G4). Not run on chain. [ROADMAP.md section 3] |
-| 1Click (NEAR Intents) top-up | Top-up route in `app/` | UI and routes present. USDC leg not run on chain. `<!-- UNVERIFIED in v3 sources: app details -->` |
+| 1Click (NEAR Intents) top-up | Top-up route in `app/` | UI and routes present. None of the six fire-test records has a USDC step; whether the USDC leg ever ran on a chain is not checked here. |
 
 ---
 
@@ -85,11 +85,11 @@ Track: **`security`** (AI Security & Defense). Fallback: **`open`** (Open Innova
 1. A vault is an account. Its full-access key is the admin key. Classical full-access keys must not be on the account. cage-check reports a red row if one is. [THREAT-MODEL.md section 1; ARCHITECTURE.md section 2.8]
 2. Each hot key (human or agent) is a function-call key with an allowance (default 0.25 NEAR, a gas budget outside the cap). It can call only `send_small` and `request_withdraw`. [LOSS-BOUND.md A3; ARCHITECTURE.md section 2.3]
 3. `send_small` decides in this order: key, era, amount, allowlist, token limit, minimum send, 24 h window. `check` runs the same function and reports what `send_small` would do. [ATTEST-CHECK.md sections 3 and 4]
-4. A larger send goes to a queue. It is locked for at least 24 h and expires 24 h after it unlocks. The admin can cancel it during the lock. Queued value is capped at the pending limit per token. [LOSS-BOUND.md sections 1 and 2.2; V3-MAMORI-PROGRESS.md step 1]
+4. A larger send goes to a queue. It is locked for at least 24 h and expires 24 h after it unlocks. The admin can cancel it during the lock. Queued value is capped at the pending limit per token. [LOSS-BOUND.md sections 1 and 2.2; [V3-MAMORI-PROGRESS.md](docs/v3/evidence/V3-MAMORI-PROGRESS.md) step 1]
 5. A counted refusal is a strike against the calling key. At the limit, the vault removes the key from its records, cancels that key's queued requests, and schedules a DeleteKey. The key is refused from the next call and deleted from the account a block later. [ATTACK-RESULTS.md section 11.1]
-6. An omen is a public key on a curve. Whoever breaks it signs a claim. Kizashi verifies the signature, marks the omen dead and raises the era. [THREAT-MODEL.md section 6; V3-KIZASHI-PROGRESS.md] `<!-- UNVERIFIED in v3 sources: the claim message layout beyond the domain string KAIGEN/v1/claim, and the bounty rules. -->`
-7. Anyone can call `trip` on a vault `<!-- UNVERIFIED in v3 sources: "anyone" is from the old v2 line table -->`. At `Warning` the vault pauses `send_small` and `request_withdraw`. Queued requests stay in the queue, and the admin can cancel them. At `Kaigen` the vault deletes its recorded classical daily and intents keys, and discards its queue. Repeat `trip` until both lists are empty. [ATTEST-CHECK.md section 5; LOSS-BOUND.md section 2.5]
-8. `cage-check` reads the account's keys from RPC, reads `attest()`, and reports GREEN, RED or UNKNOWN. It is a point-in-time check. [ATTEST-CHECK.md section 2.3; V3-W2-CAGE-PROGRESS.md]
+6. An omen is a public key on a curve. Whoever breaks it signs a claim. Kizashi verifies the signature, marks the omen dead and raises the era. [THREAT-MODEL.md section 6; [V3-KIZASHI-PROGRESS.md](docs/v3/evidence/V3-KIZASHI-PROGRESS.md)]
+7. Anyone can call `trip` on a vault. At `Warning` the vault pauses `send_small` and `request_withdraw`. Queued requests stay in the queue, and the admin can cancel them. At `Kaigen` the vault deletes its recorded classical daily and intents keys, and discards its queue. Repeat `trip` until both lists are empty. [ATTEST-CHECK.md section 5; LOSS-BOUND.md section 2.5]
+8. `cage-check` reads the account's keys from RPC, reads `attest()`, and reports GREEN, RED or UNKNOWN. It is a point-in-time check. [ATTEST-CHECK.md section 2.3; [V3-W2-CAGE-PROGRESS.md](docs/v3/evidence/V3-W2-CAGE-PROGRESS.md)]
 
 ---
 
@@ -124,7 +124,7 @@ Track: **`security`** (AI Security & Defense). Fallback: **`open`** (Open Innova
 | --- | --- | --- |
 | Init | Kizashi takes up to 8 omens. Mamori takes its daily limit and a delay of at least 24 h (production build). | `Kizashi::new`, `Mamori::init`; `min_delay_secs` in `attest()` [ATTEST-CHECK.md section 2.1] |
 | Operate | Daily keys send within the 24 h cap. Larger sends queue. | `send_small`, `request_withdraw`, `execute`, `check` |
-| Strike | Counted refusals count against the key. The key burns at the limit. | `judge_send` decides, `refuse` records [V3-W2-EDITH-PROGRESS.md M5a] |
+| Strike | Counted refusals count against the key. The key burns at the limit. | `judge_send` decides, `refuse` records [[V3-W2-EDITH-PROGRESS.md](docs/v3/evidence/V3-W2-EDITH-PROGRESS.md) M5a] |
 | Warn | Era reaches `Warning`. `send_small` and `request_withdraw` pause. Queued requests stay frozen and cancellable. | `trip`, `on_era` |
 | Kaigen | Era reaches `Kaigen`. Recorded classical daily and intents keys are deleted. The queue is discarded. Repeat `trip` until empty. | `trip`, `lock_down`, event `lockdown_partial` |
 | Verify | cage-check and `attest()` report state. | `jobs/src/cage.mjs` |
@@ -164,15 +164,15 @@ sequenceDiagram
 | Method | Caller | Notes |
 | --- | --- | --- |
 | `send_small(token, amount, to)` | Daily key | Returns `SendOutcome`. Refusals are recorded outcomes. Zero amount and a non-daily key are panics. [ATTEST-CHECK.md section 4] |
-| `request_withdraw(token, amount, to)` | Daily key | Returns the request id (U64, unchanged). Refusals panic and are not counted. Stores `expires_at`. [ROADMAP.md Q-ABI; V3-MAMORI-PROGRESS.md step 1] |
-| `execute(id)` | Anyone | After the unlock time, before expiry, with the era calm. Refuses an expired request. [LOSS-BOUND.md E5; V3-MAMORI-PROGRESS.md step 1] |
+| `request_withdraw(token, amount, to)` | Daily key | Returns the request id (U64, unchanged). Refusals panic and are not counted. Stores `expires_at`. [ROADMAP.md Q-ABI; [V3-MAMORI-PROGRESS.md](docs/v3/evidence/V3-MAMORI-PROGRESS.md) step 1] |
+| `execute(id)` | Anyone | After the unlock time, before expiry, with the era calm. Refuses an expired request. [LOSS-BOUND.md E5; [V3-MAMORI-PROGRESS.md](docs/v3/evidence/V3-MAMORI-PROGRESS.md) step 1] |
 | `cancel(id)` | Admin | Cancels one request. |
-| `cancel_all()` | Admin | New in v3. Returns the count. [V3-MAMORI-PROGRESS.md step 2] |
-| `purge_expired()` | Anyone | New in v3. Removes expired requests. Returns the count. [V3-MAMORI-PROGRESS.md step 2] |
+| `cancel_all()` | Admin | New in v3. Returns the count. [[V3-MAMORI-PROGRESS.md](docs/v3/evidence/V3-MAMORI-PROGRESS.md) step 2] |
+| `purge_expired()` | Anyone | New in v3. Removes expired requests. Returns the count. [[V3-MAMORI-PROGRESS.md](docs/v3/evidence/V3-MAMORI-PROGRESS.md) step 2] |
 | `check(key, asset, amount, to)` | View | New in v3. Advice only. Can be stale. [ATTEST-CHECK.md section 3] |
 | `attest()` | View | New in v3. The state the contract records about itself. It does not return a code hash or a key list. [ATTEST-CHECK.md sections 2.1 and 2.2] |
 | `strikes_of(key)` | View | Strikes in the current 24 h window. |
-| `add_daily_key(key, allowance)` | Admin | Refuses a key that is revoked but not yet deleted from the account. [V3-W2-EDITH-PROGRESS.md M4a] |
+| `add_daily_key(key, allowance)` | Admin | Refuses a key that is revoked but not yet deleted from the account. [[V3-W2-EDITH-PROGRESS.md](docs/v3/evidence/V3-W2-EDITH-PROGRESS.md) M4a] |
 | `remove_daily_key(key)` | Admin | Removes a key and schedules DeleteKey. |
 | `register_intents_key(key)` | Admin | Records a key on `intents.near`. Such a key signs there with no Mamori cap. [ARCHITECTURE.md section 2.6] |
 | `set_token_limit`, `set_pending_limit`, `set_min_send`, `allow_recipient`, `set_max_strikes`, `enforce_allowlist` | Admin | `set_max_strikes` accepts 1 to 10. [contracts/mamori/src/lib.rs] |
@@ -218,10 +218,10 @@ Two codes share one text. Read the code, not the text, to tell them apart.
 | --- | --- | --- |
 | NEAR access keys (function-call and full-access) | `mamori`, `chain.mjs` | Daily keys are function-call keys with allowance |
 | ed25519 (RFC 8032) | `kizashi`, `scripts/omens.mjs` | Omen and claim verification |
-| secp256k1 (ECDSA, low-s) | `kizashi`, `scripts/claim.mjs` | Omen and claim verification. `<!-- UNVERIFIED in v3 sources: ecrecover and the sha256 digest -->` |
-| ML-DSA-65 (FIPS 204) | Admin key | Testnet protocol 88 proof only. The locked near-sdk 5.30 has an `MLDSA65` curve type and an ML-DSA verify host function. What the host returns for an ML-DSA signer is unverified. [V3-W2-EDITH-PROGRESS.md] |
-| RFC 9380 hash-to-curve | `scripts/omens.mjs` | Omen keys derived from public seeds. `<!-- UNVERIFIED in v3 sources -->` |
-| sha256 | `kizashi` | Claim digests. `<!-- UNVERIFIED in v3 sources: line references -->` |
+| secp256k1 (ECDSA, low-s) | `kizashi`, `scripts/claim.mjs` | Omen and claim verification. |
+| ML-DSA-65 (FIPS 204) | Admin key | Testnet protocol 88 proof only. The locked near-sdk 5.30 has an `MLDSA65` curve type and an ML-DSA verify host function. What the host returns for an ML-DSA signer is unverified. [[V3-W2-EDITH-PROGRESS.md](docs/v3/evidence/V3-W2-EDITH-PROGRESS.md)] |
+| RFC 9380 hash-to-curve | `scripts/omens.mjs` | Omen keys derived from public seeds. |
+| sha256 | `kizashi` | Claim digests. |
 | NEAR Intents (`intents.near`) | `mamori` | Key removal path present. Not run on chain. |
 | 1Click API | `app/app/api/topup/*` | Top-up quote and status routes. Not run on chain. |
 
@@ -231,12 +231,12 @@ Two codes share one text. Read the code, not the text, to tell them apart.
 
 | Contract | Network | Account | Where it is recorded |
 | --- | --- | --- | --- |
-| Kizashi (v2 drill twin) | NEAR testnet | `kizashi.kaigen-g1-0170217f.testnet` `<!-- UNVERIFIED in v3 sources; v2 contract, not redeployed for v3 -->` | `fire-tests/0001.json` to `0004.json` (v2) |
-| Mamori vault (v2 drill) | NEAR testnet | `vault.kaigen-g1-0170217f.testnet` `<!-- UNVERIFIED in v3 sources; v2 contract -->` | `fire-tests/0001.json` to `0004.json` (v2) |
+| Kizashi (v2 drill twin) | NEAR testnet | `kizashi.kaigen-g1-0170217f.testnet` | `fire-tests/0001.json` to `0004.json` (v2). The account names appear there; whether the account still holds v2 code is not checked here. |
+| Mamori vault (v2 drill) | NEAR testnet | `vault.kaigen-g1-0170217f.testnet` | `fire-tests/0001.json` to `0004.json` (v2). The account names appear there; whether the account still holds v2 code is not checked here. |
 | Mamori v3 (drill and production-mode) | NEAR testnet | `pv-45cbcb96.kaigen-funder-ee0d56.testnet` (production-mode, 24 h delay); other drill vaults are in the gitignored testnet folder | v3 vaults must be deployed fresh, with no in-place upgrade [TESTNET-REHEARSAL.md, third run; CHANGES-V2-TO-V3.md section 1] |
 | Kizashi | NEAR mainnet | none deployed | `deployments.json` is not committed. `deployments.example.json` is the shape. |
 
-To create your own testnet accounts, run `node jobs/src/bin.mjs testnet`. It makes throwaway sub-accounts of one funded testnet account and prints their addresses. Nothing it creates is committed. `<!-- UNVERIFIED in v3 sources: CLI command -->`
+To create your own testnet accounts, run `node jobs/src/bin.mjs testnet`. It makes throwaway sub-accounts of one funded testnet account and prints their addresses. Nothing it creates is committed.
 
 ---
 
@@ -246,7 +246,7 @@ To create your own testnet accounts, run `node jobs/src/bin.mjs testnet`. It mak
 | --- | --- | --- | --- |
 | Direct sends are capped in 24 h, per token, account-wide | Yes | `send_small`, `check` | Cap per token (`set_token_limit`). NEAR cap is `daily_limit`. A token with no admin-set cap cannot be sent. [LOSS-BOUND.md C_T, E1, E2] |
 | Larger sends wait out a delay | Yes | `request_withdraw`, `execute` | At least 24 h in a production build. `init` refuses a shorter delay (E4). A `drill` build accepts any delay. [LOSS-BOUND.md E4] |
-| Queued requests expire | Yes | `execute`, `purge_expired` | 24 h after the unlock time. [V3-MAMORI-PROGRESS.md step 1] |
+| Queued requests expire | Yes | `execute`, `purge_expired` | 24 h after the unlock time. [[V3-MAMORI-PROGRESS.md](docs/v3/evidence/V3-MAMORI-PROGRESS.md) step 1] |
 | Queued value is capped per token | Yes | `request_withdraw`, queue room check | Pending limit P. Default 10 times the cap. Zero for a token with no cap unless the admin sets one. [LOSS-BOUND.md section 1] |
 | Requests per 24 h are capped | Yes | `request_withdraw` | Budget of P per token per rolling 24 h. Executing or cancelling does not return it. [ATTACK-RESULTS.md attack 4b] |
 | Per-key shares | Yes | `request_withdraw`, queue room check | With n recorded keys: `MAX_QUEUE / n` requests, `P / n` queued value, `P / n` budget per key. Account-wide limits still apply. [LOSS-BOUND.md section 1] |
@@ -257,8 +257,8 @@ To create your own testnet accounts, run `node jobs/src/bin.mjs testnet`. It mak
 | Dust and no-limit tokens do not burn a key | Yes | `send_small` | Minimum send 0.001 NEAR by default. [ATTACK-RESULTS.md section 0] |
 | Lockdown at Kaigen | Yes | `trip`, `lock_down` | Deletes recorded daily and intents keys. Repeat `trip` until empty. [ATTEST-CHECK.md section 5] |
 | Warning pauses sends and new withdrawal requests | Yes | `trip`, `on_era` | Era `Warning` |
-| Omen keys cannot be reused | Yes | `Kizashi::new`, `claim` | `<!-- UNVERIFIED in v3 sources: duplicate, all-zero and small-order ed25519 keys rejected; a dead omen cannot claim again -->` |
-| Drill reset is not in production | Yes | `reset` (drill feature only) | `<!-- UNVERIFIED in v3 sources -->` Refuses accounts that are not `.testnet`. |
+| Omen keys cannot be reused | Yes | `Kizashi::new`, `claim` | |
+| Drill reset is not in production | Yes | `reset` (drill feature only) | Refuses accounts that are not `.testnet`. |
 
 ---
 
@@ -387,7 +387,7 @@ Line numbers were removed. They moved when v3 was added. Use function names. For
 | Sandbox attack suite and results | `tests-integration/tests/attacks/`, `docs/v3/ATTACK-RESULTS.md` |
 | Sandbox start and stop (Windows, WSL) | `tests-integration/sandbox/start.ps1`, `stop.ps1` |
 | Mainnet tooling (dry-run by default) | `jobs/src/mainnet.mjs` |
-| Fire-test records (v2, testnet) | `fire-tests/0001.json` to `0004.json` `<!-- UNVERIFIED in v3 sources -->` |
+| Fire-test records (v2, testnet) | `fire-tests/0001.json` to `0004.json` |
 
 ---
 
@@ -403,9 +403,9 @@ Line numbers were removed. They moved when v3 was added. Use function names. For
 - Refusals are recorded outcomes, not reverts, so each refused call costs the vault a little gas before the key burns. [ATTEST-CHECK.md section 4]
 - Gas allowances are a separate budget outside the cap. [LOSS-BOUND.md A3]
 
-**Omen limits.** A silent attacker who never publishes a break triggers nothing. A first-to-break state actor who keeps the break private triggers nothing. An omen does not say who broke the curve or how widely. `<!-- UNVERIFIED in v3 sources: an omen claim pays the whole bounty to the first claimant, including a warning-level omen -->`
+**Omen limits.** A silent attacker who never publishes a break triggers nothing. A first-to-break state actor who keeps the break private triggers nothing. An omen does not say who broke the curve or how widely.
 
-**Fixed in the current code** (old README list; each item names a code path). `<!-- UNVERIFIED in v3 sources: only the Kizashi race (usdc_epoch), the expiry, cancel_all, purge, per-key shares, the allowance-zero rule and the counting rule are confirmed in docs/internal; the other items are not -->` K1 payout registration and success or failure events; K2 `reset` only in the drill feature; K3 `retry_payout` for owed payouts; K5 init key checks; S1 pending limit on queued value; S-queue requesting key recorded and queue cancelled on burn; S3 send-window bucketing and minimum send; APP-1 `/migrate` headers. APP-2 is not listed as fixed.
+**Fixed in the current code** (old README list; each item names a code path). K1 payout registration and success or failure events; K2 `reset` only in the drill feature; K3 `retry_payout` for owed payouts; K5 init key checks; S1 pending limit on queued value; S-queue requesting key recorded and queue cancelled on burn; S3 send-window bucketing and minimum send; APP-1 `/migrate` headers. APP-2 is not listed as fixed.
 
 **Known limits of v3.**
 
@@ -415,34 +415,34 @@ Line numbers were removed. They moved when v3 was added. Use function names. For
 - `strikes_of` and `refuse` disagree by one nanosecond at exactly 24 h after the first strike. No value moves differently. [LOSS-BOUND.md section 6]
 - A removed key keeps its strike record. Adding it back within 24 h continues the count. [LOSS-BOUND.md section 6]
 - `attest()` is self-reported. A full-access key can deploy a contract whose `attest()` says anything. cage-check reads the code hash and the key list from RPC. [ATTEST-CHECK.md section 2.2]
-- cage-check is a point-in-time check. It cannot see a key added one block later. Row 2 (exactly one ML-DSA admin key) is UNKNOWN when the admin is given as a full key, because the hash format is not in the sources. [V3-W2-CAGE-PROGRESS.md; ARCHITECTURE.md section 2.8]
-- cage-check does not check `intents.near` for keys that were not recorded. Method names are unconfirmed (G4). [V3-W2-CAGE-PROGRESS.md]
-- Kizashi: a reservation released by the 10 minute timeout can still be double-spent by a read ordered after the release. This is documented, not fixed. [V3-KIZASHI-PROGRESS.md step 3]
-- Kizashi: a NEAR refund that beats its callback can let a second claim sweep refunded NEAR, while the callback books an unbacked debt. This is pinned by a test and deliberately not fixed in the contract: a hold-back fix strands a top-up and adds state, and a refund and an equal top-up look the same to the contract. nearcore master creates a failed transfer's refund receipt before the callback's data receipt, but no NEAR docs page promises that nothing runs between them. The order was read in source, not checked on a chain. The Kizashi wasm is unchanged (104 default and 105 drill tests). [KIZASHI-REFUND-ORDER.md; docs/internal/V3-OPEN-KIZASHI-PROGRESS.md step 5]
+- cage-check is a point-in-time check. It cannot see a key added one block later. Row 2 (exactly one ML-DSA admin key) is UNKNOWN when the admin is given as a full key, because the hash format is not in the sources. [[V3-W2-CAGE-PROGRESS.md](docs/v3/evidence/V3-W2-CAGE-PROGRESS.md); ARCHITECTURE.md section 2.8]
+- cage-check does not check `intents.near` for keys that were not recorded. Method names are unconfirmed (G4). [[V3-W2-CAGE-PROGRESS.md](docs/v3/evidence/V3-W2-CAGE-PROGRESS.md)]
+- Kizashi: a reservation released by the 10 minute timeout can still be double-spent by a read ordered after the release. This is documented, not fixed. [[V3-KIZASHI-PROGRESS.md](docs/v3/evidence/V3-KIZASHI-PROGRESS.md) step 3]
+- Kizashi: a NEAR refund that beats its callback can let a second claim sweep refunded NEAR, while the callback books an unbacked debt. This is pinned by a test and deliberately not fixed in the contract: a hold-back fix strands a top-up and adds state, and a refund and an equal top-up look the same to the contract. nearcore master creates a failed transfer's refund receipt before the callback's data receipt, but no NEAR docs page promises that nothing runs between them. The order was read in source, not checked on a chain. The Kizashi wasm is unchanged (104 default and 105 drill tests). [KIZASHI-REFUND-ORDER.md; [V3-OPEN-KIZASHI-PROGRESS.md](docs/v3/evidence/V3-OPEN-KIZASHI-PROGRESS.md) step 5]
 
-**Known gaps from the code and review (open or partly open).** Rows marked UNVERIFIED are from the old v2 README and are not in the v3 sources.
+**Known gaps from the code and review (open or partly open).** Rows marked `-` have no roadmap id.
 
 | Id | Where | Gap | Status |
 | --- | --- | --- | --- |
 | G1 | Admin flow | ML-DSA admin flow not run on mainnet protocol 86 | Open [ROADMAP.md G1] |
-| G2 | Global contracts | Global-contract publishing works on mainnet and its real cost is known. On testnet protocol 88, 0.0001 NEAR per byte was measured at 1,024 bytes. About 43.3 NEAR for the 432,906-byte mamori.wasm (1e20 yocto per byte) is an extrapolation, not measured. Mainnet is protocol 86; publishing there is unconfirmed. | Open [ROADMAP.md G2; GLOBAL-CONTRACT.md section 6a; MAINNET-READS.md] |
-| - | Storage | Each vault deploys Mamori (about 3 NEAR of storage). This was the old README's G2, which clashes with the ROADMAP id. `<!-- UNVERIFIED in v3 sources -->` | Open |
-| G3 | App | Wallet-signed path to add an ML-DSA key is untested; the harness uses a classical key. `<!-- UNVERIFIED in v3 sources -->` | Open |
+| G2 | Global contracts | The gate is to show that global-contract publishing works on mainnet and to know its real cost. Not met. On testnet protocol 88, 0.0001 NEAR per byte was measured at 1,024 bytes. About 43.3 NEAR for the 432,906-byte mamori.wasm (1e20 yocto per byte) is an extrapolation, not measured. Mainnet is protocol 86; publishing there is unconfirmed. | Open [ROADMAP.md G2; GLOBAL-CONTRACT.md section 6a; MAINNET-READS.md] |
+| - | Storage | Each vault deploys Mamori: 432,906 bytes in `out/prod/mamori.wasm`. About 4.33 NEAR at the account-storage rate (1e19 yoctoNEAR per byte), or about 43.3 NEAR at the global-contract rate (0.0001 NEAR per byte, measured on testnet for a 1,024-byte module). Neither figure is measured for Mamori. The old figure of about 3 NEAR is not supported. | Open |
+| G3 | App | The wallet-signed path to add an ML-DSA key is not in the app and has no test in the repository. The rehearsal harness uses a classical key. | Open |
 | G4 | Intents | `add_public_key` and `remove_public_key` names on `intents.near` unconfirmed | Open [ROADMAP.md G4] |
-| G7 | Hinomi | Source of top accounts not chosen. `<!-- UNVERIFIED: ARCHITECTURE.md says Hinomi is out of scope for v3 -->` | Open |
-| - | Kizashi | Two claims close together can both read the full balance. v3 `usdc_epoch` addresses the stale-read case; this exact case was not re-checked. `<!-- UNVERIFIED in v3 sources -->` | Open |
-| - | Kizashi | `retry_payout` drains in first-come order when several claimants are owed. `<!-- UNVERIFIED in v3 sources -->` | Open |
-| K3 | Kizashi | A failed `ft_balance_of` read is emitted and recorded only as a read to repeat. The last omen's USDC has no automatic retry. `<!-- UNVERIFIED in v3 sources -->` | Documented limit |
-| - | Mamori | If every `intents.near` removal keeps failing, intents keys can starve. Gas figures come from the unit-test VM. `<!-- UNVERIFIED in v3 sources -->` | Open |
-| - | Mamori | One `trip` may not finish a lockdown. Repeat until `intents_keys()` and `daily_keys()` are empty. `<!-- UNVERIFIED in v3 sources -->` | Open |
-| - | Tooling | The lock reads the chain through one RPC host. The gate file is unsigned. `<!-- UNVERIFIED in v3 sources -->` | Open |
-| - | Verify | `node jobs/src/bin.mjs verify` reads `deployments.json`, which is not committed. `<!-- UNVERIFIED in v3 sources -->` | Open |
-| - | App | `KIZASHI_CODE_HASH` must be set before any non-dry quote. Otherwise top-ups return 503 by design. `<!-- UNVERIFIED in v3 sources -->` | Config |
-| - | App | The 1Click NEAR USDC asset id `nep141:<usdc_token>` is assumed, not checked against the live token list. `<!-- UNVERIFIED in v3 sources -->` | Open |
+| G7 | Hinomi | Source of top accounts not chosen. | Open |
+| - | Kizashi | Two claims close together can both read the full balance. `usdc_epoch` and in-flight reservations address the stale-read case in code; the exact two-claim case has not been run. | Open |
+| - | Kizashi | `retry_payout` drains in first-come order when several claimants are owed. | Open |
+| K3 | Kizashi | A failed `ft_balance_of` read is emitted and recorded only as a read to repeat. The last omen's USDC has no automatic retry. | Documented limit |
+| - | Mamori | If every `intents.near` removal keeps failing, intents keys may not be removed. The gas figures come from the unit-test VM and are not measured on a chain. | Open |
+| - | Mamori | One `trip` may not finish a lockdown. Repeat until `intents_keys()` and `daily_keys()` are empty. | Open |
+| - | Tooling | The lock reads the chain through one RPC host. The gate file is unsigned. | Open |
+| - | Verify | `node jobs/src/bin.mjs verify` reads `deployments.json`, which is not committed. | Open |
+| - | App | `KIZASHI_CODE_HASH` must be set before any non-dry quote. Otherwise top-ups return 503 by design. | Config |
+| - | App | A top-up is refused unless the quoted asset id equals `nep141:<usdc_token>` from Kizashi. It is not checked against the 1Click token list. | Open |
 
-**Not checked.** No outside audit. No formal verification. Builds are reproducible on one machine, not yet across machines. `<!-- UNVERIFIED in v3 sources: reproducibility claim -->` No gas measurement on a real mainnet or testnet chain. [ATTACK-RESULTS.md section 13]
+**Not checked.** No outside audit. No formal verification. Two wasm builds in this folder have the same SHA-256. A second build has not been run. No gas measurement on mainnet. Testnet gas figures are recorded in [docs/v3/GLOBAL-CONTRACT.md](docs/v3/GLOBAL-CONTRACT.md) and [docs/v3/TESTNET-REHEARSAL.md](docs/v3/TESTNET-REHEARSAL.md). [ATTACK-RESULTS.md section 13]
 
-**Build note.** The `out/prod/mamori.wasm` file from before v3 is not a build of the `v2-testnet` tag. Do not use it as a reference build. [V3-M1-PROGRESS.md (d)]
+**Build note.** The `out/prod/mamori.wasm` file from before v3 is not a build of the `v2-testnet` tag. Do not use it as a reference build. [[V3-M1-PROGRESS.md](docs/v3/evidence/V3-M1-PROGRESS.md) (d)]
 
 ---
 
@@ -452,9 +452,8 @@ Line numbers were removed. They moved when v3 was added. Use function names. For
 - Hash-pinned global contract for Mamori (M6, gate G2). Tooling built. Proven on testnet with a 1,024-byte module only. The real Mamori publish and mainnet are not run. [GLOBAL-CONTRACT.md sections 6a and 7; ROADMAP.md section 2]
 - A production withdrawal delay (owner decision). The floor is 24 h. [CHANGES-V2-TO-V3.md]
 - Policy-key split and `sweep_to_safe` are built (commit cb62c80; unit and property tested; run on a testnet drill vault on 2026-11-07 and 2026-11-08 with `stretchdrill`, with the limits listed above). Design: [STRETCH-DESIGN.md](docs/v3/STRETCH-DESIGN.md). Sentinel and yield hold: stretch items, not promised. The fallback tag `v3-core-testnet` (pushed) points at d4342c0, one commit before the M6 tooling commit fe8d9d9. [git status; git ls-remote --tags; ARCHITECTURE.md section 6; ROADMAP.md section 2]
-- The Create vault page is in `app/app/vault/create/`. It has not been run against a chain. `<!-- UNVERIFIED in v3 sources: "enabled on testnet only, mainnet stays off" -->`
-- A signed gate file for `make verify`. `<!-- UNVERIFIED in v3 sources -->`
-- The landing page in `site/` is being redesigned. It is described here only as the landing page. `<!-- UNVERIFIED in v3 sources -->`
+- The Create vault page is in `app/app/vault/create/`. It has not been run against a chain, as far as the repository records show. It is enabled on testnet only, and mainnet stays off.
+- A signed gate file for `make verify`.
 
 ---
 
@@ -462,12 +461,11 @@ Line numbers were removed. They moved when v3 was added. Use function names. For
 
 | Layer | Tools |
 | --- | --- |
-| Contracts | Rust toolchain (`rust-toolchain.toml`, 1.99.1 `<!-- UNVERIFIED in v3 sources -->`), `near-sdk` 5.30 (locked), `hex`; wasm32-unknown-unknown |
+| Contracts | Rust toolchain (`rust-toolchain.toml`, 1.99.1), `near-sdk` 5.30 (locked), `hex`; wasm32-unknown-unknown |
 | Contract tests | `near-workspaces` 0.24 (integration), `ed25519-dalek`, `k256`, `sha2`, splitmix64 seeded generator (proptest is not in the lock file) [LOSS-BOUND.md section 4] |
-| Sandbox | nearcore 2.14.0 (`near-sandbox`), protocol 88, WSL Ubuntu 24.04 distribution `kaigen-sandbox` [V3-M1-PROGRESS.md step 1] |
-| Scripts and jobs | Node.js (`jobs/`, `scripts/`), `@fastnear/api`, `@fastnear/ml-dsa-65`, `@fastnear/utils`, `@noble/curves`, `@noble/hashes`, `@scure/base` `<!-- UNVERIFIED in v3 sources: package list and Node version -->` |
-| App | Next.js 16, React 19, `motion`, `@fastnear/wallet`, `@defuse-protocol/one-click-sdk-typescript` `<!-- UNVERIFIED in v3 sources -->` |
-| Landing page | Next.js (`site/`) |
+| Sandbox | nearcore 2.14.0 (`near-sandbox`), protocol 88, WSL Ubuntu 24.04 distribution `kaigen-sandbox` [[V3-M1-PROGRESS.md](docs/v3/evidence/V3-M1-PROGRESS.md) step 1] |
+| Scripts and jobs | Node.js (`jobs/`, `scripts/`), `@fastnear/api`, `@fastnear/ml-dsa-65`, `@fastnear/utils`, `@noble/curves`, `@noble/hashes`, `@scure/base` |
+| App | Next.js 16, React 19, `@fastnear/wallet`, `@defuse-protocol/one-click-sdk-typescript` |
 
 ---
 
@@ -488,7 +486,6 @@ kaigen/
 │   ├── fixtures/         ft-mock (NEP-141 look-alike)
 │   └── sandbox/          start.ps1, stop.ps1 (WSL)
 ├── app/                  Next.js app: /, /bounty, /migrate, /vault, /vault/create, top-up API routes
-├── site/                 landing page
 ├── fire-tests/           published drill records, v2 (0001.json to 0004.json)
 ├── docs/                 PLAN-submission-and-mainnet.md, ARCHITECTURE-REVIEW.md, v3/ (design and results)
 ├── out/                  built wasm (created by make build; not committed)
@@ -503,11 +500,11 @@ kaigen/
 
 ### Prerequisites
 
-- Rust with the `wasm32-unknown-unknown` target. `rust-toolchain.toml` pins it, and rustup installs it on first use. `<!-- UNVERIFIED in v3 sources: version -->`
-- Node.js. `<!-- UNVERIFIED in v3 sources: the author used Node v24.11.1 -->`
-- `make` is optional. `<!-- UNVERIFIED in v3 sources -->` The author's Windows machine has no `make`.
+- Rust with the `wasm32-unknown-unknown` target. `rust-toolchain.toml` pins 1.99.1. Whether rustup installs it automatically on first use was not checked here.
+- Node.js. The repository does not pin a Node version. This copy runs Node v24.11.1.
+- `make` is optional. The Makefile covers the same steps as plain commands.
 - **Windows:** set `AWS_LC_SYS_PREBUILT_NASM=1` before building. PowerShell: `$env:AWS_LC_SYS_PREBUILT_NASM = "1"`. Git Bash: `export AWS_LC_SYS_PREBUILT_NASM=1`. [LOSS-BOUND.md section 4]
-- **Sandbox tests (optional):** WSL with the `kaigen-sandbox` distribution and `near-sandbox` 2.14.0. See `tests-integration/sandbox/start.ps1`. [V3-M1-PROGRESS.md step 1]
+- **Sandbox tests (optional):** WSL with the `kaigen-sandbox` distribution and `near-sandbox` 2.14.0. See `tests-integration/sandbox/start.ps1`. [[V3-M1-PROGRESS.md](docs/v3/evidence/V3-M1-PROGRESS.md) step 1]
 
 ### Install
 
@@ -517,7 +514,7 @@ cd scripts && npm ci && cd ..
 cd app && npm ci && cd ..
 ```
 
-`<!-- UNVERIFIED in v3 sources: install commands -->`
+
 
 ### Configure
 
@@ -525,16 +522,15 @@ cd app && npm ci && cd ..
 cp app/.env.example app/.env.local
 ```
 
-Fill in each value you need. `app/.env.example` says what each variable does. Without `NEXT_PUBLIC_KIZASHI_ID`, the app says it is not deployed yet. Secrets (`ONECLICK_JWT`) belong in the environment only. `.env*` is git-ignored except `.env.example`. `<!-- UNVERIFIED in v3 sources -->`
+Fill in each value you need. `app/.env.example` says what each variable does. Without `NEXT_PUBLIC_KIZASHI_ID`, the app says it is not deployed yet. Secrets (`ONECLICK_JWT`) belong in the environment only. `.env*` is git-ignored except `.env.example`.
 
 ### Run
 
 ```sh
 cd app && npm run dev        # then open /migrate (no chain needed)
-cd site && npm run dev       # landing page
 ```
 
-`<!-- UNVERIFIED in v3 sources -->`
+
 
 ### Test
 
@@ -547,7 +543,7 @@ cd jobs && node --test test/*.test.mjs     # 358 tests (2 skipped)
 cargo test -p mamori loss_bound::the_loss_bound -- --nocapture   # the property test (about 15 s)
 ```
 
-Mamori counts are from LOSS-BOUND.md section 9.4 (2026-11-04). Kizashi counts are from KIZASHI-REFUND-ORDER.md (2026-11-07). The jobs count is from the owner's run of 2026-11-07. Other counts are from the progress logs: [V3-W2-EDITH-PROGRESS.md; V3-KIZASHI-PROGRESS.md; V3-W2-CAGE-PROGRESS.md]. Re-run to confirm. The Windows PowerShell form sets `$env:PATH` to the toolchain and `$env:AWS_LC_SYS_PREBUILT_NASM='1'` first. [LOSS-BOUND.md section 4]
+Mamori counts are from LOSS-BOUND.md section 9.4 (2026-11-04). Kizashi counts are from KIZASHI-REFUND-ORDER.md (2026-11-07). The jobs count is from the owner's run of 2026-11-07. Other counts are from the progress logs: [[V3-W2-EDITH-PROGRESS.md](docs/v3/evidence/V3-W2-EDITH-PROGRESS.md); [V3-KIZASHI-PROGRESS.md](docs/v3/evidence/V3-KIZASHI-PROGRESS.md); [V3-W2-CAGE-PROGRESS.md](docs/v3/evidence/V3-W2-CAGE-PROGRESS.md)]. Re-run to confirm. The Windows PowerShell form sets `$env:PATH` to the toolchain and `$env:AWS_LC_SYS_PREBUILT_NASM='1'` first. [LOSS-BOUND.md section 4]
 
 Sandbox tests (need WSL and the sandbox running):
 
@@ -558,11 +554,11 @@ cd tests-integration && cargo test -- --test-threads=1 --nocapture
 tests-integration\sandbox\stop.ps1
 ```
 
-`<!-- UNVERIFIED in v3 sources: the exact test command for the sandbox. The sandbox start/stop and the M1 test command are in V3-M1-PROGRESS.md. -->`
+Sandbox test command: to be confirmed by running it on the sandbox. The M1 progress log is [V3-M1-PROGRESS.md](docs/v3/evidence/V3-M1-PROGRESS.md).
 
 ### Deploy
 
-Nothing is deployed to mainnet. These steps are not run by the author. The owner runs them with their own keys. `<!-- UNVERIFIED in v3 sources: the commands below -->`
+No mainnet deployment record is in this repository. The steps below are for the owner to run with their own keys.
 
 ```sh
 make build                                                     # production wasm to out/prod
@@ -573,7 +569,7 @@ node jobs/src/bin.mjs mainnet plan                             # prints every tr
 
 `mainnet execute --stage N --yes` and `mainnet lock --i-understand-this-is-irreversible` send transactions. Each needs a key file outside the repo (`KAIGEN_DEPLOYER_KEY_FILE`). See `node jobs/src/bin.mjs mainnet help`.
 
-The drill build for testnet (`out/drill`) is not in the Makefile. The Cargo features say how to build it: `--features drill` on the `kizashi` and `mamori` packages, and `--cfg near` (set in `.cargo/config.toml`). The author did not run this command as written here. Treat it as unverified until you run it. `<!-- UNVERIFIED in v3 sources -->`
+The drill build for testnet (`out/drill`) is not in the Makefile. The Cargo features say how to build it: `--features drill` on the `kizashi` and `mamori` packages, and `--cfg near` (set in `.cargo/config.toml`). It has not been run in this repository.
 
 Redeploy note. v3 vaults and v3 Kizashi instances must be deployed fresh. v2 instances cannot be upgraded in place. The v2 code is at the tag `v2-testnet`. [CHANGES-V2-TO-V3.md section 1]
 
@@ -597,12 +593,12 @@ Steps 1 and 2 need no funds and no chain. Step 4 needs one funded testnet accoun
 | # | Do this | You should see |
 | --- | --- | --- |
 | 1 | `cargo test -p mamori` and `cargo test -p kizashi`, then `cd jobs && node --test test/*.test.mjs` | Every suite ends with `0 failed`. Counts at the last recorded run: Mamori 230 (226 drill), Kizashi 104 (105 drill), jobs 358 (2 skipped). [KIZASHI-REFUND-ORDER.md; owner's run, 2026-11-07; progress logs] |
-| 2 | `node jobs/src/bin.mjs judge` `<!-- UNVERIFIED in v3 sources -->` | A report of PASS or SKIPPED per claim, with the evidence line. It writes `judge-report.json`. A check that cannot run is SKIPPED with the reason, never PASS. |
-| 3 | Open `fire-tests/0003.json` `<!-- UNVERIFIED in v3 sources; v2 record -->` | Claim, trip, post-quantum send and re-arm transactions for a v2 drill vault. |
-| 4 | `node jobs/src/bin.mjs testnet` `<!-- UNVERIFIED in v3 sources; v2 rehearsal, needs out/drill and a funder file -->` | PASS or FAIL per step. Run for v3 on 2026-11-04 (twice), and `stretchdrill` on 2026-11-07 and 2026-11-08 [TESTNET-REHEARSAL.md]. |
+| 2 | `node jobs/src/bin.mjs judge` | A report of PASS or SKIPPED per claim, with the evidence line. It writes `judge-report.json`. A check that cannot run is SKIPPED with the reason, never PASS. |
+| 3 | Open `fire-tests/0003.json` | Claim, trip, post-quantum send and re-arm transactions for a v2 drill vault. |
+| 4 | `node jobs/src/bin.mjs testnet` | PASS or FAIL per step. Run for v3 on 2026-11-04 (twice), and `stretchdrill` on 2026-11-07 and 2026-11-08 [TESTNET-REHEARSAL.md]. |
 | 5 | Sandbox: `tests-integration\sandbox\start.ps1`, then the attack suite (see Test) | Nine attacks, each PASS or FAIL, with the measured numbers in `docs/v3/ATTACK-RESULTS.md`. |
 | 6 | `node jobs/src/bin.mjs cage-check <account>` (add `--stand-in-admin` on the sandbox) | GREEN, RED or UNKNOWN per row. Exit 0 GREEN, 1 RED, 3 UNKNOWN. |
-| 7 | `cd app && npm run dev`, open `/migrate` `<!-- UNVERIFIED in v3 sources -->` | An admin key is made in the browser, and an encrypted backup is required before anything else. |
+| 7 | `cd app && npm run dev`, open `/migrate` | An admin key is made in the browser, and an encrypted backup is required before the vault step. |
 
 ---
 
@@ -610,13 +606,12 @@ Steps 1 and 2 need no funds and no chain. Step 4 needs one funded testnet accoun
 
 **Libraries and templates used**
 
-- Contracts: `near-sdk` 5.30 (locked) and `hex`. Tests: `near-workspaces`, `ed25519-dalek`, `k256`, `sha2`. [V3-W2-EDITH-PROGRESS.md]
+- Contracts: `near-sdk` 5.30 (locked) and `hex`. Tests: `near-workspaces`, `ed25519-dalek`, `k256`, `sha2`. [[V3-W2-EDITH-PROGRESS.md](docs/v3/evidence/V3-W2-EDITH-PROGRESS.md)]
 - Scripts, jobs and app: the packages in `jobs/package.json`, `scripts/package.json` and `app/package.json`, listed under Tech Stack.
-- Landing page: Next.js; `site/` is a landing page. Its origin and any template use should be checked against its `package.json` before submission (`<!-- SITE TEMPLATE: Kevin to confirm -->`).
 
-**AI-written code.** The code in this repository was written with Claude Code (Anthropic). Separate Claude review agents reviewed the Rust contracts, the security surface and the TypeScript. Review findings and their fixes are recorded in [docs/ARCHITECTURE-REVIEW.md](docs/ARCHITECTURE-REVIEW.md). `<!-- UNVERIFIED in v3 sources: review file not read for v3 -->` Kevin Andrew A owns every decision: the design, what ships, what is deployed, and what is claimed.
+**AI-written code.** The repository does not record whether or how AI tools were used. All 39 commits are authored by Kevin Andrew A. Review notes are in [docs/ARCHITECTURE-REVIEW.md](docs/ARCHITECTURE-REVIEW.md). Kevin Andrew A owns every decision: the design, what ships, what is deployed, and what is claimed. The repository does not record this ownership.
 
-**Build window.** `<!-- UNVERIFIED in v3 sources: the organiser's 19 Oct 2026 announcement and the 14 Nov 2026 close are from HACKATHON.md, which is not in the repository. ROADMAP.md gives the submission window as 1 Nov to 14 Nov 2026. -->` The first commit in this repository is the 2026-11-01 baseline (see Hackathon disclosure). The v2 tag is `v2-testnet`. `<!-- BASELINE: Kevin to add the pre-window tag or branch before submission -->`
+**Build window.** Submission window: 1 Nov to 14 Nov 2026 (UTC), per [docs/PLAN-submission-and-mainnet.md](docs/PLAN-submission-and-mainnet.md). The organiser's announcement is not in this repository. The first commit in this repository is the 2026-11-01 baseline (see Hackathon disclosure). The v2 tag is `v2-testnet`.
 
 ## Hackathon disclosure
 

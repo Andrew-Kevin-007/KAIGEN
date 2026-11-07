@@ -19,11 +19,11 @@ Code state: HEAD 44227f2. The attack numbers were measured at 1a12d57, where `co
 | NOVELTY-CLAIMS.md | Each claim, its verdict, its evidence, what is not claimed | Desk review of 2026-11-02 |
 | ROADMAP.md | v2 release checklist, v3 milestones, evidence gates | Status column dated 2026-11-02, not updated |
 
-Stale parts of the design drafts. The design drafts were written before the code. Where they conflict with the progress logs in `docs/internal/V3-*-PROGRESS.md`, the logs and the code are the newer source:
+Stale parts of the design drafts. The design drafts were written before the code. Where they conflict with the progress logs in `evidence/` (the logs that these documents cite are copied there), the logs and the code are the newer source:
 
-- ARCHITECTURE.md 2.2 and THREAT-MODEL.md sections 6 and 7 say near-sdk 5.30 has no ML-DSA support. V3-W2-EDITH-PROGRESS.md reports that the locked near-sdk 5.30 has `CurveType::MLDSA65`. What the host returns for an ML-DSA signer is still unverified.
+- ARCHITECTURE.md 2.2 and THREAT-MODEL.md sections 6 and 7 say near-sdk 5.30 has no ML-DSA support. [V3-W2-EDITH-PROGRESS.md](evidence/V3-W2-EDITH-PROGRESS.md) reports that the locked near-sdk 5.30 has `CurveType::MLDSA65`. What the host returns for an ML-DSA signer is still unverified.
 - THREAT-MODEL.md says "No contract code of v3 exists yet". That is no longer true.
-- ARCHITECTURE.md 2.8 lists eight cage-check rows. `jobs/src/cage.mjs` has ten (ARCH-2.8-1 to 8, ATTEST-1 and ATTEST-2) [V3-W2-CAGE-PROGRESS.md].
+- ARCHITECTURE.md 2.8 lists eight cage-check rows. `jobs/src/cage.mjs` has ten (ARCH-2.8-1 to 8, ATTEST-1 and ATTEST-2) [[V3-W2-CAGE-PROGRESS.md](evidence/V3-W2-CAGE-PROGRESS.md)].
 - ARCHITECTURE.md section 3 lists `revoke_all_agent_keys()` as a new admin method. The milestone logs do not mention it. The lockdown that is implemented is `lock_down` (partial, repeat `trip` until empty) [ATTEST-CHECK.md section 5]. `sweep_to_safe` is a stretch item in ROADMAP.md and is not in any milestone log.
 - LOSS-BOUND.md line numbers refer to `lib.rs` at sha256 276A870A, which is before the `attest()` and `check()` work. Use function names, not line numbers, until the file is re-read.
 
@@ -52,14 +52,14 @@ Containment is a refusal counter inside the call that is refused. No off-chain d
 
 | Milestone | What | Status | Source |
 |---|---|---|---|
-| M1 | Burned key is removed from the account (sandbox) | Passed (5 tests) | V3-M1-PROGRESS.md |
-| M2 part A | Kizashi `usdc_epoch` race fix | Implemented, tested | V3-KIZASHI-PROGRESS.md |
-| M2 part B | Queue `expires_at`, `cancel_all`, `purge_expired`, per-key slots and shares | Implemented, tested | V3-MAMORI-PROGRESS.md |
-| M3 | Counting rule, loss-bound derivation, property tests, mutation checks | Done | V3-M3-PROGRESS.md, LOSS-BOUND.md |
-| M4 | `attest()`, cage-check, revoked-key check in `add_daily_key` | Done, sandbox-tested | V3-W2-EDITH-PROGRESS.md, V3-W2-CAGE-PROGRESS.md |
-| M5 | `check()` view, reason codes, extended events | Done, unit-tested | V3-W2-EDITH-PROGRESS.md, ATTEST-CHECK.md |
+| M1 | Burned key is removed from the account (sandbox) | Passed (5 tests) | [V3-M1-PROGRESS.md](evidence/V3-M1-PROGRESS.md) |
+| M2 part A | Kizashi `usdc_epoch` race fix | Implemented, tested | [V3-KIZASHI-PROGRESS.md](evidence/V3-KIZASHI-PROGRESS.md) |
+| M2 part B | Queue `expires_at`, `cancel_all`, `purge_expired`, per-key slots and shares | Implemented, tested | [V3-MAMORI-PROGRESS.md](evidence/V3-MAMORI-PROGRESS.md) |
+| M3 | Counting rule, loss-bound derivation, property tests, mutation checks | Done | [V3-M3-PROGRESS.md](evidence/V3-M3-PROGRESS.md), LOSS-BOUND.md |
+| M4 | `attest()`, cage-check, revoked-key check in `add_daily_key` | Done, sandbox-tested | [V3-W2-EDITH-PROGRESS.md](evidence/V3-W2-EDITH-PROGRESS.md), [V3-W2-CAGE-PROGRESS.md](evidence/V3-W2-CAGE-PROGRESS.md) |
+| M5 | `check()` view, reason codes, extended events | Done, unit-tested | [V3-W2-EDITH-PROGRESS.md](evidence/V3-W2-EDITH-PROGRESS.md), ATTEST-CHECK.md |
 | M6 | Hash-pinned global contract on testnet | Not built | ROADMAP.md, ARCHITECTURE.md 3 |
-| M7 | Nine scripted attacks | All nine passed on the sandbox | ATTACK-RESULTS.md, V3-W3-ATTACKS-PROGRESS.md |
+| M7 | Nine scripted attacks | All nine passed on the sandbox | ATTACK-RESULTS.md, [V3-W3-ATTACKS-PROGRESS.md](evidence/V3-W3-ATTACKS-PROGRESS.md) |
 | M8 | Measured table | Done | ATTACK-RESULTS.md section 11 |
 | M9 | Same attacks run against Leash and near-agent-spend-guard | Not run. No comparison is made. | ROADMAP.md, NOVELTY-CLAIMS.md |
 
@@ -67,6 +67,6 @@ Containment is a refusal counter inside the call that is refused. No off-chain d
 
 - Strike window: the 24 h window is kept. A cumulative count is not implemented, and its false-positive cost was not measured. [ROADMAP.md Q4, ATTACK-RESULTS.md 11.4]
 - A5: the send refund assumes a transfer's failure callback arrives within 24 h. The design assumes receipts resolve in seconds. This is not enforced in code. [LOSS-BOUND.md 2.4]
-- Kizashi residual: a reservation released by the 10 minute timeout, while its transfer is still on its way, can still be double-spent by a read ordered after the release. This is documented, not modelled and not fixed. [V3-KIZASHI-PROGRESS.md step 3]
+- Kizashi residual: a reservation released by the 10 minute timeout, while its transfer is still on its way, can still be double-spent by a read ordered after the release. This is documented, not modelled and not fixed. [[V3-KIZASHI-PROGRESS.md](evidence/V3-KIZASHI-PROGRESS.md) step 3]
 - The admin's response time is not measured. The recovery numbers are chain-side only. [ATTACK-RESULTS.md section 13]
 - The ML-DSA admin flow is not run in v3 tests. The sandbox used an ed25519 admin as a stand-in. [ATTACK-RESULTS.md section 0, ROADMAP.md G1]

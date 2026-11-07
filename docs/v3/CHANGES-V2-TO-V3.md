@@ -4,10 +4,10 @@ Status: 2026-11-03. Testnet only. No audit. Nothing here has run on mainnet. Eac
 
 ## 1. Breaking change: redeploy, do not upgrade
 
-- **Mamori.** The stored layout changed. `Withdrawal` gained `expires_at`, and a new state field `requested_by_key` (prefix k) was added. A v2 vault that holds queue entries cannot read them. v3 vaults must be deployed fresh. [V3-MAMORI-PROGRESS.md steps 1 and 3]
-- **Kizashi.** A new state field `usdc_epoch: u64` was added. A v2-testnet instance cannot be upgraded in place. Redeploy. [V3-KIZASHI-PROGRESS.md step 2]
-- **Fallback.** The git tag `v2-testnet` holds the v2 code. The M1 log rebuilt it from `git archive` and it passed the same burn tests. [git tag -l; V3-M1-PROGRESS.md (c)]
-- **Build artefact.** `out/prod/mamori.wasm` (323,974 bytes) is not a build of the `v2-testnet` tag. Burned keys were removed from it, but a burned key's queued withdrawals stayed queued. Do not use it as a reference for either version. [V3-M1-PROGRESS.md (d)]
+- **Mamori.** The stored layout changed. `Withdrawal` gained `expires_at`, and a new state field `requested_by_key` (prefix k) was added. A v2 vault that holds queue entries cannot read them. v3 vaults must be deployed fresh. [[V3-MAMORI-PROGRESS.md](evidence/V3-MAMORI-PROGRESS.md) steps 1 and 3]
+- **Kizashi.** A new state field `usdc_epoch: u64` was added. A v2-testnet instance cannot be upgraded in place. Redeploy. [[V3-KIZASHI-PROGRESS.md](evidence/V3-KIZASHI-PROGRESS.md) step 2]
+- **Fallback.** The git tag `v2-testnet` holds the v2 code. The M1 log rebuilt it from `git archive` and it passed the same burn tests. [git tag -l; [V3-M1-PROGRESS.md](evidence/V3-M1-PROGRESS.md) (c)]
+- **Build artefact.** `out/prod/mamori.wasm` (323,974 bytes) is not a build of the `v2-testnet` tag. Burned keys were removed from it, but a burned key's queued withdrawals stayed queued. Do not use it as a reference for either version. [[V3-M1-PROGRESS.md](evidence/V3-M1-PROGRESS.md) (d)]
 - **v3 builds have run on testnet, in rehearsals only.** The drill and production-mode builds ran on testnet on 2026-11-04, 2026-11-07 and 2026-11-08. The attack numbers are sandbox numbers. [TESTNET-REHEARSAL.md; ATTACK-RESULTS.md section 13]
 
 ## 2. Mamori behaviour changes
@@ -16,12 +16,12 @@ Status: 2026-11-03. Testnet only. No audit. Nothing here has run on mainnet. Eac
 |---|---|---|---|
 | Strike counting | A policy refusal of `send_small` counted, including cap used up by earlier spend. | Only refusals that can never succeed count: `not_allowlisted` and `over_cap_total`. `cap_exhausted` does not count. | ATTEST-CHECK.md section 4; ARCHITECTURE.md 2.1 |
 | Strike window | 24 h, fixed. | Unchanged. The cumulative count (Q4) is not implemented. | ROADMAP.md Q4; ATTACK-RESULTS.md 11.4 |
-| Queue expiry | None. | `expires_at` = unlock + 24 h. `execute` refuses an expired request. | V3-MAMORI-PROGRESS.md step 1; lib.rs `EXECUTE_WINDOW_SECS` |
-| Purge and cancel | `cancel(id)`. | Adds `cancel_all()` (admin, returns count) and `purge_expired()` (anyone, returns count). | V3-MAMORI-PROGRESS.md step 2 |
-| Per-key limits | Account-wide only. | Per key, with n recorded keys: `MAX_QUEUE / n` requests, `pending / n` queued value, `pending / n` requested per 24 h. The account-wide limits still apply. | LOSS-BOUND.md section 1; V3-MAMORI-PROGRESS.md step 3 |
-| Revoked key | `add_daily_key` accepted any key. | Refuses a key that is revoked but not yet deleted from the account. | V3-W2-EDITH-PROGRESS.md M4a |
+| Queue expiry | None. | `expires_at` = unlock + 24 h. `execute` refuses an expired request. | [V3-MAMORI-PROGRESS.md](evidence/V3-MAMORI-PROGRESS.md) step 1; lib.rs `EXECUTE_WINDOW_SECS` |
+| Purge and cancel | `cancel(id)`. | Adds `cancel_all()` (admin, returns count) and `purge_expired()` (anyone, returns count). | [V3-MAMORI-PROGRESS.md](evidence/V3-MAMORI-PROGRESS.md) step 2 |
+| Per-key limits | Account-wide only. | Per key, with n recorded keys: `MAX_QUEUE / n` requests, `pending / n` queued value, `pending / n` requested per 24 h. The account-wide limits still apply. | LOSS-BOUND.md section 1; [V3-MAMORI-PROGRESS.md](evidence/V3-MAMORI-PROGRESS.md) step 3 |
+| Revoked key | `add_daily_key` accepted any key. | Refuses a key that is revoked but not yet deleted from the account. | [V3-W2-EDITH-PROGRESS.md](evidence/V3-W2-EDITH-PROGRESS.md) M4a |
 | Views | Config and key views. | Adds `attest()` and `check(key, asset, amount, to)`. | ATTEST-CHECK.md sections 2 and 3 |
-| Reason codes | Text only. | Ten stable codes. The text is unchanged. Two per-key share texts are new. | ATTEST-CHECK.md section 4; V3-MAMORI-PROGRESS.md step 3 |
+| Reason codes | Text only. | Ten stable codes. The text is unchanged. Two per-key share texts are new. | ATTEST-CHECK.md section 4; [V3-MAMORI-PROGRESS.md](evidence/V3-MAMORI-PROGRESS.md) step 3 |
 | Events | `kaigen` NEP-297 envelope, version 1.0.0. | Same envelope and version. Fields added (`reason_code`, `spent_after`, `token`, `amount`, `to`, `count`, `trigger`). New event `send_failed`. | ATTEST-CHECK.md section 5 |
 | `request_withdraw` | Returns U64. Refusals panic and are uncounted. | Unchanged (Q-ABI kept). | ROADMAP.md Q-ABI |
 | Delay floor | 24 h in production builds. | Unchanged. The loss bound depends on it. | ARCHITECTURE.md 2; LOSS-BOUND.md 1 |
@@ -34,17 +34,17 @@ Two v2 facts that v3 does not change: the stored `max_strikes` range is 1 to 10 
 
 ## 3. Kizashi change
 
-- **Race fix.** `on_usdc_balance` now refuses a token balance read that was ordered under an older `usdc_epoch`. `claim` and `retry_payout` pass the epoch they saw. The epoch rises when an in-flight payout is reported as landed, and when `release_stale` frees a reservation. [V3-KIZASHI-PROGRESS.md step 2]
-- **ABI.** Public methods and views are unchanged. The private callback `on_usdc_balance` gained an `epoch` argument. Nothing in `jobs/` or `app/` calls it. [V3-KIZASHI-PROGRESS.md step 2]
-- **Residuals** (not fixed): a reservation released by the 10 minute timeout can still be double-spent by a read ordered after the release. A NEAR refund that beats its callback can let a second claim sweep refunded NEAR, and the callback books an unbacked debt. This is pinned by a test and deliberately not fixed in the contract: a hold-back fix strands a top-up and adds state, and the contract cannot tell a refund from an equal top-up. The evidence and the three-order model are in [KIZASHI-REFUND-ORDER.md]. No code change, so the Kizashi wasm is unchanged [docs/internal/V3-OPEN-KIZASHI-PROGRESS.md step 5]. Clippy was not run. [V3-KIZASHI-PROGRESS.md step 3]
+- **Race fix.** `on_usdc_balance` now refuses a token balance read that was ordered under an older `usdc_epoch`. `claim` and `retry_payout` pass the epoch they saw. The epoch rises when an in-flight payout is reported as landed, and when `release_stale` frees a reservation. [[V3-KIZASHI-PROGRESS.md](evidence/V3-KIZASHI-PROGRESS.md) step 2]
+- **ABI.** Public methods and views are unchanged. The private callback `on_usdc_balance` gained an `epoch` argument. Nothing in `jobs/` or `app/` calls it. [[V3-KIZASHI-PROGRESS.md](evidence/V3-KIZASHI-PROGRESS.md) step 2]
+- **Residuals** (not fixed): a reservation released by the 10 minute timeout can still be double-spent by a read ordered after the release. A NEAR refund that beats its callback can let a second claim sweep refunded NEAR, and the callback books an unbacked debt. This is pinned by a test and deliberately not fixed in the contract: a hold-back fix strands a top-up and adds state, and the contract cannot tell a refund from an equal top-up. The evidence and the three-order model are in [KIZASHI-REFUND-ORDER.md]. No code change, so the Kizashi wasm is unchanged [[V3-OPEN-KIZASHI-PROGRESS.md](evidence/V3-OPEN-KIZASHI-PROGRESS.md) step 5]. Clippy was not run. [[V3-KIZASHI-PROGRESS.md](evidence/V3-KIZASHI-PROGRESS.md) step 3]
 - **Status.** Kizashi stays optional. [ROADMAP.md Q8; THREAT-MODEL.md section 6]
 
 ## 4. Tooling and checks added
 
-- **cage-check.** `node jobs/src/bin.mjs cage-check <account>`. 15 rows: ARCH-2.8-1 to 8, ATTEST-1 and ATTEST-2, and ATTEST-3 to 7 (safe account, policy actors, emergency window, safe-account change, proposals; the last five cover the stretch settings) [jobs/src/cage.mjs]. Exit 0 is GREEN, 1 is RED, 3 is UNKNOWN (a row could not be checked, for example a v2 vault with no `attest()`). Exit 2 is not described in the sources. `--stand-in-admin` passes an ed25519 admin in the sandbox; the output is then marked "not a production result". [V3-W2-CAGE-PROGRESS.md; ATTACK-RESULTS.md attack 8]
-- **Row 2 is UNKNOWN when the admin is given as a full ML-DSA public key.** The hash format is not in the sources. [V3-W2-CAGE-PROGRESS.md step 3 (a)]
-- **Attack suite.** `tests-integration/tests/attacks/`, run against a WSL sandbox. The timed test is `#[ignore]`. [V3-W3-ATTACKS-PROGRESS.md; ATTACK-RESULTS.md section 14]
-- **Sandbox.** nearcore 2.14.0, protocol 88, `init --fast` (128 ms blocks), WSL distro `kaigen-sandbox`. The vault admin is ed25519. [V3-M1-PROGRESS.md step 1; ATTACK-RESULTS.md section 0]
+- **cage-check.** `node jobs/src/bin.mjs cage-check <account>`. 15 rows: ARCH-2.8-1 to 8, ATTEST-1 and ATTEST-2, and ATTEST-3 to 7 (safe account, policy actors, emergency window, safe-account change, proposals; the last five cover the stretch settings) [jobs/src/cage.mjs]. Exit 0 is GREEN, 1 is RED, 3 is UNKNOWN (a row could not be checked, for example a v2 vault with no `attest()`). Exit 2 is not described in the sources. `--stand-in-admin` passes an ed25519 admin in the sandbox; the output is then marked "not a production result". [[V3-W2-CAGE-PROGRESS.md](evidence/V3-W2-CAGE-PROGRESS.md); ATTACK-RESULTS.md attack 8]
+- **Row 2 is UNKNOWN when the admin is given as a full ML-DSA public key.** The hash format is not in the sources. [[V3-W2-CAGE-PROGRESS.md](evidence/V3-W2-CAGE-PROGRESS.md) step 3 (a)]
+- **Attack suite.** `tests-integration/tests/attacks/`, run against a WSL sandbox. The timed test is `#[ignore]`. [[V3-W3-ATTACKS-PROGRESS.md](evidence/V3-W3-ATTACKS-PROGRESS.md); ATTACK-RESULTS.md section 14]
+- **Sandbox.** nearcore 2.14.0, protocol 88, `init --fast` (128 ms blocks), WSL distro `kaigen-sandbox`. The vault admin is ed25519. [[V3-M1-PROGRESS.md](evidence/V3-M1-PROGRESS.md) step 1; ATTACK-RESULTS.md section 0]
 - **Property tests.** `contracts/mamori/src/tests/loss_bound.rs`, a seeded generator (proptest is not in the lock file). [LOSS-BOUND.md section 4]
 - **Mutation checks.** Sixteen mutations of `lib.rs`, in 20 runs. [LOSS-BOUND.md section 5]
 
@@ -58,7 +58,7 @@ Items 1 to 7 were wrong or stale against the v3 sources and were fixed in the RE
 4. Gap id `G2` in the old README meant "storage cost, about 3 NEAR per vault". ROADMAP.md uses `G2` for global-contract publishing on mainnet. The old meaning is kept below, marked unverified, and the id clash is noted.
 5. The old "What makes KAIGEN unique" heading made a novelty framing. It is renamed. No novelty claim is made. [NOVELTY-CLAIMS.md section 3]
 6. The refusal sequence diagram listed only dust and no-limit refusals as uncounted. `cap_exhausted` is uncounted too. [ATTEST-CHECK.md section 4]
-7. The old test counts (Kizashi 60, Mamori 78, app 62, jobs 149, scripts 20) were from v2. Replaced with: Mamori 230 default and 226 drill, Kizashi 104 default and 105 drill [KIZASHI-REFUND-ORDER.md, 2026-11-07], jobs 358 with 2 skipped [owner's run, 2026-11-07]. [V3-W2-EDITH-PROGRESS.md; V3-KIZASHI-PROGRESS.md; V3-W2-CAGE-PROGRESS.md] The app and scripts counts are not re-run and are removed.
+7. The old test counts (Kizashi 60, Mamori 78, app 62, jobs 149, scripts 20) were from v2. Replaced with: Mamori 230 default and 226 drill, Kizashi 104 default and 105 drill [KIZASHI-REFUND-ORDER.md, 2026-11-07], jobs 358 with 2 skipped [owner's run, 2026-11-07]. [[V3-W2-EDITH-PROGRESS.md](evidence/V3-W2-EDITH-PROGRESS.md); [V3-KIZASHI-PROGRESS.md](evidence/V3-KIZASHI-PROGRESS.md); [V3-W2-CAGE-PROGRESS.md](evidence/V3-W2-CAGE-PROGRESS.md)] The app and scripts counts are not re-run and are removed.
 8. Allowlist size (32) and omen cap (8) are not in the design docs. They were confirmed by grep of `MAX_ALLOWED` (32) and `MAX_OMENS` (8) in the code, at HEAD 44227f2.
 9. The three "Key Code" excerpts were v2 code with v2 line numbers. They are replaced by a list of function names. The code excerpt for `emit_refused` no longer matches the v3 signature, which takes the call.
 10. The old "Fixed in the current code" list and the old omen-limits paragraph were kept in the README and marked unverified, not removed. The K3 gap row and the old G2 storage row were restored after a first pass dropped them.
@@ -79,7 +79,7 @@ These are kept in the README, marked with an HTML comment where they appear. The
 - Open gaps from the old table: intents starvation, one `trip` may not finish, RPC host and unsigned gate file, `deployments.json` missing from the repo, the `KIZASHI_CODE_HASH` 503 rule, the 1Click USDC asset id.
 - The app: pages, headers (COOP and CORP), top-up routes and the 503 rule, Next.js 16, React 19, and the package list.
 - Tooling: `make` targets, `node jobs/src/bin.mjs judge`, `judge-report.json`, `mainnet gates|plan|execute|lock` commands, `fire-test` records written by the CLI, and the `verify` command. ROADMAP.md confirms only that `jobs/src/mainnet.mjs` is dry-run by default.
-- Versions: Rust 1.99.1, Node v24.11.1 and the npm packages listed under Tech Stack. `near-sdk` 5.30 is confirmed by V3-W2-EDITH-PROGRESS.md.
+- Versions: Rust 1.99.1, Node v24.11.1 and the npm packages listed under Tech Stack. `near-sdk` 5.30 is confirmed by [V3-W2-EDITH-PROGRESS.md](evidence/V3-W2-EDITH-PROGRESS.md).
 - The `AWS_LC_SYS_PREBUILT_NASM` Windows setting is confirmed by the LOSS-BOUND.md rerun command.
 - Reproducible builds on one machine.
 - The `docs/ARCHITECTURE-REVIEW.md` reference (file present, not read for v3).
