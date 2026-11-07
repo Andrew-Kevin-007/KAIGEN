@@ -53,6 +53,26 @@ Same commands, on commit cb62c80 and a fresh funder (`kaigen-funder-a00266.testn
 
 All 10 defence steps HELD ("every attack was stopped"), both fire tests PASS, and all 9 `zerokey` checks PASS, as in the first run. The sweep and policy paths are covered by unit tests only; this rehearsal does not call `sweep_to_safe` or `propose_*` on chain.
 
+## Third run: the stretch paths and a production-mode vault (2026-11-07)
+
+Two more commands, both run by the project owner's session on testnet (protocol 88), against the final build (contracts unchanged since cb62c80).
+
+**Production-mode vault** (`prodvault`): `pv-45cbcb96.kaigen-funder-ee0d56.testnet`, the production `out/prod/mamori.wasm` (432,906 bytes, code hash AoxPd3zABfzDRoPsE14ReAzMrzq5o5rMFj8FZXn9zKoQ), deployed and initialised in one transaction with the production 24 h delay, an ML-DSA-65-only admin key, one allowlisted supplier and one agent daily key. `cage-check`: GREEN, all 15 conditions. `plant-key` added an ed25519 full-access key (tx 779ehEJxrqQnc8KrvYPpcBKYkE5LWJWhKPdVxN7YfXv4): `cage-check` went RED on ARCH-2.8-1, exit code 1, naming the key; removing it turned `cage-check` GREEN, exit code 0. It follows a drill Kizashi, not the production omens, and no withdrawal, strike or fire test was run on it.
+
+**`stretchdrill`** on the drill vault `vault.kaigen-funder-a00266.testnet` (delay 10 s). Result: all five steps PASS, "the stretch items worked on a real chain".
+
+| step | evidence |
+|---|---|
+| 1 safe account | `set_safe_account` accepted, `attest()` shows it waiting, then in force with nothing pending |
+| 2 `sweep_to_safe` | tx HRUYgVuSz7RSDp39njLntmCWRoyv2YXW12ssvDiuZcjy; a `sweep_to_safe` event naming the safe account; no `sweep_failed`; every receipt ran on the vault or the safe account only; the safe account received exactly 0.0100 NEAR; the vault fell by 0.010704 NEAR (the amount plus 0.000704 NEAR gas); the request's own payee received nothing; the request left the queue |
+| 3 refusals | a stranger calling `sweep_to_safe`: refused by the contract ("admin or watcher only"); the agent's daily key calling it: refused by the access key's permission before the contract ran; `set_safe_account` to the vault itself: refused ("the safe account cannot be the vault itself"); nothing moved, the request stayed queued |
+| 4 policy path | `set_policy_account` accepted and shown by `attest()`; `propose_allow_recipient` queued with the allowlist unchanged; `apply` before the wait refused ("still locked"); a second proposal queued and removed with `cancel_proposal`; `apply` after the wait ran the first, the recipient is allowlisted and no proposal waits |
+| 5 `cage-check` | 14 of 15 rows GREEN; ATTEST-2 RED by design, because it is a drill build with a delay of seconds |
+
+A first run of this command failed step 4 because the check for "apply before the delay is refused" ran about 3.3 s after the proposal's run time (the delay is 10 s and other transactions ran in between). That was a test-ordering bug, confirmed from block timestamps; the check now runs right after the proposal.
+
+Not covered by this run: the watcher path (`add_watcher`, `set_emergency`, a watcher's sweep), a NEP-141 sweep, three of the four `propose_*` methods, and a separate policy account with its own key (the keeper acted as both stranger and policy account). The drill delay is 10 s, not the production 24 h.
+
 ## Not covered
 
 - The production builds were not deployed. The drill builds differ from production by the `drill` feature (a Kizashi `reset`, and a Mamori era that follows Kizashi down).

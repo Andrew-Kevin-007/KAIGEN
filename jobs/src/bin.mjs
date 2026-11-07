@@ -19,10 +19,13 @@
 //              then cage-check per row (dry run unless --yes; run it with no arguments for the options). Keys go to KAIGEN_TESTNET_DIR
 //   plant-key  testnet only: plant a key the cage must not have (--kind ed25519-full|null-allowance) or take it off (--remove <publickey>),
 //              signed by the vault's ML-DSA admin seed; prints the cage-check command to run next (dry run unless --yes)
+//   stretchdrill  testnet only: the stretch items (safe account, sweep_to_safe, policy proposals) on the DRILL rehearsal vault of
+//              KAIGEN_TESTNET_DIR/state.json, signed by its ML-DSA admin seed; PASS/FAIL per step with tx hashes (dry run unless --yes)
 //
 // Config: deployments.json (path in KAIGEN_DEPLOYMENTS, default ../deployments.json). Secrets only
 // come from the environment or files outside the repo; nothing secret is read from deployments.json.
 import { randomBytes } from "node:crypto";
+import { signerFromPrivateKey } from "@fastnear/utils";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -42,7 +45,8 @@ import { buildPlan, executeStage, findLatestGate, loadInputs, lockKizashi, Refus
 import { PLANT_USAGE, parsePlantArgs, planPlantKey, renderPlant, runPlantKey } from "./plantkey.mjs";
 import { assertSecretsDir, parseProdVaultArgs, planProdVault, PRODVAULT_USAGE, renderRun as renderProdVault, runProdVault } from "./prodvault.mjs";
 import { makeRpc } from "./rpc.mjs";
-import { report, verifyAll, verifyRelease, writeGate } from "./verify.mjs";
+import { parseStretchArgs, planStretchDrill, renderStretch, runStretchDrill, STRETCHDRILL_USAGE } from "./stretchdrill.mjs";
+import { codeHashOf, report, verifyAll, verifyRelease, writeGate } from "./verify.mjs";
 import { predeploy, report as predeployReport } from "../../scripts/predeploy.mjs";
 import { check, loadState, saveState, sources } from "./watchers.mjs";
 
@@ -421,6 +425,75 @@ DRY RUN: nothing was signed or sent. To do it for real:
     process.exitCode = out.confirmed ? 0 : 1;
   },
 
+  /**
+   * Testnet only: the stretch items on the DRILL rehearsal vault named by KAIGEN_TESTNET_DIR/state.json, signed by its ML-DSA admin
+   * seed. Dry run unless --yes (reads only). See stretchdrill.mjs.
+   */
+  async stretchdrill() {
+    const dir = assertSecretsDir(process.env.KAIGEN_TESTNET_DIR ?? path.join(root, ".kaigen-testnet"), root);
+    const defaultFunder = process.env.KAIGEN_FUNDER_FILE ?? (fs.existsSync(path.join(dir, "funder.json")) ? path.join(dir, "funder.json") : undefined);
+    let o;
+    try {
+      o = parseStretchArgs(process.argv.slice(3), { funderFile: defaultFunder, wasm: fs.existsSync(path.join(root, "out", "drill", "mamori.wasm")) ? path.join(root, "out", "drill", "mamori.wasm") : undefined });
+    } catch (e) {
+      if (!(e instanceof GlobalUsage)) throw e;
+      console.error(`${e.message}
+${STRETCHDRILL_USAGE}`);
+      process.exitCode = 2;
+      return;
+    }
+    const stateFile = path.join(dir, "state.json");
+    if (!fs.existsSync(stateFile)) throw new Error(`no provisioned rehearsal in ${dir} (state.json is missing): set KAIGEN_TESTNET_DIR to the folder \`testnet\` used`);
+    const state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+    const rpc = makeRpc(o.rpc);
+    const plan = planStretchDrill({ state, safe: o.safe, recipient: `stretchdrill-${randomBytes(4).toString("hex")}.testnet` });
+    const sender = makeSender({ rpc });
+    const admin = adminSigner({ seedFile: state.adminSeedsPath, vault: state.vault });
+    if (!admin) throw new Error(`no admin seed for ${state.vault} in ${state.adminSeedsPath}`);
+    const keeperSigner = signerFromPrivateKey(state.keeper.privateKey);
+    const funder = o.yes && o.funderFile ? loadFunder(o.funderFile) : null;
+    const daily = agentCaller({ network: "testnet", vault: state.vault, privateKey: state.daily.privateKey });
+    const io = {
+      rpc,
+      adminHandle: admin.publicKeyHandle,
+      admin: (actions) => sender({ signerId: state.vault, signer: admin, receiverId: state.vault, actions }),
+      keeper: (actions) => sender({ signerId: state.keeper.id, signer: keeperSigner, receiverId: state.vault, actions }),
+      daily,
+      fund: funder ? (yocto) => sender({ signerId: funder.accountId, signer: funder.signer, receiverId: state.vault, actions: [{ type: "Transfer", yocto }] }) : null,
+      nowNs: async () => BigInt((await rpc.call("block", { finality: "final" })).header.timestamp_nanosec),
+      // The block the vault's receipt ran in: its time is the `now` the contract saw.
+      receiptNs: async (outcome) => {
+        const r = (outcome?.receipts_outcome ?? []).find((x) => x.outcome?.executor_id === state.vault);
+        if (!r) return undefined;
+        return BigInt((await rpc.call("block", { block_id: r.block_hash })).header.timestamp_nanosec);
+      },
+    };
+    let out;
+    try {
+      out = await runStretchDrill({
+        plan,
+        state,
+        io,
+        yes: o.yes,
+        expectedChain: o.chainId,
+        wasmHash: o.wasm ? codeHashOf(fs.readFileSync(o.wasm)) : null,
+        log: (e) => console.log(JSON.stringify({ at: new Date().toISOString(), ...e })),
+      });
+    } finally {
+      admin.destroy?.();
+    }
+    console.log(`
+${renderStretch(out)}`);
+    if (out.dryRun) {
+      console.log(`
+DRY RUN: nothing was signed or sent. To do it for real (testnet, drill vault, a few cents of testnet NEAR):
+  node jobs/src/bin.mjs stretchdrill${o.safe ? ` --safe ${o.safe}` : ""} --yes`);
+      process.exitCode = out.pre.ok ? 0 : 1;
+      return;
+    }
+    process.exitCode = out.ok ? 0 : 1;
+  },
+
   /** Mainnet deploy tooling. Dry-run by default; see mainnet.mjs. */
   async mainnet() {
     const args = process.argv.slice(3);
@@ -512,7 +585,7 @@ DRY RUN: nothing was signed or sent. To do it for real:
 
 const cmd = process.argv[2];
 if (!commands[cmd]) {
-  console.error("usage: kaigen-jobs hinomi | keeper [--loop] | watch | firetest | demo | testnet | recycle | zerokey [--yes] | judge | verify [--release [--pre-lock]] | cage-check <account> | globalcontract [publish --wasm <file>] --kizashi <account> [--yes] | prodvault --kizashi <account> --funder-file <file> [--yes] | plant-key <vault> --kind ed25519-full|null-allowance [--remove <publickey>] [--yes] | mainnet gates|plan|execute|lock");
+  console.error("usage: kaigen-jobs hinomi | keeper [--loop] | watch | firetest | demo | testnet | recycle | zerokey [--yes] | judge | verify [--release [--pre-lock]] | cage-check <account> | globalcontract [publish --wasm <file>] --kizashi <account> [--yes] | prodvault --kizashi <account> --funder-file <file> [--yes] | plant-key <vault> --kind ed25519-full|null-allowance [--remove <publickey>] [--yes] | stretchdrill [--safe <account>] [--yes] | mainnet gates|plan|execute|lock");
   process.exit(2);
 }
 commands[cmd]().catch((e) => {
