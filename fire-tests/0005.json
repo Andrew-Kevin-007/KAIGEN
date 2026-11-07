@@ -1,0 +1,57 @@
+{
+  "seq": 5,
+  "drill": true,
+  "submitter": "keeper.kaigen-funder-a00266.testnet",
+  "kizashi": "kizashi.kaigen-funder-a00266.testnet",
+  "omen_id": "drill-ed25519-omen",
+  "vaults": [
+    "vault.kaigen-funder-a00266.testnet"
+  ],
+  "steps": [
+    {
+      "step": "preflight: drill is armed",
+      "ok": true
+    },
+    {
+      "step": "claim with the drill omen key",
+      "ok": true
+    },
+    {
+      "step": "era is kaigen",
+      "ok": true
+    },
+    {
+      "step": "trip vault.kaigen-funder-a00266.testnet",
+      "ok": true
+    },
+    {
+      "step": "classical keys are gone",
+      "ok": true
+    },
+    {
+      "step": "post-quantum send from vault.kaigen-funder-a00266.testnet",
+      "ok": true
+    },
+    {
+      "step": "reset the drill Kizashi",
+      "ok": true
+    },
+    {
+      "step": "re-arm vault.kaigen-funder-a00266.testnet",
+      "ok": true
+    }
+  ],
+  "claim_tx": "CGTTWSsZeYHMW4mxDFR6zemU4c6ezexGvobhS2dHAbnd",
+  "claim_block": 276209748,
+  "trip_txs": {
+    "vault.kaigen-funder-a00266.testnet": "GVSDkf3XdT7A84dkZQjGMpiD6UHZi1DKmt4JJEQWBnRP"
+  },
+  "verified_block": 276209762,
+  "pq_send_txs": {
+    "vault.kaigen-funder-a00266.testnet": "CiaSX8DYSmqvh7Fqq6hDjch9ZLR96uBCEZd3Wnca6UTx"
+  },
+  "reset_tx": "6dxhFcyyhAFBdefVYuDu8KTPqd9YvsqaaQP8JUHmuVwo",
+  "rearm_txs": {
+    "vault.kaigen-funder-a00266.testnet": "3uBof3jzop4VTsCzhAbzpS4ETLEHXYKtKCYEfbB1ZCmU"
+  }
+}
