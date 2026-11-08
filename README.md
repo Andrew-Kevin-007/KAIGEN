@@ -48,6 +48,14 @@ Point in time: re-run before relying on it. The explorer pages sit behind a brow
 
 Cage-check for the production-mode vault is the step 3 command above. [TESTNET-REHEARSAL.md third run]
 
+## Try it in the browser
+
+Live testnet app: https://kaigen-inky.vercel.app/
+
+- **[/xray](https://kaigen-inky.vercel.app/xray)**: paste any NEAR account and read, live and read-only, every access key, its limits, the code hash and the 15 cage conditions (GREEN, RED or UNKNOWN, the same rules as `cage-check`). It also works on accounts that are not KAIGEN vaults, where it says only what the key list proves. One click loads the production-mode vault, which reads GREEN. [docs/v3/XRAY.md](docs/v3/XRAY.md)
+- **[/arena](https://kaigen-inky.vercel.app/arena)**: bring your own LLM and your own API key (OpenRouter or Anthropic; the key stays in your browser tab and goes only to the provider). Your model reads an invoice with a hidden instruction to pay an attacker, and you watch the vault rules refuse it, count strikes and burn the key. Choose a naive or a defended agent and one of three injection levels. **The vault side is a simulation of the contract's rules, not the chain, and the page says so.** [docs/v3/ARENA.md](docs/v3/ARENA.md)
+- **Vault page**: shows the proven worst-case loss for an agent, per token, with the formula and the inputs it used.
+
 ## What is proven, where
 
 | Claim | Where to check | Result |
@@ -59,10 +67,15 @@ Cage-check for the production-mode vault is the step 3 command above. [TESTNET-R
 | Stretch items on a real chain | Same file, "Third run" section | Eight steps passed on a drill vault with a 10 s delay. |
 | cage-check red and green with a planted key | Same file, third run; [ATTACK-RESULTS.md](docs/v3/ATTACK-RESULTS.md) attack 8 | A planted ed25519 full-access key turns cage-check RED (ARCH-2.8-1); removing it returns GREEN. |
 | 90-second demo script | [docs/v3/DEMO-SCRIPT.md](docs/v3/DEMO-SCRIPT.md) | Shot list, commands, numbers to read out, and the caveat it must say aloud. |
+| Prompt-injected agent against the vault, on a real chain | `node jobs/src/bin.mjs inject-demo --model mock`; [docs/v3/INJECT-DEMO.md](docs/v3/INJECT-DEMO.md); [recorded run](docs/v3/evidence/INJECT-DEMO-mock-2026-11-08.md) | The recorded on-chain run used a scripted MOCK agent, labelled on every line, not a language model. The honest payment went through, three injected payments were refused, the third strike burned the key, and the node refused the next attempt. The `anthropic` and `openrouter` modes are tested with stubs only in this repository. |
+| X-ray and the worst-case number | [docs/v3/XRAY.md](docs/v3/XRAY.md); `/xray` on the live app | Unit-tested; read live against the production-mode vault (GREEN, 15 conditions) and the drill vault (RED on ATTEST-2 only, by design). |
+| Arena | [docs/v3/ARENA.md](docs/v3/ARENA.md) | The simulation reproduces the numbers of the offline demo test. Provider calls are tested with stubs; real runs happen in each visitor's own browser and are not recorded here. |
 
 ## What is NOT proven
 
 - No outside audit. [ROADMAP.md section 3]
+- The arena's vault is a simulation of the rules in the browser, not a chain. A model that resists the injection shows that the agent held, not that the vault was needed, and a model that falls under the naive setup says nothing about agents told to distrust invoice text. [ARENA.md]
+- No language-model run of `inject-demo` is recorded in this repository; the on-chain recording used the labelled MOCK agent. [INJECT-DEMO.md]
 - Testnet only. Mainnet availability of the global-contract mechanism is unconfirmed. [GLOBAL-CONTRACT.md section 7]
 - The real Mamori global-contract publish was not run; the mechanism was shown with a 1,024-byte module. [GLOBAL-CONTRACT.md sections 6a and 7]
 - Sandbox attacks use an ed25519 admin stand-in. The ML-DSA admin flow is not covered by these numbers. [ATTACK-RESULTS.md sections 0 and 13]
@@ -72,7 +85,7 @@ Cage-check for the production-mode vault is the step 3 command above. [TESTNET-R
 
 ## Track
 
-**Track:** AI Security & Defense. The entry covers function-call access keys, an attack demo with a log, a read-only counterparty check (`node jobs/src/bin.mjs counterparty <vault> <to>`: account age, contract and recent code change, past payments and a blocklist with evidence; a signal it cannot read counts as a warning, never as a pass; advisory only [docs/v3/COUNTERPARTY.md](docs/v3/COUNTERPARTY.md)), a recipient allowlist enforced by the contract (off by default), and the vault as the last line. The Kizashi omen bounty is an optional extra, not the headline. [LOSS-BOUND.md section 1; THREAT-MODEL.md section 6]
+**Track:** AI Security & Defense. The entry covers function-call access keys, an attack demo with a log, a prompt-injection arena where visitors bring their own LLM (a labelled simulation), a live X-ray that reads any account's keys, a read-only counterparty check (`node jobs/src/bin.mjs counterparty <vault> <to>`: account age, contract and recent code change, past payments and a blocklist with evidence; a signal it cannot read counts as a warning, never as a pass; advisory only [docs/v3/COUNTERPARTY.md](docs/v3/COUNTERPARTY.md)), a recipient allowlist enforced by the contract (off by default), and the vault as the last line. The Kizashi omen bounty is an optional extra, not the headline. [LOSS-BOUND.md section 1; THREAT-MODEL.md section 6]
 
 ## Reference
 

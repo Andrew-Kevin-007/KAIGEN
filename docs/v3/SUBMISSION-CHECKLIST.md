@@ -1,6 +1,6 @@
 # Submission checklist (owner: Kevin only)
 
-Status: 2026-11-07 (stretch items built; numbers refreshed). For Kevin only. Sources: docs/v3/ROADMAP.md and docs/PLAN-submission-and-mainnet.md.
+Status: 2026-11-08 (stretch items built and run on testnet; CI green; live app at https://kaigen-inky.vercel.app/ with /xray and /arena; inject-demo built). Open for Kevin: items 2, 7 and 8 and the owner TODO below. For Kevin only. Sources: docs/v3/ROADMAP.md and docs/PLAN-submission-and-mainnet.md.
 
 ## Rules that apply
 
@@ -11,7 +11,7 @@ Status: 2026-11-07 (stretch items built; numbers refreshed). For Kevin only. Sou
 
 ## Checklist (in order)
 
-- [ ] **1. Run the zero-key harness.**
+- [x] **1. Run the zero-key harness.**
   - Who: Kevin.
   - Command: see that file ([V3-OPEN-CYBORG-PROGRESS.md](evidence/V3-OPEN-CYBORG-PROGRESS.md), copied to `docs/v3/evidence/`).
   - Done when: a zero-key Kizashi run is recorded in a fire-test file, and a third-party claim still works. [PLAN section A, Tue 3 Nov; PLAN section B stage 4 item 2]. Status: `zerokey` passed in both rehearsal runs [TESTNET-REHEARSAL.md]; the fire-test record was not checked here.
@@ -26,7 +26,7 @@ Status: 2026-11-07 (stretch items built; numbers refreshed). For Kevin only. Sou
   - Command: `node jobs/src/bin.mjs globalcontract --kizashi <KIZASHI_ACCOUNT> --funder-file <FUNDER_FILE>` (dry run), then add `--yes`. [GLOBAL-CONTRACT.md section 4]
   - Done when: the real Mamori publish is recorded, which needs about 44.8 NEAR on one testnet account (an estimate: about 43.3 NEAR burnt for 432,906 bytes at 1e20 yocto per byte, plus 1 NEAR for the vault and a 0.5 NEAR margin; see GLOBAL-CONTRACT.md section 4). If it is not wanted, state it as not run. [GLOBAL-CONTRACT.md sections 4 and 6a; ROADMAP.md section 2, M6 row]
 
-- [ ] **4. Decide the stretch items (policy-key split, `sweep_to_safe`, sentinel).**
+- [x] **4. Decide the stretch items (policy-key split, `sweep_to_safe`, sentinel).**
   - Who: Kevin.
   - Command: none.
   - Done when: each item is written in `docs/v3/ROADMAP.md` section 2 as built or as "document as not applicable". The stretch items are built (commit cb62c80). On 2026-11-07 the owner ran `stretchdrill` on a testnet drill vault: `sweep_to_safe` and the policy path worked on the chain. On 2026-11-08 the extended run added the watcher path, a NEP-141 sweep and the three other `propose_*` methods, and all eight steps passed [TESTNET-REHEARSAL.md, extended run]. Record them in ROADMAP section 2 as built. The fallback tag `v3-core-testnet` is the build without them. The design choices for the safe account and watchers (Q5) are recorded in `docs/v3/STRETCH-DESIGN.md` once it is final. [ROADMAP.md sections 2 and 4]
@@ -55,7 +55,7 @@ Not on this list: the Kizashi lock (PLAN stage 5). It is an irreversible step an
 
 ## Owner TODO (open items from the README review)
 
-- Demo post URL: add it to the README source line after publishing, or delete that line.
+- Demo post URL: add it to the README source line after publishing, or delete that line. (The README source line now links the live app.)
 - Baseline: say whether a pre-window tag or branch exists (the first commit is 2026-11-01), and state it in the README build window.
 - Track list: add the organiser's link for the `security` and `open` track ids.
-- Landing page: state the template origin, and whether `site/` comes back (it is not tracked in git).
+- Landing page: Kevin decided on 2026-11-08 not to add a template disclosure, and the landing now uses Figtree and his own artwork. `site/` stays out of git.
