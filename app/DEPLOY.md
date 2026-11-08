@@ -2,6 +2,19 @@
 
 Next.js 16 app. Run everything below from `app/`. Nothing here needs a key, a fund or a secret in a file.
 
+## One project, two layouts
+
+The landing page and the app are one Next.js project and one deployment. `NEXT_PUBLIC_SITE_URL` and the site's `NEXT_PUBLIC_APP_URL` are gone: every link between them is internal.
+
+| Route | Layout | What it is |
+|---|---|---|
+| `/` | `app/(landing)` (own root layout, `landing.css`, Family template look) | Landing page; Connect wallet goes to `/start` |
+| `/start` | `app/(app)` | After connecting: find the vault (candidates from the connected account, or a typed name), then the read-only walkthrough |
+| `/omens` | `app/(app)` | The era, omens, bounty and the recorded drill (was `/`) |
+| `/vault`, `/vault?account=<id>`, `/vault/create`, `/bounty`, `/migrate` | `app/(app)` | As before; `/vault` reads `?account=` |
+
+The two root layouts are two separate documents, so the landing's global stylesheet cannot reach app pages and the reverse. Going between them is a full page load (the wallet session is restored from the browser on each load). The landing's Family-derived files are listed in `ASSETS-TO-REPLACE.md`.
+
 ## What the app knows about the chain
 
 The app reads one thing: which contracts it talks to. It never defaults to an address.
@@ -15,7 +28,6 @@ A setting that is wrong (bad JSON, a bad account name, a mainnet account on a te
 | `NEXT_PUBLIC_DEPLOYMENTS` | build | The public part of `deployments.json`, as JSON text. If set, it wins over any file. On Vercel, paste the JSON. |
 | `KAIGEN_DEPLOYMENTS` | build | Path (relative to `app/`) of a deployments file. Default: `../deployments.json` if it exists. A named file that is missing is an error. |
 | `KAIGEN_FIRE_TESTS` | build | Folder of fire-test records. Default: `fire-tests/` beside the deployments file (`../fire-tests`). |
-| `NEXT_PUBLIC_SITE_URL` | build | Base URL of the marketing site, for the nav and footer links. Default `/`. |
 | `ONECLICK_JWT` | server | Optional 1Click token for the bounty top-up. Without it 1Click charges a 0.2% fee. Never in a file. |
 | `ONECLICK_BASE_URL` | server | Optional 1Click API base. |
 | `KIZASHI_CODE_HASH` | server | Code hash the deployed Kizashi must have. Top-ups stay off until it is set. |

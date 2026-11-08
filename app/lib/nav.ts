@@ -1,8 +1,10 @@
+// The landing page is "/", in its own root layout. The era (omens) page lives at /omens.
 export const LINKS = [
-  { href: "/", label: "Era" },
-  { href: "/migrate", label: "Migrate" },
+  { href: "/start", label: "Start" },
+  { href: "/omens", label: "Era" },
   { href: "/vault", label: "Vault" },
   { href: "/bounty", label: "Bounty" },
+  { href: "/migrate", label: "Migrate" },
 ];
 
 const KEY_PAGE = "/migrate";

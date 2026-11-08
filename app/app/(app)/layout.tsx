@@ -1,8 +1,9 @@
 import type { Metadata, Viewport } from "next";
 import { ConfigNotice } from "@/components/ConfigNotice";
-import { Footer } from "@/components/Footer";
 import { Nav } from "@/components/Nav";
 import { NetworkBanner } from "@/components/NetworkBanner";
+import { RouteBackdrop } from "@/components/RouteBackdrop";
+import { SiteFooter } from "@/components/SiteFooter";
 import { WalletProvider } from "@/lib/wallet";
 import "./globals.css";
 
@@ -26,9 +27,14 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <Nav />
           <ConfigNotice />
           <NetworkBanner />
-          <main>{children}</main>
+          <main>
+            <RouteBackdrop />
+            {children}
+          </main>
         </WalletProvider>
-        <Footer />
+        <div className="container sf-wrap">
+          <SiteFooter />
+        </div>
       </body>
     </html>
   );
