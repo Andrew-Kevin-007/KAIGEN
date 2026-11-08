@@ -6,7 +6,7 @@ KAIGEN is an on-chain vault for an AI agent's NEAR account: the agent holds only
 
 **Status: testnet only.** No outside audit. Nothing has run on mainnet. Sandbox numbers come from one local single-validator node, with an ed25519 admin key standing in for the ML-DSA-65 admin. [ROADMAP.md section 3; ATTACK-RESULTS.md section 0]
 
-[Source Code](https://github.com/Andrew-Kevin-007/KAIGEN). No hosted demo; the app runs locally (see Getting Started). Design documents for v3 are in [docs/v3/](docs/v3/README.md).
+[Source Code](https://github.com/Andrew-Kevin-007/KAIGEN). Live app (testnet only): [kaigen-inky.vercel.app](https://kaigen-inky.vercel.app/). It can also run locally (see Getting Started). Design documents for v3 are in [docs/v3/](docs/v3/README.md).
 
 ## Try it (no keys, no chain, no wallet)
 
