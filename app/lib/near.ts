@@ -40,7 +40,7 @@ export interface QueuedWithdrawal {
   unlocks_at: string; // ns
 }
 
-async function rpc<T>(method: string, params: unknown, signal?: AbortSignal): Promise<T> {
+export async function rpc<T>(method: string, params: unknown, signal?: AbortSignal): Promise<T> {
   const res = await fetch(RPC_URL, {
     method: "POST",
     headers: { "content-type": "application/json" },

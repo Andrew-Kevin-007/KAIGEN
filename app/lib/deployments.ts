@@ -44,7 +44,7 @@ export interface Deployments {
 
 export const DEFAULT_RPC: Record<Network, string> = {
   mainnet: "https://rpc.mainnet.near.org",
-  testnet: "https://rpc.testnet.near.org",
+  testnet: "https://rpc.testnet.fastnear.com",
 };
 
 const BASE58_HASH = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;

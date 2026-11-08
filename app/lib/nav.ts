@@ -3,6 +3,8 @@ export const LINKS = [
   { href: "/start", label: "Start" },
   { href: "/omens", label: "Era" },
   { href: "/vault", label: "Vault" },
+  { href: "/xray", label: "X-ray" },
+  { href: "/arena", label: "Arena" },
   { href: "/bounty", label: "Bounty" },
   { href: "/migrate", label: "Migrate" },
 ];

@@ -19,3 +19,18 @@ test("the era page moved from / to /omens: / is the landing page and is no longe
   assert.ok(!LINKS.some((l) => l.href === "/"));
   assert.ok(LINKS.some((l) => l.href === "/start"));
 });
+
+test("X-ray is in the nav, sits before the key page, and is an ordinary soft navigation", () => {
+  const i = LINKS.findIndex((l) => l.href === "/xray");
+  assert.ok(i >= 0 && LINKS[i].label === "X-ray");
+  assert.ok(i < LINKS.findIndex((l) => l.href === "/migrate"));
+  assert.equal(fullLoad("/xray", "/vault"), false);
+});
+
+test("Arena is in the nav right after X-ray and is an ordinary soft navigation", () => {
+  const i = LINKS.findIndex((l) => l.href === "/arena");
+  assert.ok(i >= 0 && LINKS[i].label === "Arena");
+  assert.equal(LINKS[i - 1].href, "/xray");
+  assert.ok(i < LINKS.findIndex((l) => l.href === "/migrate"));
+  assert.equal(fullLoad("/arena", "/xray"), false);
+});

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { BlastMeter } from "@/components/BlastMeter";
 import { NotDeployed } from "@/components/NotDeployed";
 import { WalletError } from "@/components/WalletError";
 import { Walkthrough } from "@/components/Walkthrough";
@@ -42,6 +43,8 @@ interface Loaded {
   spent: string;
   /** What Kizashi says now. The vault only learns it when someone calls `trip`. */
   kizashiEra: Era;
+  /** The vault's attest() answer, or null when the build has none or it failed: the blast-radius meter then shows nothing. */
+  attest: unknown;
 }
 
 /** A view an older vault build may not have: its answer, or null when the vault says the method does not exist. Any other failure is thrown. */
@@ -51,6 +54,16 @@ async function optionalKeyList(id: string, method: string, signal: AbortSignal):
   } catch (e) {
     if (isMissingView(e)) return null;
     throw e;
+  }
+}
+
+/** attest() for the blast-radius meter. Any failure is null: the meter shows nothing rather than a guess. An abort is rethrown. */
+async function optionalAttest(id: string, signal: AbortSignal): Promise<unknown> {
+  try {
+    return await view<unknown>(id, "attest", {}, signal);
+  } catch (e) {
+    if (signal.aborted) throw e;
+    return null;
   }
 }
 
@@ -136,13 +149,14 @@ export default function VaultPage() {
       const wrongNetwork = await rpcNetworkProblem(ctrl.signal);
       if (wrongNetwork) throw new Error(wrongNetwork);
       if (!(await hasContract(id, ctrl.signal))) throw new Error("No contract is deployed on that account, so it is not a vault.");
-      const [config, keys, queue, spent, revoked, intents] = await Promise.all([
+      const [config, keys, queue, spent, revoked, intents, attest] = await Promise.all([
         view<unknown>(id, "config", {}, ctrl.signal),
         view<unknown>(id, "daily_keys", {}, ctrl.signal),
         view<unknown>(id, "queue", {}, ctrl.signal),
         view<unknown>(id, "spent_24h", { token: null }, ctrl.signal),
         optionalKeyList(id, "revoked_keys", ctrl.signal),
         optionalKeyList(id, "intents_keys", ctrl.signal),
+        optionalAttest(id, ctrl.signal),
       ]);
       // A contract that answers these views with something else is not a KAIGEN vault. Checked before any field is read.
       const problem = vaultShapeProblem({ config, keys, queue, spent, revoked, intents });
@@ -160,6 +174,7 @@ export default function VaultPage() {
         queue: queue as QueuedWithdrawal[],
         spent: spent as string,
         kizashiEra,
+        attest,
       });
     } catch (err) {
       if (current()) setError(errorText(err, "That vault could not be read."));
@@ -288,6 +303,8 @@ export default function VaultPage() {
               </div>
             </dl>
           </div>
+
+          <BlastMeter account={vault.account} attest={vault.attest} queueTokens={[...new Set(vault.queue.flatMap((w) => (w.token ? [w.token] : [])))]} />
 
           <section className="stack" aria-labelledby="keys-h">
             <h2 id="keys-h">Classical daily keys</h2>
