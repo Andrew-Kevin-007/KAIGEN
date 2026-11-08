@@ -2,19 +2,9 @@
 
 The landing page at `/` was built on the Family template look, using the files that were in `site/`. These are Family's assets or are derived from its template. They are here so the page works and looks right now; replace each one before the project is published. Nothing in this list is licensed to this project.
 
-## Fonts (`public/fonts/`)
+## Fonts
 
-| File | What it is |
-|---|---|
-| `Family-Regular.woff`, `Family-Regular.woff2` | Family typeface, regular |
-| `Family-Medium.woff`, `Family-Medium.woff2` | Family typeface, medium |
-| `Family-SemiBold.woff`, `Family-SemiBold.woff2` | Family typeface, semibold |
-| `LFESans-Regular.woff`, `.woff2` | LFE Sans, regular |
-| `LFESans-Medium.woff`, `.woff2` | LFE Sans, medium |
-| `LFESans-SemiBold.woff`, `.woff2` | LFE Sans, semibold |
-| `LFESans-Bold.woff`, `.woff2` | LFE Sans, bold |
-
-Declared in `app/(landing)/landing.css` (the `@font-face` rules near the top). `Inter-var-latin.woff2` is Inter, not Family, and is used by the app and the landing.
+The template typefaces (Family, LFE Sans) are no longer used: the landing page uses Figtree from Google Fonts (`next/font`, self-hosted at build). `Inter-var-latin.woff2` is Inter.
 
 ## Images (`public/assets/`, `public/media/`)
 

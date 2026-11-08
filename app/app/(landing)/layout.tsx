@@ -1,6 +1,10 @@
 import type { Metadata, Viewport } from "next";
 import { LandingProviders } from "@/components/landing/LandingProviders";
+import { Figtree } from "next/font/google";
 import "./landing.css";
+
+// Figtree from Google Fonts, served from our own host at build time: it replaces the template's own typeface.
+const figtree = Figtree({ subsets: ["latin"], display: "swap", variable: "--font-figtree" });
 
 // A root layout of its own: the landing uses the Family template's global stylesheet (resets on *, html and body), and
 // the app uses its own. Two root layouts are two separate documents, so neither stylesheet can reach the other's pages.
@@ -18,7 +22,7 @@ export const viewport: Viewport = { themeColor: "#FFFFFF", width: "device-width"
 
 export default function LandingLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" className={figtree.variable}>
       <body>
         <LandingProviders>{children}</LandingProviders>
       </body>
