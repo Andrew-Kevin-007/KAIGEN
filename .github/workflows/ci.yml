@@ -71,6 +71,9 @@ jobs:
           cache: npm
           cache-dependency-path: scripts/package-lock.json
       - run: npm ci
+      # predeploy imports ../jobs/src/verify.mjs, which needs jobs/'s own dependencies.
+      - run: npm ci
+        working-directory: jobs
       - run: node --test *.test.mjs
 
   app:
