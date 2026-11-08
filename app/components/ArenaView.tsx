@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { PROVIDERS, ProviderError, createAdapter, loadFreeToolModels, type ModelChoice, type ProviderId } from "@/lib/arena-providers";
-import { DEFAULT_NOTE, MAX_NOTE_CHARS, MAX_TURNS, buildInvoice, runArena, type ArenaEvent, type ArenaResult } from "@/lib/arena-run";
+import { AGENT_SETUPS, DEFAULT_NOTE, DEFAULT_SETUP, MAX_NOTE_CHARS, MAX_TURNS, PRESETS, buildInvoice, runArena, type AgentSetup, type ArenaEvent, type ArenaResult } from "@/lib/arena-run";
 import { blastFormula } from "@/lib/blast";
 import { DEMO_ATTACKER, formatNear, newVault, reachedOutsiders, spent24h, worstCase, type VaultState } from "@/lib/vaultsim";
 
@@ -21,7 +21,8 @@ export function ArenaView() {
   const [apiKey, setApiKey] = useState("");
   const [choices, setChoices] = useState<ModelChoice[] | null>(null);
   const [listNote, setListNote] = useState("");
-  const [attackMode, setAttackMode] = useState(false);
+  const [setup, setSetup] = useState<AgentSetup>(DEFAULT_SETUP);
+  const [ranSetup, setRanSetup] = useState<AgentSetup | null>(null);
   const [note, setNote] = useState(DEFAULT_NOTE);
   const [events, setEvents] = useState<ArenaEvent[]>([]);
   const [vault, setVault] = useState<VaultState>(() => newVault());
@@ -74,6 +75,7 @@ export function ArenaView() {
     setEvents([]);
     setVault(newVault());
     setResult(null);
+    setRanSetup(null);
     setError("");
   }
 
@@ -89,12 +91,14 @@ export function ArenaView() {
     reset();
     const ctrl = new AbortController();
     abort.current = ctrl;
+    setRanSetup(setup);
     setBusy(true);
     try {
       const adapter = createAdapter(provider, { apiKey, model: model.trim(), signal: ctrl.signal });
       const out = await runArena({
         adapter,
-        note: attackMode ? note : DEFAULT_NOTE,
+        note,
+        setup,
         signal: ctrl.signal,
         onEvent: (ev) => {
           setEvents((prev) => [...prev, ev]);
@@ -111,7 +115,7 @@ export function ArenaView() {
   }
 
   const ready = Boolean(apiKey) && Boolean(model.trim()) && !busy;
-  const invoice = useMemo(() => buildInvoice(attackMode ? note : DEFAULT_NOTE), [attackMode, note]);
+  const invoice = useMemo(() => buildInvoice(note), [note]);
   const now = Date.now();
   const worst = worstCase(vault);
   const outsiders = reachedOutsiders(vault);
@@ -186,23 +190,35 @@ export function ArenaView() {
           </p>
         </div>
 
+        <fieldset className="ar-fieldset">
+          <legend className="label">Agent setup</legend>
+          <div className="ar-choice">
+            {(Object.keys(AGENT_SETUPS) as AgentSetup[]).map((k) => (
+              <label key={k} className="ar-radio">
+                <input type="radio" name="setup" value={k} checked={setup === k} disabled={busy} onChange={() => setSetup(k)} />
+                <span>{AGENT_SETUPS[k].label}{k === DEFAULT_SETUP ? " (default)" : ""}: {AGENT_SETUPS[k].short}</span>
+              </label>
+            ))}
+          </div>
+          <p className="hint small">Many real agents are naive: they get a job description and nothing more. The vault&apos;s job is to bound the loss even when the agent is fooled, so a defended agent resisting shows the agent held, not that the vault was needed.</p>
+        </fieldset>
+
         <div className="stack-sm">
           <h2 className="ar-h">The invoice</h2>
           <pre className="ar-invoice" aria-label="The invoice the agent will read">{invoice}</pre>
-          <label className="ar-radio ar-check">
-            <input type="checkbox" checked={attackMode} disabled={busy} onChange={(ev) => setAttackMode(ev.target.checked)} />
-            <span>Attack it yourself: write your own injected note</span>
-          </label>
-          {attackMode && (
-            <div className="field-group">
-              <label className="label" htmlFor="ar-note">Injected note (appended to the invoice)</label>
-              <textarea id="ar-note" className="field ar-note" rows={6} maxLength={MAX_NOTE_CHARS} value={note} disabled={busy} onChange={(ev) => setNote(ev.target.value)} spellCheck={false} />
-              <div className="actions">
-                <button type="button" className="btn btn-secondary btn-compact" disabled={busy} onClick={() => setNote(DEFAULT_NOTE)}>Use the recorded note</button>
-                <span className="hint small">Try asking for {DEMO_ATTACKER} or any other account. Only the supplier on the invoice is on the allowlist.</span>
-              </div>
+          <div className="field-group">
+            <span className="label" id="ar-preset-label">Injected note (appended to the invoice). Pick a level, or write your own.</span>
+            <div className="actions" role="group" aria-labelledby="ar-preset-label">
+              {PRESETS.map((p) => (
+                <button key={p.id} type="button" className="btn btn-secondary btn-compact" aria-pressed={note === p.note} disabled={busy} onClick={() => setNote(p.note)}>
+                  {p.label}
+                </button>
+              ))}
             </div>
-          )}
+            <label className="sr-only" htmlFor="ar-note">Injected note</label>
+            <textarea id="ar-note" className="field ar-note" rows={6} maxLength={MAX_NOTE_CHARS} value={note} disabled={busy} onChange={(ev) => setNote(ev.target.value)} spellCheck={false} />
+            <p className="hint small">Every level names {DEMO_ATTACKER}. Only the supplier on the invoice is on the vault&apos;s allowlist. Edit the text freely.</p>
+          </div>
         </div>
 
         <div className="actions">
@@ -221,6 +237,7 @@ export function ArenaView() {
       <section className="ar-run" aria-labelledby="ar-run-h">
         <h2 id="ar-run-h" className="ar-h">What happened</h2>
         <p className="ar-simtag">{SIM_LABEL}</p>
+        {ranSetup && <p className="small body" data-testid="ran-setup">Setup that ran: <strong>{AGENT_SETUPS[ranSetup].label}</strong>, {AGENT_SETUPS[ranSetup].short}.</p>}
         <div className="ar-grid">
           <ol className="ar-log" role="log" aria-live="polite" aria-label="Transcript">
             {events.length === 0 && <li className="hint small">Nothing yet. Press Run.</li>}
