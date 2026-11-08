@@ -1,0 +1,79 @@
+/* The site's single footer (components/SiteFooter.tsx). Self-contained, so it looks the same under the landing page's stylesheet
+   and the app's. Text colours: #4b4a47 links (7.9:1 on white), #6b6a66 small print (5.3:1), headings and wordmark #111. */
+.sf {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  max-width: 37rem;
+  margin: 2.75rem 0 0;
+  padding: 2rem 0 0;
+  border-top: 1px solid rgba(0, 0, 0, 0.14);
+  font-family: inherit;
+  text-align: left;
+}
+.sf-logo {
+  font-size: 20px;
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  color: #111;
+  text-decoration: none;
+  width: max-content;
+}
+.sf-cols {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(3, auto);
+  justify-content: start;
+  gap: 2.5rem;
+}
+.sf-cols ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.sf h5 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  line-height: 1.3;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: #111;
+}
+.sf-cols a {
+  font-size: 14px;
+  line-height: 1.4;
+  letter-spacing: -0.01em;
+  color: #4b4a47;
+  text-decoration: none;
+}
+.sf-cols a:hover {
+  color: #111;
+  text-decoration: underline;
+}
+.sf a:focus-visible {
+  outline: 2px solid #111;
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+.sf-legal {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.4;
+  color: #6b6a66;
+}
+@media (max-width: 768px) {
+  .sf-cols {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 2rem;
+  }
+}
+/* In the app layout the footer sits at the foot of every page, with room under it. */
+.sf-wrap {
+  width: 100%; /* the app's body is a flex column; without this the wrapper shrinks to the footer's width and centres it */
+  padding-bottom: 4.5rem;
+}

@@ -56,6 +56,11 @@ export function openCsp(isDev: boolean): string {
     `script-src 'self' 'unsafe-inline' https:${isDev ? " 'unsafe-eval'" : ""}`,
     "style-src 'self' 'unsafe-inline' https:",
     "img-src 'self' data: blob: https:",
+    // The landing page (merged into this app) plays its own videos and loads its own fonts from this origin. Both were
+    // already allowed through default-src 'self'; they are named here so the landing's needs are visible and so a later
+    // change to default-src cannot silently widen them. No new origin, no data: or https: for either.
+    "media-src 'self'",
+    "font-src 'self'",
     `connect-src 'self' https:${isDev ? " ws://localhost:* http://localhost:*" : ""}`,
     "frame-src https:",
     "frame-ancestors 'none'",

@@ -8,7 +8,6 @@ import { LINKS, fullLoad } from "@/lib/nav";
 import { NETWORK } from "@/lib/network";
 import { useWallet } from "@/lib/wallet";
 
-const SITE = process.env.NEXT_PUBLIC_SITE_URL ?? "/";
 const short = (id: string) => (id.length > 18 ? `${id.slice(0, 4)}...${id.slice(-4)}` : id);
 
 interface NavLinkProps {
@@ -89,7 +88,7 @@ export function Nav() {
     <div className="site-header">
       <div className="container" ref={root}>
         <header className="nav-row">
-          <a href={SITE} className="wordmark" aria-label="KAIGEN, home">
+          <a href="/" className="wordmark" aria-label="KAIGEN, home">
             KAIGEN
           </a>
           <nav className="nav-links" id="main-nav" aria-label="Main" data-open={menu}>

@@ -1,0 +1,251 @@
+/*
+ * Samurai on the right of the landing hero: public/media/ink/samurai.png, an ink drawing (black, with a red sun and blossom)
+ * whose paper was made transparent. It is larger than the hero and runs off the screen's right edge and the hero's bottom,
+ * so it is cropped by the page like the first reference, not floated whole in the middle of the space.
+ * The hero's own layout (centred headline, paragraph, button) is unchanged.
+ */
+.samurai-backdrop {
+  position: relative;
+  isolation: isolate;
+  /* crop only at the screen's side; the figure may run past the hero's bottom, so nothing ends on a straight line */
+  overflow-x: clip;
+  overflow-y: visible;
+  min-height: 640px;
+}
+
+.samurai-backdrop__art {
+  position: absolute;
+  top: 0;
+  bottom: -7%;
+  right: -3%;
+  z-index: -1;
+  display: flex;
+  align-items: flex-end;
+  pointer-events: none;
+}
+
+.samurai-backdrop__art img {
+  display: block;
+  /* wide, but never reaching into the centred words (about 440px wide) */
+  width: min(520px, calc(50vw - 170px));
+  height: auto;
+  max-width: none;
+  user-select: none;
+}
+
+/* Narrow screens: the samurai stays to the right, behind the words, kept quiet so the text reads. */
+@media (max-width: 860px) {
+  .samurai-backdrop {
+    min-height: 0;
+  }
+  .samurai-backdrop__art {
+    right: -14%;
+    bottom: auto;
+    opacity: 0.3;
+  }
+  .samurai-backdrop__art img {
+    width: 340px;
+  }
+}
+
+/* The ink drawings (components/landing/InkArt.tsx): centred, never wider than their own maxWidth, no hard-pixel scaling. */
+.ink-art {
+  margin: 12px auto;
+  width: 100%;
+}
+.ink-art img {
+  display: block;
+  width: 100%;
+  height: auto;
+  user-select: none;
+}
+/* A drawing that was cropped out of a bigger picture (the blossom branch): its cut edges thin out instead of ending in a line. */
+.ink-art--soft img {
+  -webkit-mask-image: linear-gradient(to right, #000 80%, transparent), linear-gradient(to bottom, transparent, #000 7%, #000 93%, transparent);
+  mask-image: linear-gradient(to right, #000 80%, transparent), linear-gradient(to bottom, transparent, #000 7%, #000 93%, transparent);
+  -webkit-mask-composite: source-in;
+  mask-composite: intersect;
+}
+
+/* Closing call to action: the ink katana (public/media/katana-ink.png) stands at the right of the caption, its dark
+   ground resting on the footer. The image is transparent where the drawing is white, and the ground at its lower left
+   is already broken into specks, so nothing ends on a straight edge. Its black is rgb(6, 6, 9), the footer's black. */
+section.dhshTJ {
+  min-height: 620px;
+  background: #fff; /* the same white as the page above it, so there is no band of colour between them */
+}
+section.dhshTJ > div:first-child {
+  position: relative;
+  z-index: 1;
+}
+.cta-ink {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 0;
+  display: flex;
+  align-items: flex-end;
+  pointer-events: none;
+}
+.cta-ink img {
+  display: block;
+  height: 100%;
+  width: auto;
+  max-width: none;
+  user-select: none;
+}
+@media (max-width: 768px) {
+  section.dhshTJ {
+    min-height: 0;
+    padding-bottom: 0 !important;
+  }
+  /* Stacked under the words, flush right so the ground runs off the screen's edge, and flush with the footer. */
+  .cta-ink {
+    position: relative;
+    justify-content: flex-end;
+    margin-top: 16px;
+  }
+  .cta-ink img {
+    height: 400px;
+    width: auto;
+  }
+}
+
+
+/* Claim -> Kaigen pill (mechanism, part two): plain markup, even spacing, the page's blue. */
+.state-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 26px;
+  border-radius: 999px;
+  background: rgba(196, 18, 31, 0.08);
+  color: #c4121f;
+  font: 600 20px/1 "LFE Sans", Inter, sans-serif;
+  letter-spacing: -0.4px;
+  white-space: nowrap;
+}
+
+/* Era panels (components/landing/EraPanels.tsx): the explanation under 改元, in the page's own pieces. */
+.era-panels {
+  width: 100%;
+  max-width: 1040px;
+  margin: 8px auto 0;
+  padding: 0 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 56px;
+}
+.era-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 28px 40px;
+}
+.era-step {
+  display: flex;
+  gap: 18px;
+  align-items: flex-start;
+}
+.era-seal {
+  flex: none;
+  width: 56px;
+  height: 56px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  background: #c4121f;
+  color: #fff;
+  font: 700 30px/1 "Yu Gothic", "Hiragino Sans", "Noto Sans JP", sans-serif;
+}
+.era-step__title,
+.era-card__title {
+  margin: 0 0 4px;
+  font: 600 20px/28px "LFE Sans", Inter, sans-serif;
+  letter-spacing: -0.4px;
+  color: #111;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.era-step__text,
+.era-card__text {
+  margin: 0;
+  font: 400 17px/26px Inter, sans-serif;
+  color: #4b4a47;
+}
+.era-chip {
+  font: 500 12px/1 Inter, sans-serif;
+  letter-spacing: 0.02em;
+  color: #c4121f;
+  border: 1px dashed #c4121f;
+  padding: 4px 8px;
+}
+.era-cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 24px;
+}
+@media (max-width: 960px) {
+  .era-steps { grid-template-columns: 1fr; }
+  .era-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+
+
+/* FAQs: the lily drawing stands behind the whole section. It is drawn light enough that the questions stay easy to read
+   (the ink is about 5:1 against the text at this strength), and runs past the section's top and bottom with no straight edge. */
+.faq-backdrop {
+  position: absolute;
+  top: -14%;
+  bottom: -14%;
+  right: 0;
+  z-index: -1;
+  display: flex;
+  align-items: center;
+  pointer-events: none;
+}
+.faq-backdrop img {
+  display: block;
+  height: 100%;
+  width: auto;
+  max-width: none;
+  opacity: 0.22;
+  user-select: none;
+}
+@media (max-width: 768px) {
+  /* keep it inside the screen: right-aligned, never wider than the section */
+  .faq-backdrop {
+    right: 0;
+    max-width: 100%;
+    overflow: hidden;
+    justify-content: flex-end;
+  }
+  .faq-backdrop img {
+    max-width: 100%;
+    object-fit: contain;
+    object-position: right center;
+  }
+}
+
+/* Navbar as frosted glass: the page shows through, blurred and slightly saturated. 72% white keeps the dark text above
+   AA contrast (about 9:1) even over the blackest ink. Without backdrop-filter support it falls back to solid white. */
+.glass-nav {
+  background: rgba(255, 255, 255, 0.72);
+  -webkit-backdrop-filter: saturate(180%) blur(22px);
+  backdrop-filter: saturate(180%) blur(22px);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass-nav {
+    background: #fff;
+  }
+}

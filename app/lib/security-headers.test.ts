@@ -48,6 +48,23 @@ test("APP-1: /migrate is isolated from other windows and other origins, and gets
   assert.equal(header(open, "Cross-Origin-Opener-Policy"), undefined, "wallet popups need window.opener on open pages");
 });
 
+test("the open policy lets the landing play its own videos and load its own fonts, from this origin only, and never allows eval", () => {
+  for (const dev of [false, true]) {
+    const csp = openCsp(dev);
+    assert.equal(directive(csp, "media-src"), "media-src 'self'");
+    assert.equal(directive(csp, "font-src"), "font-src 'self'");
+    assert.equal(/unsafe-eval/.test(csp), dev, "unsafe-eval only in development, for hot reload");
+  }
+});
+
+test("the landing page (/), the start page and the era page all get the open policy; /migrate still does not", () => {
+  const open = headerRules(false).find((r) => r.source !== "/migrate");
+  assert.ok(open);
+  const source = new RegExp(`^${open.source}$`);
+  for (const path of ["/", "/start", "/omens", "/vault/create", "/bounty", "/fonts/Family-Regular.woff2", "/media/kaigen-hero.mp4"]) assert.equal(source.test(path), true, path);
+  assert.equal(source.test("/migrate"), false);
+});
+
 test("APP-1: nonces are unique and long enough", () => {
   const a = newNonce();
   const b = newNonce();

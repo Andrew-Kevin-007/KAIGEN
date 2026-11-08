@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { NotDeployed } from "@/components/NotDeployed";
 import { WalletError } from "@/components/WalletError";
+import { Walkthrough } from "@/components/Walkthrough";
 import { isAccountId } from "@/lib/account";
 import { describedBy } from "@/lib/aria";
 import { DEPLOYMENTS } from "@/lib/config";
@@ -11,6 +12,7 @@ import { errorText } from "@/lib/errors";
 import { latestOnly } from "@/lib/latest";
 import { KIZASHI_ID, hasContract, isEra, rpcNetworkProblem, view, yoctoToNear, type Era, type QueuedWithdrawal, type VaultConfig } from "@/lib/near";
 import { NETWORK } from "@/lib/network";
+import { accountFromSearch } from "@/lib/onboarding";
 import { isMissingView, lockdownOf, vaultShapeProblem } from "@/lib/vault-shape";
 import { useWallet } from "@/lib/wallet";
 
@@ -97,9 +99,23 @@ export default function VaultPage() {
     }
   }
 
-  async function lookup(e: FormEvent) {
+  function lookup(e: FormEvent) {
     e.preventDefault();
-    const id = account.trim().toLowerCase();
+    void runLookup(account);
+  }
+
+  // /start (and any link) can open this page with ?account=<vault>: fill the box and read it once.
+  useEffect(() => {
+    const id = accountFromSearch(window.location.search);
+    if (!id) return;
+    setAccount(id);
+    void runLookup(id);
+    // Once, on arrival: runLookup only uses state that never changes identity (latestOnly handles and refs).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function runLookup(raw: string) {
+    const id = raw.trim().toLowerCase();
     // A new lookup replaces the old one: its answer, its network calls and the trip state that belonged to its vault.
     inFlight.current?.abort();
     const current = lookups.begin();
@@ -347,6 +363,8 @@ export default function VaultPage() {
           ) : null}
         </div>
       )}
+
+      <Walkthrough />
     </div>
   );
 }
