@@ -542,19 +542,22 @@ Line numbers were removed. They moved when v3 was added. Use function names. For
 kaigen/
 ├── contracts/
 │   ├── kizashi/          omen registry: claim, era, bounty, usdc_epoch (src/lib.rs, src/tests.rs)
-│   └── mamori/           vault guard: daily keys, send_small, check, attest, queue, strikes, trip
-│       └── src/tests/    loss_bound, attest_check, check_view, events, admin_surface
+│   └── mamori/           vault guard: daily keys, send_small, check, attest, queue, strikes, sweep_to_safe, policy keys
+│       └── src/tests/    loss_bound, attest_check, check_view, events, admin_surface, callback_orders, revoked_cap, policy, sweep, demo_story
 ├── scripts/              omen derivation and claim signing; predeploy checks (omens.mjs, claim.mjs, predeploy.mjs)
 ├── jobs/
-│   ├── src/              bin.mjs (CLI), cage.mjs (cage-check), judge, testnet, firetest, verify, keeper, watchers, mainnet (dry-run)
+│   ├── src/              bin.mjs (CLI and command list), cage.mjs (cage-check), injectdemo.mjs (inject-demo), counterparty.mjs,
+│   │                     testnet, prodvault, plantkey, stretchdrill, globalcontract, firetest, judge, keeper, watchers, mainnet (dry-run) and helpers
 │   └── test/             node:test suites for jobs/
 ├── tests-integration/    Rust integration tests on a nearcore sandbox
 │   ├── tests/            burn_key, in_flight_window, cage_check, attacks/ (nine attacks, M8 measurements)
 │   ├── fixtures/         ft-mock (NEP-141 look-alike)
 │   └── sandbox/          start.ps1, stop.ps1 (WSL)
-├── app/                  Next.js app: /, /bounty, /migrate, /vault, /vault/create, top-up API routes
-├── fire-tests/           published drill records, v2 (0001.json to 0004.json)
-├── docs/                 PLAN-submission-and-mainnet.md, ARCHITECTURE-REVIEW.md, v3/ (design and results)
+├── app/                  Next.js app, one deployment: / (landing), /start, /omens, /vault, /vault/create, /bounty, /migrate,
+│                         /xray (read any account's keys and cage conditions), /arena (bring your own LLM, simulated vault), top-up API routes
+├── fire-tests/           published drill records: v2 (0001 to 0004) and the final testnet build (0005, 0006)
+├── docs/                 PLAN-submission-and-mainnet.md, ARCHITECTURE-REVIEW.md, v3/ (design, results, evidence/)
+├── .github/workflows/    ci.yml: contracts, jobs, scripts and app, no secrets
 ├── out/                  built wasm (created by make build; not committed)
 ├── deployments.example.json
 ├── Makefile              test, build, verify, verify-prelock, predeploy
