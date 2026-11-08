@@ -25,6 +25,8 @@
 //              signed by the vault's ML-DSA admin seed; prints the cage-check command to run next (dry run unless --yes)
 //   stretchdrill  testnet only: the stretch items (safe account, sweep_to_safe, policy proposals) on the DRILL rehearsal vault of
 //              KAIGEN_TESTNET_DIR/state.json, signed by its ML-DSA admin seed; PASS/FAIL per step with tx hashes (dry run unless --yes)
+//   inject-demo  testnet only: an accounts-payable agent reads an invoice with an injected instruction and the vault decides
+//              (--model mock|anthropic|openrouter, --model-id <id>, --dry; anthropic reads ANTHROPIC_API_KEY, openrouter reads OPENROUTER_API_KEY and needs --model-id). See injectdemo.mjs
 //
 // Config: deployments.json (path in KAIGEN_DEPLOYMENTS, default ../deployments.json). Secrets only
 // come from the environment or files outside the repo; nothing secret is read from deployments.json.
@@ -38,6 +40,7 @@ import { CAGE_USAGE, cageCheck, CageUsage, exitCodeOf, parseCageArgs, renderCage
 import { adminCanceller, agentCaller, classicalSubmitter, loadDeployerKey, makeDrillChain, makeSendTrip } from "./chain.mjs";
 import { addReport, assessCounterparty, COUNTERPARTY_USAGE, CounterpartyUsage, exitCodeOf as counterpartyExitCode, loadBlocklist, looksLikeEvidence, parseCounterpartyArgs, parseReportArgs, renderCounterparty } from "./counterparty.mjs";
 import { renderDemo, runInjectionDemo } from "./demo.mjs";
+import { runInjectCommand } from "./injectdemo.mjs";
 import { mainnetHelp } from "./help.mjs";
 import { judge, renderJudge } from "./judge.mjs";
 import { provision, recycle, rehearse, renderRehearsal, TESTNET_RPC, zeroKey } from "./testnet.mjs";
@@ -149,6 +152,17 @@ const commands = {
     console.log(`
 ${text}`);
     process.exitCode = ok ? 0 : 1;
+  },
+
+  /**
+   * Testnet only: a prompt-injected accounts-payable agent against the vault. --model anthropic or openrouter is a real model (key from
+   * ANTHROPIC_API_KEY or OPENROUTER_API_KEY only); --model mock is a labelled script. Reuses the rehearsal in KAIGEN_TESTNET_DIR. See injectdemo.mjs.
+   */
+  async "inject-demo"() {
+    const log = (e) => console.error(JSON.stringify(e));
+    const r = await runInjectCommand({ argv: process.argv.slice(3), root, evidenceDir: path.join(root, "docs", "v3", "evidence"), log });
+    (r.exitCode === 2 ? console.error : console.log)(r.text);
+    process.exitCode = r.exitCode;
   },
 
   /** Returns a previous testnet run's balances to its funder so the funder can be reused. */
@@ -680,7 +694,7 @@ DRY RUN: nothing was signed or sent. To do it for real (testnet, drill vault, a 
 
 const cmd = process.argv[2];
 if (!commands[cmd]) {
-  console.error("usage: kaigen-jobs hinomi | keeper [--loop] | watch | firetest | demo | testnet | recycle | zerokey [--yes] | judge | verify [--release [--pre-lock]] | cage-check <account> | counterparty <vault> <to> | counterparty-report <account> --reason <text> --evidence <url-or-tx> | globalcontract [publish --wasm <file>] --kizashi <account> [--yes] | prodvault --kizashi <account> --funder-file <file> [--yes] | plant-key <vault> --kind ed25519-full|null-allowance [--remove <publickey>] [--yes] | stretchdrill [--safe <account>] [--yes] | mainnet gates|plan|execute|lock");
+  console.error("usage: kaigen-jobs hinomi | keeper [--loop] | watch | firetest | demo | testnet | inject-demo [--model mock|anthropic|openrouter] [--model-id <id>] [--dry] | recycle | zerokey [--yes] | judge | verify [--release [--pre-lock]] | cage-check <account> | counterparty <vault> <to> | counterparty-report <account> --reason <text> --evidence <url-or-tx> | globalcontract [publish --wasm <file>] --kizashi <account> [--yes] | prodvault --kizashi <account> --funder-file <file> [--yes] | plant-key <vault> --kind ed25519-full|null-allowance [--remove <publickey>] [--yes] | stretchdrill [--safe <account>] [--yes] | mainnet gates|plan|execute|lock");
   process.exit(2);
 }
 commands[cmd]().catch((e) => {

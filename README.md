@@ -1,8 +1,10 @@
 <p align="center"><img src="assets/banner.png" alt="KAIGEN: The Infinite Wave Ledger" width="100%"></p>
 
-# KAIGEN: Keys that retire themselves
+# KAIGEN: don't trust the agent, verify the cage
 
-KAIGEN is an on-chain vault for an AI agent's NEAR account: the agent holds only a function-call key, the contract caps what that key can move in any 24 hours at the cap plus the pending limit (11 times the cap at the default setting), and after three counted bad requests the contract schedules a DeleteKey for that key. [LOSS-BOUND.md section 1 and line 23; ATTEST-CHECK.md section 4; ATTACK-RESULTS.md section 11.1]
+Give an AI agent a NEAR account and a prompt injection can talk it into emptying it. KAIGEN is a vault where the agent holds only a limited key, the most it can lose in any 24 hours is a written-down, property-tested number, and after three refused attacks the vault itself deletes the agent's key from the account. The admin key can be post-quantum (ML-DSA-65, testnet). You do not have to take our word for any of it: `cage-check` reads public chain data and tells you whether the cage holds.
+
+In detail: KAIGEN is an on-chain vault for an AI agent's NEAR account: the agent holds only a function-call key, the contract caps what that key can move in any 24 hours at the cap plus the pending limit (11 times the cap at the default setting), and after three counted bad requests the contract schedules a DeleteKey for that key. [LOSS-BOUND.md section 1 and line 23; ATTEST-CHECK.md section 4; ATTACK-RESULTS.md section 11.1]
 
 **Status: testnet only.** No outside audit. Nothing has run on mainnet. Sandbox numbers come from one local single-validator node, with an ed25519 admin key standing in for the ML-DSA-65 admin. [ROADMAP.md section 3; ATTACK-RESULTS.md section 0]
 
