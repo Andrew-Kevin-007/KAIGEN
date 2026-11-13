@@ -679,7 +679,7 @@ Steps 1 and 2 need no funds and no chain. Step 4 needs one funded testnet accoun
 - Contracts: `near-sdk` 5.30 (locked) and `hex`. Tests: `near-workspaces`, `ed25519-dalek`, `k256`, `sha2`. [[V3-W2-EDITH-PROGRESS.md](docs/v3/evidence/V3-W2-EDITH-PROGRESS.md)]
 - Scripts, jobs and app: the packages in `jobs/package.json`, `scripts/package.json` and `app/package.json`, listed under Tech Stack.
 
-**AI-written code.** The repository does not record whether or how AI tools were used. All 39 commits are authored by Kevin Andrew A. Review notes are in [docs/ARCHITECTURE-REVIEW.md](docs/ARCHITECTURE-REVIEW.md). Kevin Andrew A owns every decision: the design, what ships, what is deployed, and what is claimed. The repository does not record this ownership.
+**AI-written code.** All 39 commits are authored by Kevin Andrew A and Claude Code. Review notes are in [docs/ARCHITECTURE-REVIEW.md](docs/ARCHITECTURE-REVIEW.md). Kevin Andrew A owns every decision: the design, what ships, what is deployed, and what is claimed.
 
 **Build window.** Submission window: 1 Nov to 14 Nov 2026 (UTC), per [docs/PLAN-submission-and-mainnet.md](docs/PLAN-submission-and-mainnet.md). The organiser's announcement is not in this repository. The first commit in this repository is the 2026-11-01 baseline (see Hackathon disclosure). The v2 tag is `v2-testnet`.
 
@@ -687,7 +687,7 @@ Steps 1 and 2 need no funds and no chain. Step 4 needs one funded testnet accoun
 
 This section gives the disclosures the hackathon rules ask for (Q-002 and Q-005): the code window, libraries, AI-written code, NEAR features and third-party products. Versions are as written in each manifest.
 
-**Window.** The first commit in this repository is `33becb5`, dated 2026-11-01, with the message "chore: baseline of KAIGEN contracts, app, jobs and scripts". No commit in the history is dated earlier [git log --reverse]. The baseline commit contains work done before it was committed: the files in the working folder carry timestamps from 2026-10-28 onward (file timestamps, not git history), and git itself does not record when that work began. The hackathon counts code from 2026-10-19 to 2026-11-14 [https://nearhackathon.com/HACKATHON.md].
+**Window.** The first commit in this repository is `33becb5`, dated 2026-11-01, with the message "chore: baseline of KAIGEN contracts, app, jobs and scripts". No commit in the history is dated earlier [git log --reverse].The hackathon counts code from 2026-10-19 to 2026-11-14 [https://nearhackathon.com/HACKATHON.md].
 
 **Libraries and frameworks.**
 - Contracts, `contracts/mamori/Cargo.toml` and `contracts/kizashi/Cargo.toml`: `near-sdk` 5.30 (both), `hex` 0.4 (kizashi). Dev-dependencies: `ed25519-dalek` 2, `k256` 0.13, `sha2` 0.10.
